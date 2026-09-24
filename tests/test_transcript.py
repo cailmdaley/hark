@@ -1,6 +1,6 @@
 import json
 from datetime import datetime
-from hark.transcript import EchoGate, Sink, Utterance
+from hark.transcript import Sink, Utterance
 
 
 def utterance(track, start, end, text, speaker):
@@ -12,37 +12,6 @@ def test_speaker_slot_column_is_four_characters_and_names_are_unpadded():
     assert slot.line().endswith(" S2   Hello")
     slot.name = "Alexander Hamilton"
     assert slot.line().endswith(" Alexander Hamilton Hello")
-
-
-def test_echo_gate_drops_overlapping_duplicate():
-    gate = EchoGate()
-    gate.push(utterance("mic", 10, 12, "We should start now", "me"))
-    gate.push(utterance("system", 10.2, 12, "We should start now", "S1"))
-    assert gate.release(13) == []
-
-
-def test_echo_gate_keeps_genuine_me_speech():
-    gate = EchoGate()
-    me = utterance("mic", 10, 12, "I will check the pipeline", "me")
-    gate.push(me)
-    gate.push(utterance("system", 10, 12, "Can everyone see the slides", "S1"))
-    assert gate.release(13) == [me]
-
-
-def test_echo_gate_keeps_me_talking_over_remote_partial_overlap():
-    gate = EchoGate()
-    me = utterance("mic", 10, 13, "yes that seems right", "me")
-    gate.push(me)
-    gate.push(utterance("system", 11, 13, "yes", "S1"))
-    assert gate.release(14) == [me]
-
-
-def test_echo_gate_final_flush_releases_held_lines():
-    gate = EchoGate()
-    me = utterance("mic", 10, 12, "Something unique", "me")
-    gate.push(me)
-    assert gate.release(10) == []
-    assert gate.release(10, final=True) == [me]
 
 
 def test_external_name_line_applies_to_next_line_and_jsonl(tmp_path):

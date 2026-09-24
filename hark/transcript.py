@@ -19,9 +19,11 @@ DIAR_MODEL = "mlx-community/Nemotron-3-Diarization"
 
 
 def load_models(diar_preset="low"):
+    import mlx.core as mx
     from mlx_audio.stt import load as load_asr
     from mlx_audio.vad import load as load_diarization
 
+    mx.set_cache_limit(512 * 1024**2)
     diar = load_diarization(DIAR_MODEL, strict=True)
     diar.set_streaming_config(diar_preset)
     asr = load_asr(ASR_MODEL)
@@ -103,13 +105,15 @@ class Track:
         for speaker, pending in self.pending.items():
             if not pending.tokens:
                 continue
-            last = self._wall_time(pending.tokens[-1].end)
             quiet = self.processed - pending.tokens[-1].end
             span = pending.tokens[-1].end - pending.tokens[0].start
-            taken = any(track._took_turn(self, speaker, other_speaker, last)
-                        for track in tracks for other_speaker in track.pending)
-            if force or taken:
+            turn_cuts = [cut for track in tracks for other_speaker in track.pending
+                         if (cut := track._turn_cut(self, speaker, other_speaker)) is not None]
+            turn_cut = min(turn_cuts, default=None)
+            if force:
                 cuts[speaker] = len(pending.tokens)
+            elif turn_cut is not None:
+                cuts[speaker] = turn_cut
             elif span >= self.max_len:
                 cuts[speaker] = _monologue_cut(pending.tokens)
             elif quiet >= self.gap:
@@ -126,13 +130,24 @@ class Track:
                 out.append(u)
         return out
 
-    def _took_turn(self, own_track, own_speaker, other_speaker, after):
+    def _turn_cut(self, own_track, own_speaker, other_speaker):
         if self is own_track and other_speaker == own_speaker:
-            return False
-        tokens = self.pending[other_speaker].tokens
-        after_tokens = [token for token in tokens if self._wall_time(token.start) >= after]
-        return (len(after_tokens) > 1 and
-                self._wall_time(after_tokens[-1].end) - self._wall_time(after_tokens[0].start) >= 1.0)
+            return None
+        own = own_track.pending[own_speaker].tokens
+        other = self.pending[other_speaker].tokens
+        if not own:
+            return None
+        for i, first in enumerate(other):
+            start = self._wall_time(first.start)
+            if not any(own_track._wall_time(token.end) <= start for token in own):
+                continue
+            run = other[i:]
+            if len(run) > 1 and self._wall_time(run[-1].end) - start >= 1.0:
+                cut = next((j for j, token in enumerate(own)
+                            if own_track._wall_time(token.start) >= start), len(own))
+                if cut:
+                    return cut
+        return None
 
     def _wall_time(self, seconds):
         return self.t0.timestamp() + seconds
@@ -159,7 +174,8 @@ def _monologue_cut(tokens):
     midpoint = (tokens[0].start + tokens[-1].end) / 2
     pauses = [(tokens[i].start - tokens[i - 1].end, i) for i in boundaries
               if i and tokens[i].start >= midpoint]
-    return max(pauses)[1] if pauses else (boundaries[-1] if boundaries else len(tokens))
+    cut = max(pauses)[1] if pauses else (boundaries[-1] if boundaries else len(tokens))
+    return cut or len(tokens)
 
 
 def _words(text):
@@ -172,34 +188,64 @@ def numbered(speaker):
 
 
 class EchoGate:
-    """Hold mic utterances until system audio has passed them by one second."""
+    """Hold mic tokens until system ASR has caught up, then remove echoed runs."""
 
-    def __init__(self, threshold=0.6, margin=1.0):
-        self.threshold, self.margin = threshold, margin
-        self.pending, self.system = [], []
+    def __init__(self, lag=1.0, window=1.5):
+        self.lag, self.window = lag, window
+        self.pending, self.system, self.seen = [], [], set()
 
-    def push(self, utterance):
-        if utterance.track == "system":
-            self.system.append(utterance)
-            return [utterance]
-        self.pending.append(utterance)
-        return []
+    def capture(self, mic, system):
+        for token in (token for pending in system.pending.values() for token in pending.tokens):
+            if id(token) not in self.seen:
+                self.system.append(token)
+                self.seen.add(id(token))
+        for speaker, pending in mic.pending.items():
+            self.pending.extend((speaker, token) for token in pending.tokens)
+            pending.tokens.clear()
 
-    def release(self, watermark, final=False):
-        ready, waiting = [], []
-        for me in self.pending:
-            if not final and watermark < me.wall.timestamp() + (me.end - me.start) + self.margin:
-                waiting.append(me)
-                continue
-            start, end = me.wall_span
-            overlapping = [s for s in self.system if s.wall_span[0] <= end and s.wall_span[1] >= start]
-            mine, theirs = _words(me.text), set(_words(" ".join(s.text for s in overlapping)))
-            if mine and sum(word in theirs for word in mine) / len(mine) >= self.threshold:
-                log(f'echo: dropped me "{me.text}"')
+    def release(self, mic, watermark, final=False):
+        ready, waiting, dropped = [], [], []
+        for speaker, token in self.pending:
+            if not final and watermark < mic._wall_time(token.end) + self.lag:
+                waiting.append((speaker, token))
             else:
-                ready.append(me)
+                ready.append((speaker, token))
         self.pending = waiting
-        return ready
+        times = [(mic._wall_time(token.start), mic._wall_time(token.end), _words(token.text))
+                 for token in self.system]
+        keep = []
+        i = 0
+        while i < len(ready):
+            speaker, token = ready[i]
+            words = _words(token.text)
+            matched = words and _echo_match(token, times, mic, self.window)
+            run = [(speaker, token)]
+            if matched:
+                j = i + 1
+                while j < len(ready) and _echo_match(ready[j][1], times, mic, self.window):
+                    run.append(ready[j]); j += 1
+                if len(run) >= 2:
+                    dropped.extend(token for _, token in run)
+                    i = j
+                    continue
+            keep.append((speaker, token))
+            i += 1
+        for speaker, token in keep:
+            mic.pending.setdefault(speaker, _Pending()).tokens.append(token)
+        if dropped:
+            log(f"echo: dropped {len(dropped)} mic tokens ({' '.join(t.text for t in dropped).strip()!r})")
+        cutoff = watermark - mic.t0.timestamp() - self.window
+        retained = [token for token in self.system if token.end >= cutoff]
+        self.seen = {id(token) for token in retained}
+        self.system = retained
+        return [token for _, token in keep]
+
+
+def _echo_match(token, system, mic, window):
+    midpoint = (mic._wall_time(token.start) + mic._wall_time(token.end)) / 2
+    words = _words(token.text)
+    return bool(words) and any(word == other and abs(midpoint - (start + end) / 2) <= window
+                               for start, end, theirs in system for word in words for other in theirs)
 
 
 class Sink:
@@ -224,10 +270,12 @@ class Sink:
 
     def poll_names(self):
         self.txt.seek(self.offset)
-        lines = self.txt.readlines()
-        self.offset = self.txt.tell()
+        data = self.txt.read()
+        complete = data.rfind("\n") + 1
+        lines = data[:complete].splitlines()
+        self.offset += complete
         for line in lines:
-            if match := re.fullmatch(r"# (S\d+) = (.+)\n?", line):
+            if match := re.fullmatch(r"# (S\d+) = (.+)", line):
                 self.names[match[1]] = match[2]
 
     def write(self, u):

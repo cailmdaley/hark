@@ -17,7 +17,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from .capture import FileSource, MicSource, SystemSource, log
+from .capture import SAMPLE_RATE, FileSource, MicSource, SystemSource, log
 from .transcript import EchoGate, Sink, Track, flush_tracks, load_models, numbered
 
 HOME = Path(os.environ.get("HARK_DIR", Path.home() / ".hark")).expanduser().resolve()
@@ -29,9 +29,12 @@ def main(argv=None):
         _enroll(argv[1:])
         return 0
     if argv and argv[0] == "name":
-        if len(argv) != 3:
-            raise SystemExit('usage: hark name S1 "Speaker Name"')
-        _name_current(argv[1], argv[2])
+        ap = argparse.ArgumentParser(prog="hark name")
+        ap.add_argument("speaker")
+        ap.add_argument("name")
+        ap.add_argument("--session", type=Path)
+        args = ap.parse_args(argv[1:])
+        _name_current(args.speaker, args.name, args.session)
         return 0
     ap = argparse.ArgumentParser(prog="hark", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -108,10 +111,6 @@ def main(argv=None):
 
     gate = EchoGate() if not (args.room or args.file) else None
 
-    def dispatch(u):
-        for ready in ([u] if gate is None else gate.push(u)):
-            emit(ready)
-
     started = time.monotonic()
     try:
         for src, track in tracks:
@@ -123,18 +122,17 @@ def main(argv=None):
             sink.poll_names()
             busy = False
             for src, track in tracks:
-                samples = src.drain()
+                samples = src.drain(limit=SAMPLE_RATE // 2)
                 if samples.size:
                     busy = True
                     track.feed(samples)
-            for u in flush_tracks(all_tracks):
-                dispatch(u)
             if gate:
-                system_track = tracks[1][1]
-                watermark = (system_track.t0.timestamp() + system_track.processed
-                             if system_track.t0 else float("-inf"))
-                for u in gate.release(watermark):
-                    emit(u)
+                mic_track, system_track = tracks[0][1], tracks[1][1]
+                gate.capture(mic_track, system_track)
+                watermark = system_track._wall_time(system_track.processed)
+                gate.release(mic_track, watermark)
+            for u in flush_tracks(all_tracks):
+                emit(u)
             if args.file and sources[0][0].done.is_set() and not busy and sources[0][0].queue.empty():
                 break
             if not busy:
@@ -144,11 +142,12 @@ def main(argv=None):
             src.stop()
         for src, track in tracks:
             track.feed(src.drain(limit=float("inf")), final=True)
-        for u in flush_tracks(all_tracks, force=True):
-            dispatch(u)
         if gate:
-            for u in gate.release(float("inf"), final=True):
-                emit(u)
+            mic_track, system_track = tracks[0][1], tracks[1][1]
+            gate.capture(mic_track, system_track)
+            gate.release(mic_track, float("inf"), final=True)
+        for u in flush_tracks(all_tracks, force=True):
+            emit(u)
         sink.close(f"ended {datetime.now():%H:%M:%S}")
     audio = max(t.processed for _, t in tracks)
     wall = time.monotonic() - started
@@ -195,13 +194,15 @@ def _enroll(argv):
     log(f"enrolled {args.name}: {len(samples) / 16000:.1f} s → {voice_dir}")
 
 
-def _name_current(speaker, name):
+def _name_current(speaker, name, session=None):
     if not speaker.startswith("S") or not speaker[1:].isdigit():
         raise SystemExit("speaker must be a label such as S1")
-    txt = HOME / "current.txt"
+    txt = session.expanduser().resolve() if session else HOME / "current.txt"
     if not txt.exists():
-        raise SystemExit(f"no live session at {txt}")
+        raise SystemExit(f"no session at {txt}")
     txt = txt.resolve()
+    if any(line.startswith("# ended") for line in txt.read_text().splitlines()):
+        raise SystemExit(f"session has ended: {txt}")
     with txt.open("a") as transcript:
         transcript.write(f"# {speaker} = {name}\n")
     with txt.with_suffix(".jsonl").open("a") as records:
