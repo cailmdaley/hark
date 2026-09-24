@@ -66,6 +66,8 @@ class AudioBuffer:
             self.start += drop / 16000
 
     def slice(self, start, end):
+        if end <= start or end <= self.start or start >= self.start + len(self.samples) / 16000:
+            return self.samples[:0]
         lo = max(0, round((start - self.start) * 16000))
         hi = min(len(self.samples), round((end - self.start) * 16000))
         return self.samples[lo:hi]
@@ -80,27 +82,40 @@ class VoiceMatcher:
         self.threshold, self.margin = threshold, margin
         self.seconds = defaultdict(float)
         self.checked = defaultdict(int)
-        self.segments = defaultdict(lambda: deque())
+        self.clips = defaultdict(lambda: deque())
+        self.segments = self.clips
 
     def finished(self, track, utterance):
         slot = utterance.speaker
         if not slot.startswith("S") or slot in self.sink.names:
             return
-        segments = getattr(utterance, "speech", [(utterance.start, utterance.end)])
-        duration = sum(end - start for start, end in segments)
-        self.seconds[(id(track), slot)] += duration
+        spans = getattr(utterance, "speech", [(utterance.start, utterance.end)])
+        spans = sorted(spans)
+        merged = []
+        for start, end in spans:
+            if merged and start - merged[-1][1] < 0.5:
+                merged[-1] = (merged[-1][0], end)
+            else:
+                merged.append((start, end))
         key = (id(track), slot)
-        for start, end in segments:
-            self.segments[key].append((start, end))
+        clip = self.clips[key]
+        for start, end in merged:
+            self.seconds[key] += end - start
+            audio = track.audio.slice(start - 0.1, end + 0.1)
+            if audio.size:
+                clip.append(audio.copy())
+        while sum(part.size for part in clip) > 15 * 16000:
+            excess = sum(part.size for part in clip) - 15 * 16000
+            if excess >= clip[0].size:
+                clip.popleft()
+            else:
+                clip[0] = clip[0][excess:]
         total = self.seconds[key]
-        target = next((point for point in (5, 10, 20) if self.checked[key] < point <= total), None)
-        if target is None:
+        threshold = 5 if self.checked[key] == 0 else self.checked[key] + 20
+        if total < threshold:
             return
-        self.checked[key] = target
-        cutoff = utterance.end - 15
-        segments = [(max(start, cutoff), end) for start, end in self.segments[key] if end > cutoff]
-        audio = np.concatenate([track.audio.slice(start, end) for start, end in segments])
-        self.segments[key] = deque(segments)
+        self.checked[key] = total
+        audio = np.concatenate(clip) if clip else np.zeros(0, dtype=np.float32)
         if audio.size < 5 * 16000:
             return
         embedding = self.embedder(audio)
