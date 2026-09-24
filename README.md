@@ -69,6 +69,7 @@ The file is the interface.
   utterances use the name and JSONL retains the stable `speaker` slot plus `name`.
 - **Resolve labels**: agents should scan the transcript for `# Sx = name` lines
   and use those mappings for speaker labels, including for earlier utterances.
+- **Enroll a voice**: `uv run hark enroll me --seconds 30` records from the microphone; `--file x.wav` enrolls from audio (the first 30 seconds by default). Voiceprints live in `~/.hark/voices/` (`HARK_DIR` relocates the directory). During diarized tracks, hark names a slot after enough finished speech matches an enrolled voice; the same `# Sx = name` line is used as manual naming, and a manual name is never replaced.
 - **After the meeting**: the session file is the transcript.
 
 Latency presets: `--latency very_low` (0.64 s) or `ultra_low` (0.32 s) trade

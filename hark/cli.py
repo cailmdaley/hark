@@ -25,6 +25,9 @@ HOME = Path(os.environ.get("HARK_DIR", Path.home() / ".hark")).expanduser().reso
 
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "enroll":
+        _enroll(argv[1:])
+        return 0
     if argv and argv[0] == "name":
         if len(argv) != 3:
             raise SystemExit('usage: hark name S1 "Speaker Name"')
@@ -74,6 +77,13 @@ def main(argv=None):
     if not (args.out or args.file):  # a replay never hijacks the live session's link
         _point_current(out)
     sink = Sink(out, f"hark {now:%Y-%m-%d %H:%M} — {what}")
+    import numpy as np
+
+    voices = {path.stem: np.load(path) for path in (HOME / "voices").glob("*.npy")} if (HOME / "voices").exists() else {}
+    from .voice import VoiceMatcher
+
+    matcher = VoiceMatcher(voices, sink) if voices else None
+    tracks_by_name = {track.name: track for _, track in tracks}
     log(f"transcript → {out}")
 
     stop = False
@@ -87,6 +97,9 @@ def main(argv=None):
         signal.signal(sig, on_signal)
 
     def emit(u):
+        sink.poll_names()
+        if matcher:
+            matcher.finished(tracks_by_name[u.track], u)
         sink.write(u)
         try:
             print(u.line(), flush=True)
@@ -140,6 +153,46 @@ def main(argv=None):
     audio = max(t.processed for _, t in tracks)
     wall = time.monotonic() - started
     log(f"done: {audio:.0f} s of audio in {wall:.0f} s (real-time factor {wall / max(audio, 1e-9):.2f})")
+
+
+def _enroll(argv):
+    ap = argparse.ArgumentParser(prog="hark enroll")
+    ap.add_argument("name")
+    ap.add_argument("--seconds", type=float, default=30)
+    ap.add_argument("--file")
+    ap.add_argument("--mic")
+    args = ap.parse_args(argv)
+    if args.seconds <= 0:
+        ap.error("--seconds must be positive")
+    if not args.name or Path(args.name).name != args.name or args.name in {".", ".."}:
+        ap.error("name must be a non-empty filename component")
+    import numpy as np
+    from .voice import Embedder
+
+    if args.file:
+        from mlx_audio.stt.utils import load_audio
+
+        samples = np.asarray(load_audio(args.file, sr=16000), dtype=np.float32).reshape(-1)
+    else:
+        import sounddevice as sd
+
+        samples = sd.rec(round(args.seconds * 16000), samplerate=16000, channels=1,
+                         dtype="float32", device=_device(args.mic), blocking=True).reshape(-1)
+    voice_dir = HOME / "voices"
+    voice_dir.mkdir(parents=True, exist_ok=True)
+    samples = samples[:round(args.seconds * 16000)]
+    if samples.size < 5 * 16000:
+        ap.error("enrollment audio must contain at least 5 seconds")
+    vector = Embedder()(samples)
+    np.save(voice_dir / f"{args.name}.npy", vector)
+    import wave
+
+    with wave.open(str(voice_dir / f"{args.name}.wav"), "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(16000)
+        wav.writeframes((np.clip(samples, -1, 1) * 32767).astype("<i2").tobytes())
+    log(f"enrolled {args.name}: {len(samples) / 16000:.1f} s → {voice_dir}")
 
 
 def _name_current(speaker, name):

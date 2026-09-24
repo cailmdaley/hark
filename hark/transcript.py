@@ -38,6 +38,7 @@ class Utterance:
     text: str
 
     name: str | None = None
+    speech: list[tuple[float, float]] = field(default_factory=list)
 
     @property
     def wall_span(self):
@@ -73,6 +74,10 @@ class Track:
         self.hop = asr.preprocessor_config.hop_length
         self.t0 = datetime.now()  # wall time of sample 0; the caller sets it when capture starts
         self.pending = {}
+        from .voice import AudioBuffer
+
+        self.audio = AudioBuffer()
+        self.audio_samples = 0
 
     @property
     def processed(self):
@@ -87,6 +92,9 @@ class Track:
             self._step(samples[:0], final=True)
 
     def _step(self, samples, final=False):
+        if samples.size:
+            self.audio.append(self.audio_samples / SAMPLE_RATE, samples)
+            self.audio_samples += samples.size
         for delta in self.session.feed(samples, final=final):
             self.pending.setdefault(delta.speaker, _Pending()).tokens.extend(delta.tokens)
 
@@ -136,7 +144,8 @@ class Track:
             return None
         start = tokens[0].start
         return Utterance(self.name, self.speaker_label(speaker), start, tokens[-1].end,
-                         self.t0 + timedelta(seconds=start), text)
+                         self.t0 + timedelta(seconds=start), text,
+                         speech=[(token.start, token.end) for token in tokens])
 
 
 def flush_tracks(tracks, force=False):
