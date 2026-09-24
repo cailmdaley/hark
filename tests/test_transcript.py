@@ -1,11 +1,17 @@
 import json
 from datetime import datetime
-
 from hark.transcript import EchoGate, Sink, Utterance
 
 
 def utterance(track, start, end, text, speaker):
     return Utterance(track, speaker, start, end, datetime.fromtimestamp(start), text)
+
+
+def test_speaker_slot_column_is_four_characters_and_names_are_unpadded():
+    slot = utterance("system", 10, 11, "Hello", "S2")
+    assert slot.line().endswith(" S2   Hello")
+    slot.name = "Alexander Hamilton"
+    assert slot.line().endswith(" Alexander Hamilton Hello")
 
 
 def test_echo_gate_drops_overlapping_duplicate():
@@ -53,6 +59,30 @@ def test_external_name_line_applies_to_next_line_and_jsonl(tmp_path):
     assert records == [{"wall": named.wall.isoformat(timespec="seconds"), "track": "system",
                         "speaker": "S2", "start": 10, "end": 11, "text": "Hello there",
                         "name": "Mike Hudson"}]
+
+
+def test_name_appended_between_poll_and_write_is_seen_next_time(tmp_path):
+    path = tmp_path / "meeting.txt"
+    sink = Sink(path, "session")
+    poll = sink.poll_names
+    appended = False
+
+    def racing_poll():
+        nonlocal appended
+        poll()
+        if not appended:
+            with path.open("a") as external:
+                external.write("# S3 = Grace Hopper\n")
+            appended = True
+
+    sink.poll_names = racing_poll
+    first = utterance("system", 10, 11, "Initial", "S3")
+    second = utterance("system", 12, 13, "Named", "S3")
+    sink.write(first)
+    sink.write(second)
+    sink.close("ended")
+    assert first.name is None
+    assert second.name == "Grace Hopper"
 
 
 def test_sink_name_writes_mapping_record(tmp_path):

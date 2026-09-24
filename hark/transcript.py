@@ -2,9 +2,9 @@
 
 Each track (mic, system audio, a file) owns one mlx-audio SpeakerStreamingSession:
 Nemotron-3-Diarization gates Nemotron 3.5 streaming ASR, with an independent
-decoder per speaker, so tokens arrive already tagged. Tokens accumulate per
-speaker until that speaker has been quiet for `gap` seconds of audio; the
-utterance is then written as one line.
+decoder per speaker, so tokens arrive already tagged. Tokens accumulate by
+speaker until another sustained speaker takes the turn, the speaker is quiet
+for `gap`, or a monologue reaches its maximum length.
 """
 
 import json
@@ -44,7 +44,8 @@ class Utterance:
         return self.wall.timestamp(), self.wall.timestamp() + self.end - self.start
 
     def line(self):
-        return f"{self.wall:%H:%M:%S} {self.name or self.speaker:<16} {self.text}"
+        label = self.name or f"{self.speaker:<4}"
+        return f"{self.wall:%H:%M:%S} {label} {self.text}"
 
     def record(self):
         record = {"wall": self.wall.isoformat(timespec="seconds"), "track": self.track,
@@ -63,7 +64,7 @@ class _Pending:
 class Track:
     """One audio stream through its own speaker-streaming session."""
 
-    def __init__(self, name, asr, diar, *, speaker_label, language=None, gap=1.5, max_len=30.0):
+    def __init__(self, name, asr, diar, *, speaker_label, language=None, gap=3.0, max_len=30.0):
         self.name = name
         self.session = asr.create_speaker_streaming_session(diar, language=language)
         self.speaker_label = speaker_label  # "speaker_3" -> "S4" or "me"
@@ -79,35 +80,54 @@ class Track:
         return self.session._mel_offset * self.hop / SAMPLE_RATE
 
     def feed(self, samples, final=False):
-        out = []
-        step = SAMPLE_RATE // 2  # flush decisions every 0.5 s even when fed a backlog
+        step = SAMPLE_RATE // 2  # feed in bounded chunks even when a source has a backlog
         for i in range(0, samples.size, step):
-            out += self._step(samples[i : i + step])
+            self._step(samples[i : i + step])
         if final:
-            out += self._step(samples[:0], final=True)
-        return out
+            self._step(samples[:0], final=True)
 
     def _step(self, samples, final=False):
         for delta in self.session.feed(samples, final=final):
             self.pending.setdefault(delta.speaker, _Pending()).tokens.extend(delta.tokens)
-        return self._flush(force=final)
 
-    def _flush(self, force=False):
-        out = []
-        for speaker, p in list(self.pending.items()):
-            if not p.tokens:
+    def _flush_plan(self, tracks, force):
+        cuts = {}
+        for speaker, pending in self.pending.items():
+            if not pending.tokens:
                 continue
-            quiet = self.processed - p.tokens[-1].end
-            span = p.tokens[-1].end - p.tokens[0].start
-            if force or quiet >= self.gap or span >= self.max_len:
-                cut = len(p.tokens)
-                if not force and quiet < self.gap:
-                    cut = _monologue_cut(p.tokens)
-                u = self._utterance(speaker, p.tokens[:cut])
-                p.tokens = p.tokens[cut:]
-                if u:
-                    out.append(u)
-        return sorted(out, key=lambda u: u.start)
+            last = self._wall_time(pending.tokens[-1].end)
+            quiet = self.processed - pending.tokens[-1].end
+            span = pending.tokens[-1].end - pending.tokens[0].start
+            taken = any(track._took_turn(self, speaker, other_speaker, last)
+                        for track in tracks for other_speaker in track.pending)
+            if force or taken:
+                cuts[speaker] = len(pending.tokens)
+            elif span >= self.max_len:
+                cuts[speaker] = _monologue_cut(pending.tokens)
+            elif quiet >= self.gap:
+                cuts[speaker] = len(pending.tokens)
+        return cuts
+
+    def _apply_flush(self, cuts):
+        out = []
+        for speaker, cut in cuts.items():
+            pending = self.pending[speaker]
+            u = self._utterance(speaker, pending.tokens[:cut])
+            pending.tokens = pending.tokens[cut:]
+            if u:
+                out.append(u)
+        return out
+
+    def _took_turn(self, own_track, own_speaker, other_speaker, after):
+        if self is own_track and other_speaker == own_speaker:
+            return False
+        tokens = self.pending[other_speaker].tokens
+        after_tokens = [token for token in tokens if self._wall_time(token.start) >= after]
+        return (len(after_tokens) > 1 and
+                self._wall_time(after_tokens[-1].end) - self._wall_time(after_tokens[0].start) >= 1.0)
+
+    def _wall_time(self, seconds):
+        return self.t0.timestamp() + seconds
 
     def _utterance(self, speaker, tokens):
         # RNN-T often emits the closing punctuation of a turn late, at the start of the next
@@ -117,6 +137,12 @@ class Track:
         start = tokens[0].start
         return Utterance(self.name, self.speaker_label(speaker), start, tokens[-1].end,
                          self.t0 + timedelta(seconds=start), text)
+
+
+def flush_tracks(tracks, force=False):
+    plans = [track._flush_plan(tracks, force) for track in tracks]
+    return sorted((utterance for track, cuts in zip(tracks, plans)
+                   for utterance in track._apply_flush(cuts)), key=lambda u: u.wall)
 
 
 def _monologue_cut(tokens):
@@ -184,7 +210,6 @@ class Sink:
         self.names[speaker] = name
         self.txt.seek(0, 2)
         self.txt.write(f"# {speaker} = {name}\n")
-        self.offset = self.txt.tell()
         self.jsonl.write(json.dumps({"wall": datetime.now().isoformat(timespec="seconds"),
                                      "name": {"speaker": speaker, "as": name}}, ensure_ascii=False) + "\n")
 
@@ -201,7 +226,6 @@ class Sink:
         u.name = self.names.get(u.speaker)
         self.txt.seek(0, 2)
         self.txt.write(u.line() + "\n")
-        self.offset = self.txt.tell()
         self.jsonl.write(json.dumps(u.record(), ensure_ascii=False) + "\n")
 
     def close(self, footer):

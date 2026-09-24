@@ -38,13 +38,17 @@ uv run hark --file x.m4a    # a recording, through the same streaming path (~0.1
 uv run hark --title "shear telecon"   # names the session file
 ```
 
-In call mode, an echo gate holds `me` lines until system audio is processed past
-that moment, then drops lines whose words substantially duplicate overlapping
-system speech; headphones still give the cleanest capture.
+Each line is a conversational turn, not a pause-delimited fragment: brief
+silences keep accumulating, a sustained reply (at least 1 s of speech) ends the
+turn, and a 3 s silence ends it when nobody takes over. Short backchannels do
+not end another speaker's turn. A 30 s monologue is split at its longest late
+pause. In call mode, an echo gate holds `me` lines until system audio is
+processed past that moment, then drops lines whose words substantially duplicate
+overlapping system speech; headphones still give the cleanest capture.
 
 The live session is `~/.hark/current.txt`, a symlink to
-`~/.hark/sessions/<date>_<time>[_title].txt`. A line appears once its speaker
-has been quiet for 1.5 seconds by default (`--gap`), typically 2–3 s after the words are spoken.
+`~/.hark/sessions/<date>_<time>[_title].txt`. In the absence of a sustained
+reply, a line appears after 3 seconds of silence by default (`--gap`).
 Lines from different speakers can land slightly out of time order. The
 `# ended` footer marks a finished session. Beside the text file is a `.jsonl`
 with `wall, track, speaker, start, end, text` per utterance, plus name-mapping

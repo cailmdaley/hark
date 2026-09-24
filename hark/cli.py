@@ -18,7 +18,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .capture import FileSource, MicSource, SystemSource, log
-from .transcript import EchoGate, Sink, Track, load_models, numbered
+from .transcript import EchoGate, Sink, Track, flush_tracks, load_models, numbered
 
 HOME = Path(os.environ.get("HARK_DIR", Path.home() / ".hark")).expanduser().resolve()
 
@@ -40,7 +40,8 @@ def main(argv=None):
     ap.add_argument("--lang", default=None, help="ASR language, e.g. en-US, fr-FR (default: auto)")
     ap.add_argument("--latency", default="low", choices=["low", "very_low", "ultra_low"],
                     help="diarizer buffer: low=1.04 s (default), very_low=0.64 s, ultra_low=0.32 s")
-    ap.add_argument("--gap", type=float, default=1.5, help="seconds of quiet that end an utterance")
+    ap.add_argument("--gap", type=float, default=3.0,
+                    help="seconds of silence that end a turn when nobody else takes over")
     ap.add_argument("--title", help="appended to the session filename")
     ap.add_argument("-o", "--out", type=Path, help="write the transcript here instead of ~/.hark/sessions/")
     args = ap.parse_args(argv)
@@ -66,6 +67,7 @@ def main(argv=None):
                           gap=args.gap))
               for src, label in sources]
 
+    all_tracks = [track for _, track in tracks]
     now = datetime.now()
     out = args.out.with_suffix(".txt") if args.out else _session_path(now, args.title)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -111,8 +113,9 @@ def main(argv=None):
                 samples = src.drain()
                 if samples.size:
                     busy = True
-                    for u in track.feed(samples):
-                        dispatch(u)
+                    track.feed(samples)
+            for u in flush_tracks(all_tracks):
+                dispatch(u)
             if gate:
                 system_track = tracks[1][1]
                 watermark = (system_track.t0.timestamp() + system_track.processed
@@ -127,8 +130,9 @@ def main(argv=None):
         for src, _ in sources:
             src.stop()
         for src, track in tracks:
-            for u in track.feed(src.drain(limit=float("inf")), final=True):
-                dispatch(u)
+            track.feed(src.drain(limit=float("inf")), final=True)
+        for u in flush_tracks(all_tracks, force=True):
+            dispatch(u)
         if gate:
             for u in gate.release(float("inf"), final=True):
                 emit(u)
