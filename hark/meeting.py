@@ -45,31 +45,32 @@ agent={shlex.quote(agent)}
 transcript={_remote_path(transcript_path)}
 
 cd "$project"
-felt -C "$store" sync
-parent_dir="$store/.felt/$under/meetings"
-mkdir -p "$parent_dir" "$(dirname -- "$transcript")"
+test -f "$store/.felt/$under/${{under##*/}}.md" || {{ printf 'parent fiber not found: %s\\n' "$store/.felt/$under/${{under##*/}}.md" >&2; exit 1; }}
 test ! -e "$transcript" || {{ echo "transcript already exists: $transcript" >&2; exit 1; }}
-touch "$transcript"
+felt -C "$store" sync </dev/null
 body=$(printf '%s' {shlex.quote(encoded_body)} | base64 -d)
-felt -C "$store" add "$fiber_id" "$title" --body "$body" --outcome 'Follow the live transcript and close after # ended.' --tag meeting
+felt -C "$store" add --top-level --body "$body" --outcome 'Follow the live transcript and close after # ended.' --tag meeting -- "$fiber_id" "$title" </dev/null
+mkdir -p -- "$(dirname -- "$transcript")"
+touch -- "$transcript"
 if [ ! -f "$store/.felt/roles/scribe/$agent/$agent.md" ]; then
-  felt -C "$store" add "roles/scribe/$agent" "$agent · scribe" --body 'Model-specific continuity for the scribe role.'
+  felt -C "$store" add --top-level --body 'Model-specific continuity for the scribe role.' -- "roles/scribe/$agent" "$agent · scribe" </dev/null
 fi
-felt -C "$store" shuttle install "$fiber_id" --host "$host" --project-dir "$project" --model "$agent"
-felt -C "$store" shuttle assign "$fiber_id" --role scribe --collaborator "$agent"
-felt -C "$store" edit "$fiber_id" --status active
-felt -C "$store" sync --push
-felt -C "$store" shuttle dispatch "$fiber_id"
+felt -C "$store" shuttle install "$fiber_id" --host "$host" --project-dir "$project" --model "$agent" </dev/null
+felt -C "$store" shuttle assign "$fiber_id" --role scribe --collaborator "$agent" </dev/null
+felt -C "$store" edit "$fiber_id" --status active </dev/null
+felt -C "$store" sync --push </dev/null
+felt -C "$store" shuttle dispatch "$fiber_id" </dev/null
 printf 'Meeting fiber: %s\\nTranscript: %s\\n' "$fiber_id" "$transcript"
 """
-    return ["ssh", host, "bash -s"], script
+    command = ["ssh", host, "bash", "-c", shlex.quote(script)]
+    return command, script
 
 
 def prepare_remote_meeting(*, host, project, store, fiber_id, under, title, agent,
                            transcript_path, body, runner=None):
-    command, script = build_remote_setup(
+    command, _ = build_remote_setup(
         host=host, project=project, store=store, fiber_id=fiber_id, under=under,
         title=title, agent=agent, transcript_path=transcript_path, body=body,
     )
-    (runner or subprocess.run)(command, input=script, text=True, check=True)
+    (runner or subprocess.run)(command, stdin=subprocess.DEVNULL, text=True, check=True)
     return fiber_id, transcript_path

@@ -8,6 +8,14 @@ from pathlib import Path
 
 from .capture import log
 
+SSH_OPTIONS = [
+    "-o", "BatchMode=yes",
+    "-o", "ConnectTimeout=10",
+    "-o", "ServerAliveInterval=15",
+    "-o", "ServerAliveCountMax=3",
+]
+EOF_TIMEOUT = 3.0
+
 
 def _remote_path(path):
     if path == "~":
@@ -17,11 +25,14 @@ def _remote_path(path):
     return shlex.quote(path)
 
 
-def ssh_commands(host, path):
+def ssh_commands(host, path, offset=0, *, reset=False):
     target = _remote_path(path)
-    stream = f'mkdir -p -- "$(dirname -- {target})" && cat >> {target}'
-    size = f'if [ -e {target} ]; then wc -c < {target}; else printf \'0\\n\'; fi'
-    return ["ssh", host, stream], ["ssh", host, size]
+    clear = f"truncate -s 0 -- {target} && " if reset else ""
+    stream = (f'mkdir -p -- "$(dirname -- {target})" && {clear}'
+              f"dd of={target} bs=64k seek={offset} oflag=seek_bytes conv=notrunc status=none")
+    size = f"if [ -e {target} ]; then wc -c < {target}; else printf '0\\n'; fi"
+    ssh = ["ssh", *SSH_OPTIONS, host]
+    return [*ssh, stream], [*ssh, size]
 
 
 class MirrorError(RuntimeError):
@@ -29,22 +40,24 @@ class MirrorError(RuntimeError):
 
 
 class TranscriptMirror:
-    """Copy appended transcript bytes and resume at the remote file's byte count."""
+    """Copy transcript bytes at fixed offsets so reconnects can safely overlap."""
 
     def __init__(self, local_path, host, remote_path, *, command=None, size_command=None,
                  popen=subprocess.Popen, run=subprocess.run, backoff=0.25, max_backoff=5.0,
-                 poll_interval=0.05):
+                 poll_interval=0.05, eof_timeout=EOF_TIMEOUT, resume=False):
         self.path = Path(local_path)
         self.host = host
         self.remote_path = remote_path
-        default_command, default_size = ssh_commands(host, remote_path)
-        self.command = command if command is not None else default_command
+        self.command = command
+        _, default_size = ssh_commands(host, remote_path)
         self.size_command = size_command if size_command is not None else default_size
         self.popen = popen
         self.run = run
         self.backoff = backoff
         self.max_backoff = max_backoff
         self.poll_interval = poll_interval
+        self.eof_timeout = eof_timeout
+        self.resume = resume
         self.thread = None
         self.process = None
         self.target_size = None
@@ -52,58 +65,123 @@ class TranscriptMirror:
         self.completed = False
         self.stopping = threading.Event()
         self.wake = threading.Event()
+        self.recovery_logged = False
+
+    @property
+    def resume_command(self):
+        return shlex.join(["hark", "mirror", "--resume", str(self.path),
+                           f"{self.host}:{self.remote_path}"])
 
     def start(self):
         if self.thread is not None:
             raise RuntimeError("mirror already started")
-        self.path.stat()
-        self.thread = threading.Thread(target=self._run, name="hark-mirror", daemon=True)
-        self.thread.start()
-
-    def check(self):
-        if self.failure:
-            raise MirrorError(f"mirror failed: {self.failure}") from self.failure
+        try:
+            self.path.stat()
+            self.thread = threading.Thread(target=self._run, name="hark-mirror", daemon=True)
+            self.thread.start()
+        except Exception as error:
+            self._stop(error)
+            return False
+        return True
 
     def finish(self, timeout=30):
+        try:
+            return self._finish(timeout)
+        except Exception as error:
+            self.stopping.set()
+            self.wake.set()
+            self._stop(error)
+            self._log_recovery()
+            return False
+
+    def _finish(self, timeout):
         if self.thread is None:
-            raise RuntimeError("mirror was not started")
+            if self.failure is None:
+                self._stop(MirrorError("mirror was not started"))
+            self._log_recovery()
+            return False
         if self.target_size is None:
-            self.target_size = self.path.stat().st_size
+            try:
+                self.target_size = self.path.stat().st_size
+            except OSError as error:
+                self._stop(error)
+                self.stopping.set()
+                self.wake.set()
         self.wake.set()
         self.thread.join(timeout)
         if self.thread.is_alive():
             self.stopping.set()
-            if self.process and self.process.poll() is None:
-                self.process.kill()
+            process = self.process
+            if process and process.poll() is None:
+                try:
+                    process.kill()
+                except OSError:
+                    pass
             self.wake.set()
-            self.thread.join(1)
-            log(f"mirror: timed out after {timeout:g} s; the remote # ended footer may be incomplete")
-            return False
-        self.check()
+            self.thread.join(self.eof_timeout + 1)
+            log(f"mirror: timed out after {timeout:g} s; capture is local and mirroring has stopped")
+        if not self.completed:
+            self._log_recovery()
         return self.completed
 
     def _remote_size(self):
-        result = self.run(self.size_command, capture_output=True, text=True, check=True, timeout=10)
+        result = self.run(self.size_command, capture_output=True, text=True, check=True,
+                          timeout=10, start_new_session=True)
         return int(result.stdout.strip())
 
-    def _new_command(self):
-        return self.command() if callable(self.command) else self.command
+    @staticmethod
+    def _retryable(error):
+        if isinstance(error, FileNotFoundError):
+            return False
+        return not isinstance(error, subprocess.CalledProcessError) or error.returncode == 255
+
+    def _new_command(self, offset, *, reset=False):
+        if self.command is None:
+            return ssh_commands(self.host, self.remote_path, offset, reset=reset)[0]
+        if callable(self.command):
+            return self.command(offset, reset=reset)
+        return self.command
+
+    def _stop(self, error):
+        if self.failure is None:
+            self.failure = error
+            log(f"mirror: stopped: {error}; capture continues locally and the transcript is safe")
+
+    def _log_recovery(self):
+        if not self.recovery_logged:
+            log(f"mirror: resume after capture with: {self.resume_command}")
+            self.recovery_logged = True
 
     def _drop(self, process):
         if process is None:
-            return
+            return None
         if process.stdin:
             try:
                 process.stdin.close()
-            except OSError:
+            except Exception:
                 pass
-        if process.poll() is None:
+        try:
+            process.wait(timeout=self.eof_timeout)
+        except subprocess.TimeoutExpired:
+            log(f"mirror: SSH did not exit {self.eof_timeout:g} s after EOF; terminating the old channel")
             try:
-                process.wait(timeout=0.5)
-            except subprocess.TimeoutExpired:
                 process.kill()
-                process.wait()
-        self.process = None
+                process.wait(timeout=1)
+            except Exception:
+                pass
+        except Exception as error:
+            log(f"mirror: SSH channel cleanup failed ({error}); terminating the old channel")
+            try:
+                process.kill()
+            except Exception:
+                pass
+        finally:
+            if self.process is process:
+                self.process = None
+        try:
+            return process.poll()
+        except Exception:
+            return None
 
     def _send(self, process, data):
         remaining = memoryview(data)
@@ -113,36 +191,55 @@ class TranscriptMirror:
                 raise BrokenPipeError("SSH mirror accepted no bytes")
             remaining = remaining[written:]
 
+    def _delay(self, failures):
+        if self.backoff <= 0:
+            return 0.0
+        delay = self.backoff
+        for _ in range(failures - 1):
+            if delay >= self.max_backoff:
+                break
+            delay = min(self.max_backoff, delay * 2)
+        return delay
+
+    def _retry(self, failures, message):
+        failures += 1
+        delay = self._delay(failures)
+        log(f"mirror: {message}; retrying in {delay:g} s")
+        self.stopping.wait(delay)
+        return failures
+
     def _run(self):
         process = None
         position = 0
         connected = False
         failures = 0
+        force_reset = False
         try:
             while not self.stopping.is_set():
                 if process is None:
                     try:
                         offset = self._remote_size()
                     except (OSError, subprocess.SubprocessError) as error:
-                        failures += 1
-                        delay = min(self.max_backoff, self.backoff * 2 ** (failures - 1))
-                        log(f"mirror: remote size check failed ({error}); retrying in {delay:g} s")
-                        self.stopping.wait(delay)
+                        if not self._retryable(error):
+                            raise MirrorError(f"remote size check failed ({error})") from error
+                        failures = self._retry(failures, f"remote size check failed ({error})")
                         continue
                     local_size = self.path.stat().st_size
-                    if offset > local_size:
-                        raise MirrorError(f"remote mirror is {offset} bytes but local transcript is only {local_size}")
-                    if not connected and offset:
-                        raise MirrorError(f"remote mirror target already contains {offset} bytes")
-                    position = offset
+                    reset = force_reset or offset > local_size
+                    force_reset = False
+                    if reset:
+                        log(f"mirror: remote has {offset} bytes but local transcript has {local_size}; rewriting from byte 0")
+                        position = 0
+                    elif offset and not connected and not self.resume:
+                        raise MirrorError(f"remote target already contains {offset} bytes; use hark mirror --resume")
+                    else:
+                        position = offset
                     try:
-                        process = self.popen(self._new_command(), stdin=subprocess.PIPE, bufsize=0)
-                    except OSError as error:
-                        failures += 1
-                        delay = min(self.max_backoff, self.backoff * 2 ** (failures - 1))
-                        log(f"mirror: SSH start failed ({error}); retrying in {delay:g} s")
-                        self.stopping.wait(delay)
-                        continue
+                        process = self.popen(self._new_command(position, reset=reset),
+                                             stdin=subprocess.PIPE, bufsize=0,
+                                             start_new_session=True)
+                    except OSError:
+                        raise
                     self.process = process
                     connected = True
                     failures = 0
@@ -152,10 +249,9 @@ class TranscriptMirror:
                 if returncode is not None:
                     self._drop(process)
                     process = None
-                    failures += 1
-                    delay = min(self.max_backoff, self.backoff * 2 ** (failures - 1))
-                    log(f"mirror: SSH exited {returncode}; reconnecting in {delay:g} s")
-                    self.stopping.wait(delay)
+                    if returncode not in (0, 255):
+                        raise MirrorError(f"SSH exited {returncode}")
+                    failures = self._retry(failures, f"SSH exited {returncode}")
                     continue
 
                 local_size = self.path.stat().st_size
@@ -170,12 +266,11 @@ class TranscriptMirror:
                         try:
                             self._send(process, data)
                         except (BrokenPipeError, OSError) as error:
-                            self._drop(process)
+                            returncode = self._drop(process)
                             process = None
-                            failures += 1
-                            delay = min(self.max_backoff, self.backoff * 2 ** (failures - 1))
-                            log(f"mirror: SSH write failed ({error}); reconnecting in {delay:g} s")
-                            self.stopping.wait(delay)
+                            if returncode not in (None, 0, 255):
+                                raise MirrorError(f"SSH write failed ({error}); SSH exited {returncode}") from error
+                            failures = self._retry(failures, f"SSH write failed ({error})")
                             continue
                         position += len(data)
                         continue
@@ -186,27 +281,25 @@ class TranscriptMirror:
                     try:
                         offset = self._remote_size()
                     except (OSError, subprocess.SubprocessError) as error:
-                        failures += 1
-                        delay = min(self.max_backoff, self.backoff * 2 ** (failures - 1))
-                        log(f"mirror: final size check failed ({error}); retrying in {delay:g} s")
-                        self.stopping.wait(delay)
+                        if not self._retryable(error):
+                            raise MirrorError(f"final size check failed ({error})") from error
+                        failures = self._retry(failures, f"final size check failed ({error})")
                         continue
                     if offset == self.target_size:
                         self.completed = True
                         log(f"mirror: delivered {offset} bytes, including # ended")
                         return
                     if offset > self.target_size:
-                        raise MirrorError(f"remote mirror is {offset} bytes, beyond final local size {self.target_size}")
-                    log(f"mirror: remote has {offset}/{self.target_size} bytes; resuming")
+                        force_reset = True
+                    else:
+                        log(f"mirror: remote has {offset}/{self.target_size} bytes; resuming")
                     failures += 1
-                    delay = min(self.max_backoff, self.backoff * 2 ** (failures - 1))
-                    self.stopping.wait(delay)
+                    self.stopping.wait(self._delay(failures))
                     continue
 
                 self.wake.wait(self.poll_interval)
                 self.wake.clear()
         except Exception as error:
-            self.failure = error
-            log(f"mirror: failed: {error}")
+            self._stop(error)
         finally:
             self._drop(process)

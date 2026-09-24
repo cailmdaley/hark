@@ -11,12 +11,13 @@ file that any agent can follow.
 # ended 19:35:19
 ```
 
-Everything runs on the Mac (Apple Silicon, MLX): Nemotron 3.5 streaming ASR
+Audio processing runs on the Mac (Apple Silicon, MLX): Nemotron 3.5 streaming ASR
 (`mlx-community/nemotron-3.5-asr-streaming-0.6b`) gated by
 Nemotron-3-Diarization (`mlx-community/Nemotron-3-Diarization`, up to 8
-speakers, 1.04 s buffer) through mlx-audio's `SpeakerStreamingSession`. That
-session keeps one ASR decoder per speaker, so words arrive already attributed.
-Labels are anonymous, numbered in order of arrival. Nothing leaves the machine.
+speakers, 1.04 s buffer) through mlx-audio's `SpeakerStreamingSession`.
+That session keeps one ASR decoder per speaker, so words arrive already attributed.
+Labels are anonymous, numbered in order of arrival.
+With `hark meeting`, only the resulting transcript is mirrored to the selected host.
 
 ## Setup
 
@@ -46,10 +47,13 @@ Start capture on the Mac and dispatch a scribe beside the project:
 uv run hark meeting --host candide --project /path/to/project --under tools/hark --title "shear telecon"
 ```
 
-The command syncs the host's felt store, creates a meeting fiber, assigns the
-scribe role, and dispatches it before capturing audio.
+The command loads models and opens the local audio source before preparing the
+host's felt fiber, assigning the scribe role, and dispatching it.
+If host setup fails, capture continues to a local session file and prints manual
+recovery steps.
 The transcript stays on the Mac and its `.txt` file streams to
 `~/.hark/meetings/` on the host; `--room` selects mic-only capture.
+If the mirror doesn't deliver `# ended`, hark prints a `hark mirror --resume` command.
 For rehearsals, pass `--file recording.wav --realtime`.
 Use `--agent` to select the Shuttle model and `--store` to select the host's felt store.
 Direct capture can also mirror a transcript with `--mirror HOST:PATH`.

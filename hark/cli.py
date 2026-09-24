@@ -11,7 +11,9 @@ follow it with `tail -F`. A JSONL sidecar sits beside it.
 import argparse
 import json
 import os
+import shlex
 import signal
+import subprocess
 import sys
 import time
 from datetime import datetime
@@ -41,7 +43,7 @@ def _emit(u, sink, matcher, tracks_by_name, failed_slots):
         sys.stdout = open(os.devnull, "w")
 
 
-def main(argv=None):
+def main(argv=None, *, session_now=None, after_sources=None, fallback_target=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv and argv[0] == "enroll":
         _enroll(argv[1:])
@@ -56,6 +58,8 @@ def main(argv=None):
         return 0
     if argv and argv[0] == "meeting":
         return _meeting(argv[1:])
+    if argv and argv[0] == "mirror":
+        return _resume_mirror(argv[1:])
     ap = argparse.ArgumentParser(prog="hark", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     mode = ap.add_mutually_exclusive_group()
@@ -74,6 +78,12 @@ def main(argv=None):
     args = ap.parse_args(argv)
     if args.realtime and not args.file:
         ap.error("--realtime only applies to --file")
+    mirror_target = None
+    if args.mirror:
+        host, separator, remote_path = args.mirror.partition(":")
+        if not separator or not host or not remote_path:
+            ap.error("--mirror must be HOST:PATH")
+        mirror_target = host, remote_path
 
     if args.file:
         sources = [(FileSource(args.file, realtime=args.realtime), numbered)]
@@ -95,7 +105,7 @@ def main(argv=None):
               for src, label in sources]
 
     all_tracks = [track for _, track in tracks]
-    now = datetime.now()
+    now = session_now or datetime.now()
     out = args.out.with_suffix(".txt") if args.out else _session_path(now, args.title)
     out.parent.mkdir(parents=True, exist_ok=True)
     if not (args.out or args.file):  # a replay never hijacks the live session's link
@@ -113,12 +123,7 @@ def main(argv=None):
     tracks_by_name = {track.name: track for _, track in tracks}
     log(f"transcript → {out}")
     mirror = None
-    if args.mirror:
-        host, separator, remote_path = args.mirror.partition(":")
-        if not separator or not host or not remote_path:
-            ap.error("--mirror must be HOST:PATH")
-        mirror = TranscriptMirror(out, host, remote_path)
-        mirror.start()
+    host_setup_failed = False
 
     stop = False
 
@@ -138,10 +143,22 @@ def main(argv=None):
             src.start()
             track.t0 = (datetime.combine(now.date(), datetime.min.time()) if args.file
                         else datetime.fromtimestamp(src.anchor))
+        if after_sources:
+            try:
+                meeting_target = after_sources(out)
+            except Exception as error:
+                log(f"meeting: host setup failed ({error}); continuing with the local transcript at {out}")
+                meeting_target = None
+            if meeting_target:
+                host, _, remote_path = meeting_target.partition(":")
+                mirror_target = (host, remote_path)
+            else:
+                host_setup_failed = True
+        if mirror_target:
+            mirror = TranscriptMirror(out, *mirror_target)
+            mirror.start()
         log("listening (Ctrl-C to stop)")
         while not stop:
-            if mirror:
-                mirror.check()
             sink.poll_names()
             busy = False
             for src, track in tracks:
@@ -167,6 +184,9 @@ def main(argv=None):
             sink.close(f"ended {datetime.now():%H:%M:%S}")
             if mirror:
                 mirror.finish(timeout=30)
+            elif host_setup_failed and fallback_target:
+                log(f"meeting: after repairing the host setup, mirror the transcript with: "
+                    f"{shlex.join(['hark', 'mirror', '--resume', str(out), fallback_target])}")
     audio = max(t.processed for _, t in tracks)
     wall = time.monotonic() - started
     log(f"done: {audio:.0f} s of audio in {wall:.0f} s (real-time factor {wall / max(audio, 1e-9):.2f})")
@@ -197,21 +217,30 @@ def _meeting(argv):
     now = datetime.now()
     slug = _meeting_slug(args.title)
     transcript_path = f"~/.hark/meetings/{now:%Y-%m-%d_%H%M}_{slug}.txt"
-    fiber_id = f"{args.under}/meetings/{now:%Y-%m-%d}-{slug}"
+    fiber_id = f"{args.under}/meetings/{now:%Y-%m-%d-%H%M}-{slug}"
     when = now.astimezone().strftime("%Y-%m-%d %H:%M %Z")
     body = render_meeting_fiber(title=args.title, when=when, host=args.host,
                                 transcript_path=transcript_path)
-    prepare_remote_meeting(
-        host=args.host, project=args.project, store=args.store, fiber_id=fiber_id,
-        under=args.under, title=args.title, agent=args.agent,
-        transcript_path=transcript_path, body=body,
-    )
-    print(f"meeting fiber: {fiber_id}", file=sys.stderr)
-    log(f"watch transcript: ssh {args.host} 'tail -F {transcript_path}'")
-    log(f"watch notes: ssh {args.host} 'felt -C {args.store} show {fiber_id}'")
 
-    capture = ["--title", args.title, "--mirror", f"{args.host}:{transcript_path}",
-               "--latency", args.latency, "--gap", str(args.gap)]
+    def prepare_host(out):
+        try:
+            prepare_remote_meeting(
+                host=args.host, project=args.project, store=args.store, fiber_id=fiber_id,
+                under=args.under, title=args.title, agent=args.agent,
+                transcript_path=transcript_path, body=body,
+            )
+        except Exception as error:
+            failure = (f"SSH exited with status {error.returncode}"
+                       if isinstance(error, subprocess.CalledProcessError) else str(error))
+            log(f"meeting: host setup failed ({failure}); capturing locally at {out}. "
+                f"Repair {fiber_id} on {args.host}; hark will print the transcript recovery command at shutdown")
+            return None
+        log(f"meeting fiber: {fiber_id}")
+        log(f"watch transcript: ssh {args.host} 'tail -F {transcript_path}'")
+        log(f"watch notes: ssh {args.host} 'felt -C {args.store} show {fiber_id}'")
+        return f"{args.host}:{transcript_path}"
+
+    capture = ["--title", args.title, "--latency", args.latency, "--gap", str(args.gap)]
     if args.room:
         capture.append("--room")
     if args.file:
@@ -222,7 +251,22 @@ def _meeting(argv):
         capture.extend(["--mic", args.mic])
     if args.lang:
         capture.extend(["--lang", args.lang])
-    return main(capture)
+    return main(capture, session_now=now, after_sources=prepare_host,
+                fallback_target=f"{args.host}:{transcript_path}")
+
+
+def _resume_mirror(argv):
+    ap = argparse.ArgumentParser(prog="hark mirror")
+    ap.add_argument("--resume", action="store_true", required=True)
+    ap.add_argument("local", type=Path)
+    ap.add_argument("target", help="remote destination as HOST:PATH")
+    args = ap.parse_args(argv)
+    host, separator, remote_path = args.target.partition(":")
+    if not separator or not host or not remote_path:
+        ap.error("target must be HOST:PATH")
+    mirror = TranscriptMirror(args.local, host, remote_path, resume=True)
+    mirror.start()
+    return 0 if mirror.finish() else 1
 
 
 def _meeting_slug(title):
