@@ -1,0 +1,4 @@
+.vendor/
+bin/
+__pycache__/
+.venv/
