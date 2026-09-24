@@ -58,9 +58,7 @@ Each line is a conversational turn, not a pause-delimited fragment: brief
 silences keep accumulating, a sustained reply (at least 1 s of speech) ends the
 turn, and a 3 s silence ends it when nobody takes over. Short backchannels do
 not end another speaker's turn. A 30 s monologue is split at its longest late
-pause. In call mode, an echo gate holds `me` lines until system audio is
-processed past that moment, then drops lines whose words substantially duplicate
-overlapping system speech; headphones still give the cleanest capture.
+pause.
 
 The live session is `~/.hark/current.txt`, a symlink to
 `~/.hark/sessions/<date>_<time>[_title].txt`. In the absence of a sustained

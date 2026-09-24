@@ -37,8 +37,38 @@ def test_gap_flushes_when_nobody_takes_over():
     assert [(line.speaker, line.text) for line in flush_tracks([own])] == [("S1", "hello there")]
 
 
+def test_track_places_tokens_in_pending_as_soon_as_asr_emits_them():
+    token = SimpleNamespace(text="hello", start=0, end=0.5)
+    session = SimpleNamespace(feed=lambda samples, final=False:
+                              [SimpleNamespace(speaker="me", tokens=[token])])
+    asr = SimpleNamespace(preprocessor_config=SimpleNamespace(hop_length=1),
+                           create_speaker_streaming_session=lambda diar, language=None: session)
+    mic = Track("mic", asr, None, speaker_label=lambda speaker: speaker)
+    mic._step(SimpleNamespace(size=0))
+    assert mic.pending["me"].tokens == [token]
+
+
 def test_turn_change_is_detected_across_tracks():
     mic = track("mic", {"me": [(0, 0.5, "let's"), (1, 2, " begin")]}, processed=2.5)
     remote = track("system", {"speaker_0": [(2.2, 2.4, " I"), (3.4, 3.6, " agree")]}, processed=3.7)
     result = flush_tracks([mic, remote])
     assert [(line.track, line.speaker, line.text) for line in result] == [("mic", "me", "let's begin")]
+
+
+def test_final_flush_caches_track_wall_origin():
+    room = track("room", {"A": [(0, 0.5, "hello"), (1, 2, " there")]}, processed=2.5)
+
+    class Clock:
+        calls = 0
+
+        def timestamp(self):
+            self.calls += 1
+            return 100
+
+        def __add__(self, delta):
+            return datetime.fromtimestamp(100) + delta
+
+    clock = Clock()
+    room.t0 = clock
+    flush_tracks([room], force=True)
+    assert clock.calls == 1

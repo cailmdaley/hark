@@ -20,9 +20,25 @@ from pathlib import Path
 from .capture import SAMPLE_RATE, FileSource, MicSource, SystemSource, log
 from .meeting import prepare_remote_meeting, render_meeting_fiber
 from .mirror import TranscriptMirror
-from .transcript import EchoGate, Sink, Track, flush_tracks, load_models, numbered
+from .transcript import Sink, Track, flush_tracks, load_models, numbered
 
 HOME = Path(os.environ.get("HARK_DIR", Path.home() / ".hark")).expanduser().resolve()
+
+
+def _emit(u, sink, matcher, tracks_by_name, failed_slots):
+    sink.poll_names()
+    slot = (u.track, u.speaker)
+    if matcher and slot not in failed_slots:
+        try:
+            matcher.finished(tracks_by_name[u.track], u)
+        except Exception as error:
+            failed_slots.add(slot)
+            log(f"voice: disabled matching for {u.track}/{u.speaker} after error: {error}")
+    sink.write(u)
+    try:
+        print(u.line(), flush=True)
+    except BrokenPipeError:
+        sys.stdout = open(os.devnull, "w")
 
 
 def main(argv=None):
@@ -114,19 +130,7 @@ def main(argv=None):
     for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
         signal.signal(sig, on_signal)
 
-    def emit(u):
-        sink.poll_names()
-        if matcher:
-            matcher.finished(tracks_by_name[u.track], u)
-        sink.write(u)
-        try:
-            print(u.line(), flush=True)
-        except BrokenPipeError:
-            sys.stdout = open(os.devnull, "w")
-
-    gate = EchoGate() if not (args.room or args.file) else None
-    if gate:
-        all_tracks[0].echo_gate = gate
+    failed_slots = set()
 
     started = time.monotonic()
     try:
@@ -145,13 +149,8 @@ def main(argv=None):
                 if samples.size:
                     busy = True
                     track.feed(samples)
-            if gate:
-                mic_track, system_track = tracks[0][1], tracks[1][1]
-                gate.capture(mic_track, system_track)
-                watermark = system_track._wall_time(system_track.processed)
-                gate.release(mic_track, watermark)
             for u in flush_tracks(all_tracks):
-                emit(u)
+                _emit(u, sink, matcher, tracks_by_name, failed_slots)
             if args.file and sources[0][0].done.is_set() and not busy and sources[0][0].queue.empty():
                 break
             if not busy:
@@ -162,12 +161,8 @@ def main(argv=None):
                 src.stop()
             for src, track in tracks:
                 track.feed(src.drain(limit=float("inf")), final=True)
-            if gate:
-                mic_track, system_track = tracks[0][1], tracks[1][1]
-                gate.capture(mic_track, system_track)
-                gate.release(mic_track, float("inf"), final=True)
             for u in flush_tracks(all_tracks, force=True):
-                emit(u)
+                _emit(u, sink, matcher, tracks_by_name, failed_slots)
         finally:
             sink.close(f"ended {datetime.now():%H:%M:%S}")
             if mirror:
