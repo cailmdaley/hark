@@ -76,7 +76,7 @@ class AudioBuffer:
 class VoiceMatcher:
     """Name diarizer slots from finished-token speech, abstaining on ambiguity."""
 
-    def __init__(self, voices, sink, embedder=None, threshold=0.40, margin=0.10):
+    def __init__(self, voices, sink, embedder=None, threshold=0.415, margin=0.21):
         self.voices, self.sink = voices, sink
         self.embedder = embedder or Embedder()
         self.threshold, self.margin = threshold, margin

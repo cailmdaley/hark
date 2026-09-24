@@ -22,7 +22,7 @@ def utterance(speaker, start=0):
 
 
 def test_names_slot_at_five_seconds_and_threshold(tmp_path):
-    matcher, sink, track = setup(tmp_path, {"me": np.array([0.4, np.sqrt(0.84)])})
+    matcher, sink, track = setup(tmp_path, {"me": np.array([0.415, np.sqrt(1 - 0.415**2)])})
     matcher.finished(track, utterance("S1"))
     assert sink.names == {"S1": "me"}
     sink.close("ended")
