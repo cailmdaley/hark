@@ -12,7 +12,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
-from .capture import SAMPLE_RATE
+from .capture import SAMPLE_RATE, log
 
 ASR_MODEL = "mlx-community/nemotron-3.5-asr-streaming-0.6b"
 DIAR_MODEL = "mlx-community/Nemotron-3-Diarization"
@@ -37,13 +37,22 @@ class Utterance:
     wall: datetime
     text: str
 
+    name: str | None = None
+
+    @property
+    def wall_span(self):
+        return self.wall.timestamp(), self.wall.timestamp() + self.end - self.start
+
     def line(self):
-        return f"{self.wall:%H:%M:%S} {self.speaker:<4} {self.text}"
+        return f"{self.wall:%H:%M:%S} {self.name or self.speaker:<16} {self.text}"
 
     def record(self):
-        return {"wall": self.wall.isoformat(timespec="seconds"), "track": self.track,
-                "speaker": self.speaker, "start": round(self.start, 2),
-                "end": round(self.end, 2), "text": self.text}
+        record = {"wall": self.wall.isoformat(timespec="seconds"), "track": self.track,
+                  "speaker": self.speaker, "start": round(self.start, 2),
+                  "end": round(self.end, 2), "text": self.text}
+        if self.name:
+            record["name"] = self.name
+        return record
 
 
 @dataclass
@@ -54,7 +63,7 @@ class _Pending:
 class Track:
     """One audio stream through its own speaker-streaming session."""
 
-    def __init__(self, name, asr, diar, *, speaker_label, language=None, gap=1.0, max_len=30.0):
+    def __init__(self, name, asr, diar, *, speaker_label, language=None, gap=1.5, max_len=30.0):
         self.name = name
         self.session = asr.create_speaker_streaming_session(diar, language=language)
         self.speaker_label = speaker_label  # "speaker_3" -> "S4" or "me"
@@ -93,8 +102,7 @@ class Track:
             if force or quiet >= self.gap or span >= self.max_len:
                 cut = len(p.tokens)
                 if not force and quiet < self.gap:
-                    # long monologue: break before the last word, which may be unfinished
-                    cut = max((i for i, t in enumerate(p.tokens) if t.text.startswith(" ")), default=0) or cut
+                    cut = _monologue_cut(p.tokens)
                 u = self._utterance(speaker, p.tokens[:cut])
                 p.tokens = p.tokens[cut:]
                 if u:
@@ -111,21 +119,89 @@ class Track:
                          self.t0 + timedelta(seconds=start), text)
 
 
+def _monologue_cut(tokens):
+    boundaries = [i for i, token in enumerate(tokens) if token.text.startswith(" ")]
+    midpoint = (tokens[0].start + tokens[-1].end) / 2
+    pauses = [(tokens[i].start - tokens[i - 1].end, i) for i in boundaries
+              if i and tokens[i].start >= midpoint]
+    return max(pauses)[1] if pauses else (boundaries[-1] if boundaries else len(tokens))
+
+
+def _words(text):
+    return re.findall(r"\w+", text.casefold())
+
+
 def numbered(speaker):
     """speaker_0 -> S1 (arrival order within the track)."""
     return f"S{int(speaker.rsplit('_', 1)[1]) + 1}"
 
 
+class EchoGate:
+    """Hold mic utterances until system audio has passed them by one second."""
+
+    def __init__(self, threshold=0.6, margin=1.0):
+        self.threshold, self.margin = threshold, margin
+        self.pending, self.system = [], []
+
+    def push(self, utterance):
+        if utterance.track == "system":
+            self.system.append(utterance)
+            return [utterance]
+        self.pending.append(utterance)
+        return []
+
+    def release(self, watermark, final=False):
+        ready, waiting = [], []
+        for me in self.pending:
+            if not final and watermark < me.wall.timestamp() + (me.end - me.start) + self.margin:
+                waiting.append(me)
+                continue
+            start, end = me.wall_span
+            overlapping = [s for s in self.system if s.wall_span[0] <= end and s.wall_span[1] >= start]
+            mine, theirs = _words(me.text), set(_words(" ".join(s.text for s in overlapping)))
+            if mine and sum(word in theirs for word in mine) / len(mine) >= self.threshold:
+                log(f'echo: dropped me "{me.text}"')
+            else:
+                ready.append(me)
+        self.pending = waiting
+        return ready
+
+
 class Sink:
-    """The session's text file (for people and agents) plus a JSONL sidecar."""
+    """The session's text file and JSONL sidecar, with append-only name mappings."""
 
     def __init__(self, txt_path, header):
-        self.txt = open(txt_path, "a", buffering=1)
+        self.path = txt_path
+        self.txt = open(txt_path, "a+", buffering=1)
         self.jsonl = open(txt_path.with_suffix(".jsonl"), "a", buffering=1)
+        self.names = {}
+        self.txt.seek(0, 2)
+        self.offset = self.txt.tell()
         self.txt.write(f"# {header}\n")
+        self.offset = self.txt.tell()
+
+    def name(self, speaker, name):
+        self.names[speaker] = name
+        self.txt.seek(0, 2)
+        self.txt.write(f"# {speaker} = {name}\n")
+        self.offset = self.txt.tell()
+        self.jsonl.write(json.dumps({"wall": datetime.now().isoformat(timespec="seconds"),
+                                     "name": {"speaker": speaker, "as": name}}, ensure_ascii=False) + "\n")
+
+    def poll_names(self):
+        self.txt.seek(self.offset)
+        lines = self.txt.readlines()
+        self.offset = self.txt.tell()
+        for line in lines:
+            if match := re.fullmatch(r"# (S\d+) = (.+)\n?", line):
+                self.names[match[1]] = match[2]
 
     def write(self, u):
+        self.poll_names()
+        u.name = self.names.get(u.speaker)
+        self.txt.seek(0, 2)
         self.txt.write(u.line() + "\n")
+        self.offset = self.txt.tell()
         self.jsonl.write(json.dumps(u.record(), ensure_ascii=False) + "\n")
 
     def close(self, footer):
