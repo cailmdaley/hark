@@ -54,15 +54,14 @@ class _Pending:
 class Track:
     """One audio stream through its own speaker-streaming session."""
 
-    def __init__(self, name, asr, diar, *, speaker_label, language=None, gap=1.0, max_len=30.0,
-                 t0=None):
+    def __init__(self, name, asr, diar, *, speaker_label, language=None, gap=1.0, max_len=30.0):
         self.name = name
         self.session = asr.create_speaker_streaming_session(diar, language=language)
         self.speaker_label = speaker_label  # "speaker_3" -> "S4" or "me"
         self.gap = gap
         self.max_len = max_len
         self.hop = asr.preprocessor_config.hop_length
-        self.t0 = t0 or datetime.now()  # a file's transcript counts from midnight: 00:01:23
+        self.t0 = datetime.now()  # wall time of sample 0; the caller sets it when capture starts
         self.pending = {}
 
     @property

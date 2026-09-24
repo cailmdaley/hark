@@ -23,8 +23,10 @@ fi
 
 cd "${VENDOR_DIR}"
 
-echo "Fetching latest refs..."
-git fetch origin
+if ! git cat-file -e "${PINNED_COMMIT}^{commit}" 2>/dev/null; then
+    echo "Fetching refs..."
+    git fetch origin
+fi
 
 if ! git cat-file -e "${PINNED_COMMIT}^{commit}" 2>/dev/null; then
     echo "ERROR: pinned commit ${PINNED_COMMIT} not found in ${VENDOR_DIR} after fetch." >&2

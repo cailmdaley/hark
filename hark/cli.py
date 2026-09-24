@@ -20,7 +20,7 @@ from pathlib import Path
 from .capture import FileSource, MicSource, SystemSource, log
 from .transcript import Sink, Track, load_models, numbered
 
-HOME = Path(os.environ.get("HARK_DIR", Path.home() / ".hark"))
+HOME = Path(os.environ.get("HARK_DIR", Path.home() / ".hark")).expanduser().resolve()
 
 
 def main(argv=None):
@@ -39,6 +39,8 @@ def main(argv=None):
     ap.add_argument("--title", help="appended to the session filename")
     ap.add_argument("-o", "--out", type=Path, help="write the transcript here instead of ~/.hark/sessions/")
     args = ap.parse_args(argv)
+    if args.realtime and not args.file:
+        ap.error("--realtime only applies to --file")
 
     if args.file:
         sources = [(FileSource(args.file, realtime=args.realtime), numbered)]
@@ -53,18 +55,20 @@ def main(argv=None):
         sources = [(MicSource(_device(args.mic)), lambda _: "me"), (SystemSource(), numbered)]
         what = "call: me = mic, S1… = system audio"
 
-    now = datetime.now()
-    out = args.out or _session_path(now, args.title)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    if not args.out:
-        _point_current(out)
-
     log("loading models…")
-    asr, diar = load_models(args.latency)
-    t0 = datetime.combine(now.date(), datetime.min.time()) if args.file else None
+    try:
+        asr, diar = load_models(args.latency)
+    except KeyboardInterrupt:
+        return 130
     tracks = [(src, Track(src.name, asr, diar, speaker_label=label, language=args.lang,
-                          gap=args.gap, t0=t0))
+                          gap=args.gap))
               for src, label in sources]
+
+    now = datetime.now()
+    out = args.out.with_suffix(".txt") if args.out else _session_path(now, args.title)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    if not (args.out or args.file):  # a replay never hijacks the live session's link
+        _point_current(out)
     sink = Sink(out, f"hark {now:%Y-%m-%d %H:%M} — {what}")
     log(f"transcript → {out}")
 
@@ -73,38 +77,46 @@ def main(argv=None):
     def on_signal(*_):
         nonlocal stop
         stop = True
+        signal.signal(signal.SIGINT, signal.SIG_DFL)  # a second Ctrl-C quits hard
 
-    signal.signal(signal.SIGINT, on_signal)
-    signal.signal(signal.SIGTERM, on_signal)
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, on_signal)
 
-    for src, _ in sources:
-        src.start()
-    log("listening (Ctrl-C to stop)")
+    def emit(u):
+        sink.write(u)
+        try:
+            print(u.line(), flush=True)
+        except BrokenPipeError:
+            sys.stdout = open(os.devnull, "w")
 
     started = time.monotonic()
-    while not stop:
-        busy = False
+    try:
         for src, track in tracks:
-            samples = src.drain()
-            if samples.size:
-                busy = True
-                for u in track.feed(samples):
-                    sink.write(u)
-                    print(u.line(), flush=True)
-        if args.file and sources[0][0].done.is_set() and not busy and sources[0][0].queue.empty():
-            break
-        if not busy:
-            time.sleep(0.05)
-
-    for src, _ in sources:
-        src.stop()
-    for src, track in tracks:
-        for u in track.feed(src.drain(limit=float("inf")), final=True):
-            sink.write(u)
-            print(u.line(), flush=True)
+            src.start()
+            track.t0 = (datetime.combine(now.date(), datetime.min.time()) if args.file
+                        else datetime.fromtimestamp(src.anchor))
+        log("listening (Ctrl-C to stop)")
+        while not stop:
+            busy = False
+            for src, track in tracks:
+                samples = src.drain()
+                if samples.size:
+                    busy = True
+                    for u in track.feed(samples):
+                        emit(u)
+            if args.file and sources[0][0].done.is_set() and not busy and sources[0][0].queue.empty():
+                break
+            if not busy:
+                time.sleep(0.05)
+    finally:
+        for src, _ in sources:
+            src.stop()
+        for src, track in tracks:
+            for u in track.feed(src.drain(limit=float("inf")), final=True):
+                emit(u)
+        sink.close(f"ended {datetime.now():%H:%M:%S}")
     audio = max(t.processed for _, t in tracks)
     wall = time.monotonic() - started
-    sink.close(f"ended {datetime.now():%H:%M:%S}")
     log(f"done: {audio:.0f} s of audio in {wall:.0f} s (real-time factor {wall / max(audio, 1e-9):.2f})")
 
 
@@ -115,7 +127,7 @@ def _device(spec):
 
 
 def _session_path(now, title):
-    slug = f"{now:%Y-%m-%d_%H%M}" + (f"_{_slug(title)}" if title else "")
+    slug = f"{now:%Y-%m-%d_%H%M%S}" + (f"_{_slug(title)}" if title else "")
     return HOME / "sessions" / f"{slug}.txt"
 
 
