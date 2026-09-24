@@ -86,6 +86,9 @@ def main(argv=None):
     from .voice import VoiceMatcher
 
     matcher = VoiceMatcher(voices, sink) if voices else None
+    if not voices:
+        for track in all_tracks:
+            track.audio = None
     tracks_by_name = {track.name: track for _, track in tracks}
     log(f"transcript → {out}")
 
@@ -110,6 +113,8 @@ def main(argv=None):
             sys.stdout = open(os.devnull, "w")
 
     gate = EchoGate() if not (args.room or args.file) else None
+    if gate:
+        all_tracks[0].echo_gate = gate
 
     started = time.monotonic()
     try:
@@ -138,17 +143,19 @@ def main(argv=None):
             if not busy:
                 time.sleep(0.05)
     finally:
-        for src, _ in sources:
-            src.stop()
-        for src, track in tracks:
-            track.feed(src.drain(limit=float("inf")), final=True)
-        if gate:
-            mic_track, system_track = tracks[0][1], tracks[1][1]
-            gate.capture(mic_track, system_track)
-            gate.release(mic_track, float("inf"), final=True)
-        for u in flush_tracks(all_tracks, force=True):
-            emit(u)
-        sink.close(f"ended {datetime.now():%H:%M:%S}")
+        try:
+            for src, _ in sources:
+                src.stop()
+            for src, track in tracks:
+                track.feed(src.drain(limit=float("inf")), final=True)
+            if gate:
+                mic_track, system_track = tracks[0][1], tracks[1][1]
+                gate.capture(mic_track, system_track)
+                gate.release(mic_track, float("inf"), final=True)
+            for u in flush_tracks(all_tracks, force=True):
+                emit(u)
+        finally:
+            sink.close(f"ended {datetime.now():%H:%M:%S}")
     audio = max(t.processed for _, t in tracks)
     wall = time.monotonic() - started
     log(f"done: {audio:.0f} s of audio in {wall:.0f} s (real-time factor {wall / max(audio, 1e-9):.2f})")

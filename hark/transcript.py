@@ -76,6 +76,7 @@ class Track:
         self.hop = asr.preprocessor_config.hop_length
         self.t0 = datetime.now()  # wall time of sample 0; the caller sets it when capture starts
         self.pending = {}
+        self.echo_gate = None
         from .voice import AudioBuffer
 
         self.audio = AudioBuffer()
@@ -95,10 +96,14 @@ class Track:
 
     def _step(self, samples, final=False):
         if samples.size:
-            self.audio.append(self.audio_samples / SAMPLE_RATE, samples)
+            if self.audio is not None:
+                self.audio.append(self.audio_samples / SAMPLE_RATE, samples)
             self.audio_samples += samples.size
         for delta in self.session.feed(samples, final=final):
-            self.pending.setdefault(delta.speaker, _Pending()).tokens.extend(delta.tokens)
+            if self.echo_gate:
+                self.echo_gate.hold(delta.speaker, delta.tokens)
+            else:
+                self.pending.setdefault(delta.speaker, _Pending()).tokens.extend(delta.tokens)
 
     def _flush_plan(self, tracks, force):
         cuts = {}
@@ -124,8 +129,11 @@ class Track:
         out = []
         for speaker, cut in cuts.items():
             pending = self.pending[speaker]
-            u = self._utterance(speaker, pending.tokens[:cut])
+            finished = pending.tokens[:cut]
+            u = self._utterance(speaker, finished)
             pending.tokens = pending.tokens[cut:]
+            if gate := getattr(self, "echo_gate", None):
+                gate.forget(finished)
             if u:
                 out.append(u)
         return out
@@ -135,18 +143,22 @@ class Track:
             return None
         own = own_track.pending[own_speaker].tokens
         other = self.pending[other_speaker].tokens
-        if not own:
-            return None
         for i, first in enumerate(other):
             start = self._wall_time(first.start)
-            if not any(own_track._wall_time(token.end) <= start for token in own):
-                continue
             run = other[i:]
-            if len(run) > 1 and self._wall_time(run[-1].end) - start >= 1.0:
-                cut = next((j for j, token in enumerate(own)
-                            if own_track._wall_time(token.start) >= start), len(own))
-                if cut:
-                    return cut
+            sustained = next((j for j, token in enumerate(run[1:], 1)
+                              if self._wall_time(token.end) - start >= 0.8), None)
+            if sustained is None:
+                continue
+            end = self._wall_time(run[sustained].end)
+            own_times = [(own_track._wall_time(token.start), own_track._wall_time(token.end))
+                         for token in own]
+            if any(a < end and b > start for a, b in own_times):
+                continue
+            cut = next((j for j, token in enumerate(own)
+                        if own_track._wall_time(token.start) >= start), len(own))
+            if cut:
+                return cut
         return None
 
     def _wall_time(self, seconds):
@@ -164,9 +176,14 @@ class Track:
 
 
 def flush_tracks(tracks, force=False):
-    plans = [track._flush_plan(tracks, force) for track in tracks]
-    return sorted((utterance for track, cuts in zip(tracks, plans)
-                   for utterance in track._apply_flush(cuts)), key=lambda u: u.wall)
+    plans = [track._flush_plan(tracks, False) for track in tracks]
+    out = [utterance for track, cuts in zip(tracks, plans)
+           for utterance in track._apply_flush(cuts)]
+    if force:
+        plans = [track._flush_plan(tracks, True) for track in tracks]
+        out.extend(utterance for track, cuts in zip(tracks, plans)
+                   for utterance in track._apply_flush(cuts))
+    return sorted(out, key=lambda u: u.wall)
 
 
 def _monologue_cut(tokens):
@@ -193,50 +210,67 @@ class EchoGate:
     def __init__(self, lag=1.0, window=1.5):
         self.lag, self.window = lag, window
         self.pending, self.system, self.seen = [], [], set()
+        self.mic_seen, self.run = set(), []
+
+    def hold(self, speaker, tokens):
+        fresh = [token for token in tokens if id(token) not in self.mic_seen]
+        self.pending.extend((speaker, token) for token in fresh)
+        self.mic_seen.update(id(token) for token in fresh)
+
+    def forget(self, tokens):
+        self.mic_seen.difference_update(id(token) for token in tokens)
 
     def capture(self, mic, system):
         for token in (token for pending in system.pending.values() for token in pending.tokens):
             if id(token) not in self.seen:
-                self.system.append(token)
+                self.system.append((system, token))
                 self.seen.add(id(token))
         for speaker, pending in mic.pending.items():
-            self.pending.extend((speaker, token) for token in pending.tokens)
-            pending.tokens.clear()
+            fresh = [(speaker, token) for token in pending.tokens if id(token) not in self.mic_seen]
+            self.pending.extend(fresh)
+            self.mic_seen.update(id(token) for _, token in fresh)
+            if fresh:
+                fresh_ids = {id(token) for _, token in fresh}
+                pending.tokens[:] = [token for token in pending.tokens if id(token) not in fresh_ids]
 
     def release(self, mic, watermark, final=False):
-        ready, waiting, dropped = [], [], []
-        for speaker, token in self.pending:
+        ready, waiting = [], []
+        for item in self.pending:
+            speaker, token = item
             if not final and watermark < mic._wall_time(token.end) + self.lag:
-                waiting.append((speaker, token))
+                waiting.append(item)
             else:
-                ready.append((speaker, token))
+                ready.append(item)
         self.pending = waiting
-        times = [(mic._wall_time(token.start), mic._wall_time(token.end), _words(token.text))
-                 for token in self.system]
-        keep = []
-        i = 0
-        while i < len(ready):
-            speaker, token = ready[i]
-            words = _words(token.text)
-            matched = words and _echo_match(token, times, mic, self.window)
-            run = [(speaker, token)]
-            if matched:
-                j = i + 1
-                while j < len(ready) and _echo_match(ready[j][1], times, mic, self.window):
-                    run.append(ready[j]); j += 1
-                if len(run) >= 2:
-                    dropped.extend(token for _, token in run)
-                    i = j
-                    continue
-            keep.append((speaker, token))
-            i += 1
+        times = [(track._wall_time(token.start), track._wall_time(token.end), _words(token.text))
+                 for track, token in self.system]
+        keep, dropped = [], []
+        for item in ready:
+            speaker, token = item
+            if _echo_match(token, times, mic, self.window):
+                self.run.append(item)
+                continue
+            if len(self.run) == 1:
+                keep.extend(self.run)
+            elif self.run:
+                dropped.extend(token for _, token in self.run)
+            self.run.clear()
+            keep.append(item)
+        if final:
+            if len(self.run) == 1:
+                keep.extend(self.run)
+            else:
+                dropped.extend(token for _, token in self.run)
+            self.run.clear()
         for speaker, token in keep:
             mic.pending.setdefault(speaker, _Pending()).tokens.append(token)
+        self.forget(dropped)
         if dropped:
             log(f"echo: dropped {len(dropped)} mic tokens ({' '.join(t.text for t in dropped).strip()!r})")
-        cutoff = watermark - mic.t0.timestamp() - self.window
-        retained = [token for token in self.system if token.end >= cutoff]
-        self.seen = {id(token) for token in retained}
+        cutoff = watermark - self.window
+        retained = [(track, token) for track, token in self.system
+                    if track._wall_time(token.end) >= cutoff]
+        self.seen = {id(token) for _, token in retained}
         self.system = retained
         return [token for _, token in keep]
 
@@ -257,9 +291,8 @@ class Sink:
         self.jsonl = open(txt_path.with_suffix(".jsonl"), "a", buffering=1)
         self.names = {}
         self.txt.seek(0, 2)
-        self.offset = self.txt.tell()
         self.txt.write(f"# {header}\n")
-        self.offset = self.txt.tell()
+        self.offset = self.path.stat().st_size
 
     def name(self, speaker, name):
         self.names[speaker] = name
@@ -269,10 +302,11 @@ class Sink:
                                      "name": {"speaker": speaker, "as": name}}, ensure_ascii=False) + "\n")
 
     def poll_names(self):
-        self.txt.seek(self.offset)
-        data = self.txt.read()
-        complete = data.rfind("\n") + 1
-        lines = data[:complete].splitlines()
+        with self.path.open("rb") as transcript:
+            transcript.seek(self.offset)
+            data = transcript.read()
+        complete = data.rfind(b"\n") + 1
+        lines = data[:complete].decode("utf-8").splitlines()
         self.offset += complete
         for line in lines:
             if match := re.fullmatch(r"# (S\d+) = (.+)", line):

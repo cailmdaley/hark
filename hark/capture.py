@@ -55,7 +55,10 @@ class Source:
                 break
         if self.live and self.anchor is not None:
             got = sum(b.size for b in blocks)
-            behind = (time.time() - self.anchor) * SAMPLE_RATE - self.delivered - got
+            if self.queue.empty():
+                behind = (time.time() - self.anchor) * SAMPLE_RATE - self.delivered - got
+            else:
+                behind = 0
             if behind > LATE_OK * SAMPLE_RATE:
                 blocks.append(np.zeros(int(behind - LATE_OK * SAMPLE_RATE / 2), np.float32))
         out = np.concatenate(blocks) if blocks else np.zeros(0, np.float32)
