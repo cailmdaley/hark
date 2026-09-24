@@ -38,6 +38,22 @@ uv run hark --file x.m4a    # a recording, through the same streaming path (~0.1
 uv run hark --title "shear telecon"   # names the session file
 ```
 
+### Meetings on a project host
+
+Start capture on the Mac and dispatch a scribe beside the project:
+
+```bash
+uv run hark meeting --host candide --project /path/to/project --under tools/hark --title "shear telecon"
+```
+
+The command syncs the host's felt store, creates a meeting fiber, assigns the
+scribe role, and dispatches it before capturing audio.
+The transcript stays on the Mac and its `.txt` file streams to
+`~/.hark/meetings/` on the host; `--room` selects mic-only capture.
+For rehearsals, pass `--file recording.wav --realtime`.
+Use `--agent` to select the Shuttle model and `--store` to select the host's felt store.
+Direct capture can also mirror a transcript with `--mirror HOST:PATH`.
+
 Each line is a conversational turn, not a pause-delimited fragment: brief
 silences keep accumulating, a sustained reply (at least 1 s of speech) ends the
 turn, and a 3 s silence ends it when nobody takes over. Short backchannels do

@@ -18,6 +18,8 @@ from datetime import datetime
 from pathlib import Path
 
 from .capture import SAMPLE_RATE, FileSource, MicSource, SystemSource, log
+from .meeting import prepare_remote_meeting, render_meeting_fiber
+from .mirror import TranscriptMirror
 from .transcript import EchoGate, Sink, Track, flush_tracks, load_models, numbered
 
 HOME = Path(os.environ.get("HARK_DIR", Path.home() / ".hark")).expanduser().resolve()
@@ -36,6 +38,8 @@ def main(argv=None):
         args = ap.parse_args(argv[1:])
         _name_current(args.speaker, args.name, args.session)
         return 0
+    if argv and argv[0] == "meeting":
+        return _meeting(argv[1:])
     ap = argparse.ArgumentParser(prog="hark", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     mode = ap.add_mutually_exclusive_group()
@@ -49,6 +53,7 @@ def main(argv=None):
     ap.add_argument("--gap", type=float, default=3.0,
                     help="seconds of silence that end a turn when nobody else takes over")
     ap.add_argument("--title", help="appended to the session filename")
+    ap.add_argument("--mirror", help="append the transcript to HOST:PATH over SSH")
     ap.add_argument("-o", "--out", type=Path, help="write the transcript here instead of ~/.hark/sessions/")
     args = ap.parse_args(argv)
     if args.realtime and not args.file:
@@ -91,6 +96,13 @@ def main(argv=None):
             track.audio = None
     tracks_by_name = {track.name: track for _, track in tracks}
     log(f"transcript → {out}")
+    mirror = None
+    if args.mirror:
+        host, separator, remote_path = args.mirror.partition(":")
+        if not separator or not host or not remote_path:
+            ap.error("--mirror must be HOST:PATH")
+        mirror = TranscriptMirror(out, host, remote_path)
+        mirror.start()
 
     stop = False
 
@@ -124,6 +136,8 @@ def main(argv=None):
                         else datetime.fromtimestamp(src.anchor))
         log("listening (Ctrl-C to stop)")
         while not stop:
+            if mirror:
+                mirror.check()
             sink.poll_names()
             busy = False
             for src, track in tracks:
@@ -156,9 +170,71 @@ def main(argv=None):
                 emit(u)
         finally:
             sink.close(f"ended {datetime.now():%H:%M:%S}")
+            if mirror:
+                mirror.finish(timeout=30)
     audio = max(t.processed for _, t in tracks)
     wall = time.monotonic() - started
     log(f"done: {audio:.0f} s of audio in {wall:.0f} s (real-time factor {wall / max(audio, 1e-9):.2f})")
+
+
+def _meeting(argv):
+    ap = argparse.ArgumentParser(prog="hark meeting")
+    ap.add_argument("--host", required=True)
+    ap.add_argument("--project", required=True, help="project checkout on the host")
+    ap.add_argument("--under", required=True, help="parent fiber path in the felt store")
+    ap.add_argument("--title", required=True)
+    ap.add_argument("--agent", default="claude-opus")
+    ap.add_argument("--store", default="~/loom", help="felt store on the host")
+    mode = ap.add_mutually_exclusive_group()
+    mode.add_argument("--room", action="store_true", help="mic only, diarized")
+    mode.add_argument("--file", help="replay an audio file through the streaming path")
+    ap.add_argument("--realtime", action="store_true", help="with --file: replay at real-time pace")
+    ap.add_argument("--mic", help="input device name or index")
+    ap.add_argument("--lang", help="ASR language, e.g. en-US, fr-FR")
+    ap.add_argument("--latency", default="low", choices=["low", "very_low", "ultra_low"])
+    ap.add_argument("--gap", type=float, default=3.0)
+    args = ap.parse_args(argv)
+    if args.realtime and not args.file:
+        ap.error("--realtime only applies to --file")
+    if args.file and not Path(args.file).is_file():
+        ap.error(f"audio file does not exist: {args.file}")
+
+    now = datetime.now()
+    slug = _meeting_slug(args.title)
+    transcript_path = f"~/.hark/meetings/{now:%Y-%m-%d_%H%M}_{slug}.txt"
+    fiber_id = f"{args.under}/meetings/{now:%Y-%m-%d}-{slug}"
+    when = now.astimezone().strftime("%Y-%m-%d %H:%M %Z")
+    body = render_meeting_fiber(title=args.title, when=when, host=args.host,
+                                transcript_path=transcript_path)
+    prepare_remote_meeting(
+        host=args.host, project=args.project, store=args.store, fiber_id=fiber_id,
+        under=args.under, title=args.title, agent=args.agent,
+        transcript_path=transcript_path, body=body,
+    )
+    print(f"meeting fiber: {fiber_id}", file=sys.stderr)
+    log(f"watch transcript: ssh {args.host} 'tail -F {transcript_path}'")
+    log(f"watch notes: ssh {args.host} 'felt -C {args.store} show {fiber_id}'")
+
+    capture = ["--title", args.title, "--mirror", f"{args.host}:{transcript_path}",
+               "--latency", args.latency, "--gap", str(args.gap)]
+    if args.room:
+        capture.append("--room")
+    if args.file:
+        capture.extend(["--file", args.file])
+    if args.realtime:
+        capture.append("--realtime")
+    if args.mic:
+        capture.extend(["--mic", args.mic])
+    if args.lang:
+        capture.extend(["--lang", args.lang])
+    return main(capture)
+
+
+def _meeting_slug(title):
+    slug = _slug(title)
+    while "--" in slug:
+        slug = slug.replace("--", "-")
+    return slug or "meeting"
 
 
 def _enroll(argv):
