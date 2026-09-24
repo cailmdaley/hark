@@ -99,7 +99,7 @@ def main(argv=None):
     for src, _ in sources:
         src.stop()
     for src, track in tracks:
-        for u in track.feed(src.drain(), final=True):
+        for u in track.feed(src.drain(limit=float("inf")), final=True):
             sink.write(u)
             print(u.line(), flush=True)
     audio = max(t.processed for _, t in tracks)

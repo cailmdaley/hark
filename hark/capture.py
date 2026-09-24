@@ -31,10 +31,10 @@ class Source:
         self.name = name
         self.queue = queue.Queue()
 
-    def drain(self):
-        """All samples captured since the last call (possibly empty)."""
+    def drain(self, limit=2 * SAMPLE_RATE):
+        """Samples captured since the last call, up to about `limit` (possibly empty)."""
         blocks = []
-        while True:
+        while sum(b.size for b in blocks) < limit:
             try:
                 blocks.append(self.queue.get_nowait())
             except queue.Empty:
