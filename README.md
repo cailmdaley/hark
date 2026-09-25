@@ -24,7 +24,10 @@ With `hark meeting`, only the resulting transcript is mirrored to the selected h
 ```bash
 scripts/build-audiotee.sh   # system-audio tap (Swift, pinned commit) → bin/audiotee
 uv sync
+ln -s "$PWD/.venv/bin/hark" ~/.local/bin/hark
 ```
+
+The symlink puts the venv's `hark` executable on the Shuttle board's `PATH`.
 
 macOS permissions for the terminal that runs hark: **Microphone**, and
 **Screen & System Audio Recording → System Audio Recording Only**. Restart the
@@ -39,7 +42,7 @@ uv run hark --file x.m4a    # a recording, through the same streaming path (~0.1
 uv run hark --title "shear telecon"   # names the session file
 ```
 
-### Meetings on a project host
+### Meetings with a scribe
 
 Start capture on the Mac and dispatch a scribe beside the project:
 
@@ -47,15 +50,15 @@ Start capture on the Mac and dispatch a scribe beside the project:
 uv run hark meeting --host candide --project /path/to/project --under tools/hark --title "shear telecon"
 ```
 
-The command loads models and opens the local audio source before preparing the
-host's felt fiber, assigning the scribe role, and dispatching it.
-If host setup fails, capture continues to a local session file and prints manual
-recovery steps.
-The transcript stays on the Mac and its `.txt` file streams to
-`~/.hark/meetings/` on the host; `--room` selects mic-only capture.
+`--host` is optional; omit it when the project lives on this machine.
+Hark then runs the setup locally and writes the transcript directly to the scribe's file, without mirroring.
+The command loads models and opens the local audio source before preparing the felt fiber, assigning the scribe role, and dispatching it.
+If setup fails, capture continues locally; remote meetings print manual recovery steps.
+For a remote host, the transcript stays on the Mac and its `.txt` file streams to `~/.hark/meetings/` on the host.
 If the mirror doesn't deliver `# ended`, hark prints a `hark mirror --resume` command.
-For rehearsals, pass `--file recording.wav --realtime`.
-Use `--agent` to select the Shuttle model and `--store` to select the host's felt store.
+`--room` selects mic-only capture; for rehearsals, pass `--file recording.wav --realtime`.
+Use `--agent` to select the Shuttle model and `--store` to select the felt store.
+The lifecycle state lives in `$HARK_DIR/meeting.json` (`~/.hark/meeting.json` by default); send one SIGINT to its `pid` to stop a meeting cleanly, and don't signal again while its phase is `stopping`.
 Direct capture can also mirror a transcript with `--mirror HOST:PATH`.
 
 Each line is a conversational turn, not a pause-delimited fragment: brief

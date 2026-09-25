@@ -5,7 +5,8 @@ import textwrap
 
 import pytest
 
-from hark.meeting import build_remote_setup, prepare_remote_meeting, render_meeting_fiber
+from hark.meeting import (build_local_setup, build_remote_setup, prepare_remote_meeting,
+                          render_meeting_fiber)
 
 
 def test_meeting_constitution_rendering_carries_scribe_contract():
@@ -61,7 +62,8 @@ def test_remote_setup_is_one_ssh_round_trip_with_safe_ordering():
     assert script.index('felt -C "$store" add') < script.index('touch -- "$transcript"')
     assert 'felt -C "$store" add --top-level --body "$body"' in script
     assert '-- "$fiber_id" "$title"' in script
-    assert 'felt -C "$store" shuttle install "$fiber_id" --host "$host" --project-dir "$project" --model "$agent" </dev/null' in script
+    assert 'felt -C "$store" shuttle install "$fiber_id" --project-dir "$project" --model "$agent" </dev/null' in script
+    assert "--host" not in script
     assert 'felt -C "$store" shuttle assign "$fiber_id" --role scribe --collaborator "$agent" </dev/null' in script
     assert 'felt -C "$store" edit "$fiber_id" --status active </dev/null' in script
     assert 'felt -C "$store" sync --push </dev/null' in script
@@ -90,7 +92,8 @@ def test_remote_setup_is_one_ssh_round_trip_with_safe_ordering():
     assert calls[0][1] == {"stdin": subprocess.DEVNULL, "text": True, "check": True}
 
 
-def run_setup(tmp_path, title, *, fail=None, eat_stdin=None, under="proj/sub", parent=True):
+def run_setup(tmp_path, title, *, fail=None, eat_stdin=None, under="proj/sub", parent=True,
+              local=False):
     home, bin_ = tmp_path / "home", tmp_path / "bin"
     project = home / "proj"
     store = home / "loom" / ".felt"
@@ -116,14 +119,15 @@ def run_setup(tmp_path, title, *, fail=None, eat_stdin=None, under="proj/sub", p
         """))
     stub.chmod(0o755)
     fiber = f"{under}/meetings/2026-09-25-1015-x"
-    command, script = build_remote_setup(
-        host="candide", project="~/proj", store="~/loom", fiber_id=fiber, under=under,
-        title=title, agent="claude-opus", transcript_path="~/.hark/meetings/t.txt",
-        body="body $HOME `id`\n")
+    setup = dict(
+        project="~/proj", store="~/loom", fiber_id=fiber, under=under, title=title,
+        agent="claude-opus", transcript_path="~/.hark/meetings/t.txt", body="body $HOME `id`\n",
+    )
+    command, script = (build_local_setup(**setup) if local else
+                       build_remote_setup(host="candide", **setup))
     env = {"HOME": str(home), "PATH": f"{bin_}:/usr/bin:/bin"}
-    remote_command = " ".join(command[2:])
-    result = subprocess.run(["bash", "-c", remote_command], stdin=subprocess.DEVNULL,
-                            text=True, env=env, capture_output=True)
+    result = subprocess.run(command if local else ["bash", "-c", " ".join(command[2:])],
+                            stdin=subprocess.DEVNULL, text=True, env=env, capture_output=True)
     calls = [ast.literal_eval(line) for line in log.read_text().splitlines()] if log.exists() else []
     return result, calls, home, script
 
@@ -137,6 +141,16 @@ def test_title_reaches_felt_verbatim(tmp_path, title):
     assert add[separator + 1] == "proj/sub/meetings/2026-09-25-1015-x"
     assert add[separator + 2] == title
     assert add[add.index("--body") + 1] == "body $HOME `id`"
+
+
+def test_local_setup_runs_bash_directly_and_uses_felt_host_identity(tmp_path):
+    result, calls, home, script = run_setup(tmp_path, "Standup", local=True)
+    assert result.returncode == 0, result.stderr
+    assert (home / ".hark/meetings/t.txt").exists()
+    install = next(c for c in calls if c[2:4] == ["shuttle", "install"])
+    assert "--host" not in install
+    assert 'felt -C "$store" shuttle install "$fiber_id" --project-dir "$project"' in script
+    assert "ssh " not in script
 
 
 def test_setup_failure_after_fiber_creation_preserves_transcript(tmp_path):

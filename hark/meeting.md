@@ -1,4 +1,4 @@
-A scribe fiber for **$title**, held $when on $host. Cail is on the laptop, running hark on his Mac; the live transcript is `$transcript_path` and is mirrored from hark on Cail's Mac. `me` means Cail in call mode; S1… are anonymous until a `# S2 = name` line appears. [[roles/scribe]]
+A scribe fiber for **$title**, held $when on $host. Cail is on the laptop, running hark on his Mac; the live transcript is `$transcript_path`$transcript_note. `me` means Cail in call mode; S1… are anonymous until a `# S2 = name` line appears. [[roles/scribe]]
 
 ## Desired State
 

@@ -13,18 +13,55 @@ import json
 import os
 import shlex
 import signal
+import socket
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime
 from pathlib import Path
 
 from .capture import SAMPLE_RATE, FileSource, MicSource, SystemSource, log
-from .meeting import prepare_remote_meeting, render_meeting_fiber
+from .meeting import prepare_local_meeting, prepare_remote_meeting, render_meeting_fiber
 from .mirror import TranscriptMirror
 from .transcript import Sink, Track, flush_tracks, load_models, numbered
 
 HOME = Path(os.environ.get("HARK_DIR", Path.home() / ".hark")).expanduser().resolve()
+
+
+class MeetingLifecycle:
+    def __init__(self, *, title, host, project, under, store, fiber, started):
+        self.path = HOME / "meeting.json"
+        self.data = {
+            "pid": os.getpid(), "phase": "loading", "title": title, "host": host,
+            "project": project, "under": under, "store": store, "fiber": fiber,
+            "started": started, "transcript": None, "mirror": None, "error": None,
+        }
+        self.write()
+
+    def update(self, phase=None, **values):
+        if phase and (self.data["phase"] != "stopping" or phase in {"ended", "failed"}):
+            self.data["phase"] = phase
+        self.data.update(values)
+        self.write()
+
+    def stopping(self):
+        if self.data["phase"] in {"loading", "live", "local"}:
+            self.update("stopping")
+
+    def write(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        fd, temporary = tempfile.mkstemp(dir=self.path.parent, prefix=".meeting-", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w") as state:
+                json.dump(self.data, state, indent=2)
+                state.write("\n")
+            os.replace(temporary, self.path)
+        finally:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
 
 
 def _emit(u, sink, matcher, tracks_by_name, failed_slots):
@@ -43,7 +80,8 @@ def _emit(u, sink, matcher, tracks_by_name, failed_slots):
         sys.stdout = open(os.devnull, "w")
 
 
-def main(argv=None, *, session_now=None, after_sources=None, fallback_target=None):
+def main(argv=None, *, session_now=None, session_path=None, after_sources=None,
+         fallback_target=None, meeting_lifecycle=None, setup_before_sink=False):
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv and argv[0] == "enroll":
         _enroll(argv[1:])
@@ -85,6 +123,22 @@ def main(argv=None, *, session_now=None, after_sources=None, fallback_target=Non
             ap.error("--mirror must be HOST:PATH")
         mirror_target = host, remote_path
 
+    stop = False
+
+    def on_signal(*_):
+        nonlocal stop
+        stop = True
+        if meeting_lifecycle:
+            meeting_lifecycle.stopping()
+        signal.signal(signal.SIGINT, signal.SIG_DFL)  # a second Ctrl-C quits hard
+
+    def install_signal_handlers():
+        for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+            signal.signal(sig, on_signal)
+
+    if meeting_lifecycle:
+        install_signal_handlers()
+
     if args.file:
         sources = [(FileSource(args.file, realtime=args.realtime), numbered)]
         what = f"file {args.file}"
@@ -99,6 +153,8 @@ def main(argv=None, *, session_now=None, after_sources=None, fallback_target=Non
     try:
         asr, diar = load_models(args.latency)
     except KeyboardInterrupt:
+        if meeting_lifecycle:
+            raise
         return 130
     tracks = [(src, Track(src.name, asr, diar, speaker_label=label, language=args.lang,
                           gap=args.gap))
@@ -106,36 +162,37 @@ def main(argv=None, *, session_now=None, after_sources=None, fallback_target=Non
 
     all_tracks = [track for _, track in tracks]
     now = session_now or datetime.now()
-    out = args.out.with_suffix(".txt") if args.out else _session_path(now, args.title)
+    out = (Path(session_path) if session_path else
+           args.out.with_suffix(".txt") if args.out else _session_path(now, args.title))
     out.parent.mkdir(parents=True, exist_ok=True)
-    if not (args.out or args.file):  # a replay never hijacks the live session's link
-        _point_current(out)
-    sink = Sink(out, f"hark {now:%Y-%m-%d %H:%M} — {what}")
     import numpy as np
 
     voices = {path.stem: np.load(path) for path in (HOME / "voices").glob("*.npy")} if (HOME / "voices").exists() else {}
     from .voice import VoiceMatcher
 
-    matcher = VoiceMatcher(voices, sink) if voices else None
     if not voices:
         for track in all_tracks:
             track.audio = None
     tracks_by_name = {track.name: track for _, track in tracks}
-    log(f"transcript → {out}")
+    sink = None
+    matcher = None
     mirror = None
     host_setup_failed = False
-
-    stop = False
-
-    def on_signal(*_):
-        nonlocal stop
-        stop = True
-        signal.signal(signal.SIGINT, signal.SIG_DFL)  # a second Ctrl-C quits hard
-
-    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
-        signal.signal(sig, on_signal)
-
     failed_slots = set()
+
+    def open_sink():
+        nonlocal sink, matcher
+        if not args.file and (not args.out or session_path):
+            _point_current(out)
+        sink = Sink(out, f"hark {now:%Y-%m-%d %H:%M} — {what}")
+        if voices:
+            matcher = VoiceMatcher(voices, sink)
+        log(f"transcript → {out}")
+
+    if not setup_before_sink:
+        open_sink()
+    if not meeting_lifecycle:
+        install_signal_handlers()
 
     started = time.monotonic()
     try:
@@ -143,17 +200,27 @@ def main(argv=None, *, session_now=None, after_sources=None, fallback_target=Non
             src.start()
             track.t0 = (datetime.combine(now.date(), datetime.min.time()) if args.file
                         else datetime.fromtimestamp(src.anchor))
-        if after_sources:
+        if meeting_lifecycle and sink:
+            meeting_lifecycle.update(transcript=str(out))
+        if after_sources and not stop:
             try:
                 meeting_target = after_sources(out)
             except Exception as error:
                 log(f"meeting: host setup failed ({error}); continuing with the local transcript at {out}")
                 meeting_target = None
-            if meeting_target:
+            if meeting_target is None:
+                host_setup_failed = True
+            elif meeting_target:
                 host, _, remote_path = meeting_target.partition(":")
                 mirror_target = (host, remote_path)
-            else:
-                host_setup_failed = True
+        if setup_before_sink:
+            open_sink()
+        if meeting_lifecycle:
+            meeting_lifecycle.update(
+                "local" if host_setup_failed else "live",
+                transcript=str(out),
+                mirror=f"{mirror_target[0]}:{mirror_target[1]}" if mirror_target else None,
+            )
         if mirror_target:
             mirror = TranscriptMirror(out, *mirror_target)
             mirror.start()
@@ -179,9 +246,11 @@ def main(argv=None, *, session_now=None, after_sources=None, fallback_target=Non
             for src, track in tracks:
                 track.feed(src.drain(limit=float("inf")), final=True)
             for u in flush_tracks(all_tracks, force=True):
-                _emit(u, sink, matcher, tracks_by_name, failed_slots)
+                if sink:
+                    _emit(u, sink, matcher, tracks_by_name, failed_slots)
         finally:
-            sink.close(f"ended {datetime.now():%H:%M:%S}")
+            if sink:
+                sink.close(f"ended {datetime.now():%H:%M:%S}")
             if mirror:
                 mirror.finish(timeout=30)
             elif host_setup_failed and fallback_target:
@@ -194,12 +263,12 @@ def main(argv=None, *, session_now=None, after_sources=None, fallback_target=Non
 
 def _meeting(argv):
     ap = argparse.ArgumentParser(prog="hark meeting")
-    ap.add_argument("--host", required=True)
-    ap.add_argument("--project", required=True, help="project checkout on the host")
+    ap.add_argument("--host", help="SSH alias; omit when the project is on this machine")
+    ap.add_argument("--project", required=True, help="project checkout on the scribe machine")
     ap.add_argument("--under", required=True, help="parent fiber path in the felt store")
     ap.add_argument("--title", required=True)
     ap.add_argument("--agent", default="claude-opus")
-    ap.add_argument("--store", default="~/loom", help="felt store on the host")
+    ap.add_argument("--store", default="~/loom", help="felt store on the scribe machine")
     mode = ap.add_mutually_exclusive_group()
     mode.add_argument("--room", action="store_true", help="mic only, diarized")
     mode.add_argument("--file", help="replay an audio file through the streaming path")
@@ -209,6 +278,8 @@ def _meeting(argv):
     ap.add_argument("--latency", default="low", choices=["low", "very_low", "ultra_low"])
     ap.add_argument("--gap", type=float, default=3.0)
     args = ap.parse_args(argv)
+    if args.host == "":
+        ap.error("--host must be a non-empty SSH alias; omit it for local setup")
     if args.realtime and not args.file:
         ap.error("--realtime only applies to --file")
     if args.file and not Path(args.file).is_file():
@@ -216,43 +287,76 @@ def _meeting(argv):
 
     now = datetime.now()
     slug = _meeting_slug(args.title)
-    transcript_path = f"~/.hark/meetings/{now:%Y-%m-%d_%H%M}_{slug}.txt"
+    filename = f"{now:%Y-%m-%d_%H%M}_{slug}.txt"
+    transcript_path = (f"~/.hark/meetings/{filename}" if args.host else
+                       str(HOME / "meetings" / filename))
     fiber_id = f"{args.under}/meetings/{now:%Y-%m-%d-%H%M}-{slug}"
-    when = now.astimezone().strftime("%Y-%m-%d %H:%M %Z")
-    body = render_meeting_fiber(title=args.title, when=when, host=args.host,
-                                transcript_path=transcript_path)
+    lifecycle = MeetingLifecycle(
+        title=args.title, host=args.host, project=args.project, under=args.under,
+        store=args.store, fiber=fiber_id,
+        started=now.astimezone().isoformat(timespec="seconds"),
+    )
 
-    def prepare_host(out):
-        try:
-            prepare_remote_meeting(
-                host=args.host, project=args.project, store=args.store, fiber_id=fiber_id,
-                under=args.under, title=args.title, agent=args.agent,
-                transcript_path=transcript_path, body=body,
+    try:
+        when = now.astimezone().strftime("%Y-%m-%d %H:%M %Z")
+        body = render_meeting_fiber(
+            title=args.title, when=when, host=args.host or socket.gethostname().split(".")[0],
+            transcript_path=transcript_path, mirrored=bool(args.host),
+        )
+
+        def prepare_host(out):
+            setup = dict(
+                project=args.project, store=args.store, fiber_id=fiber_id, under=args.under,
+                title=args.title, agent=args.agent, transcript_path=transcript_path, body=body,
             )
-        except Exception as error:
-            failure = (f"SSH exited with status {error.returncode}"
-                       if isinstance(error, subprocess.CalledProcessError) else str(error))
-            log(f"meeting: host setup failed ({failure}); capturing locally at {out}. "
-                f"Repair {fiber_id} on {args.host}; hark will print the transcript recovery command at shutdown")
-            return None
-        log(f"meeting fiber: {fiber_id}")
-        log(f"watch transcript: ssh {args.host} 'tail -F {transcript_path}'")
-        log(f"watch notes: ssh {args.host} 'felt -C {args.store} show {fiber_id}'")
-        return f"{args.host}:{transcript_path}"
+            try:
+                if args.host:
+                    prepare_remote_meeting(host=args.host, **setup)
+                else:
+                    prepare_local_meeting(**setup)
+            except Exception as error:
+                failure = (f"SSH exited with status {error.returncode}"
+                           if isinstance(error, subprocess.CalledProcessError) else str(error))
+                if args.host:
+                    recovery = (f"Repair {fiber_id} on {args.host}; hark will print the transcript "
+                                "recovery command at shutdown")
+                else:
+                    recovery = f"Repair {fiber_id} locally"
+                log(f"meeting: host setup failed ({failure}); capturing locally at {out}. {recovery}")
+                return None
+            log(f"meeting fiber: {fiber_id}")
+            if args.host:
+                log(f"watch transcript: ssh {args.host} 'tail -F {transcript_path}'")
+                log(f"watch notes: ssh {args.host} 'felt -C {args.store} show {fiber_id}'")
+                return f"{args.host}:{transcript_path}"
+            log(f"watch transcript: tail -F {transcript_path}")
+            log(f"watch notes: felt -C {args.store} show {fiber_id}")
+            return ""
 
-    capture = ["--title", args.title, "--latency", args.latency, "--gap", str(args.gap)]
-    if args.room:
-        capture.append("--room")
-    if args.file:
-        capture.extend(["--file", args.file])
-    if args.realtime:
-        capture.append("--realtime")
-    if args.mic:
-        capture.extend(["--mic", args.mic])
-    if args.lang:
-        capture.extend(["--lang", args.lang])
-    return main(capture, session_now=now, after_sources=prepare_host,
-                fallback_target=f"{args.host}:{transcript_path}")
+        capture = ["--title", args.title, "--latency", args.latency, "--gap", str(args.gap)]
+        if args.room:
+            capture.append("--room")
+        if args.file:
+            capture.extend(["--file", args.file])
+        if args.realtime:
+            capture.append("--realtime")
+        if args.mic:
+            capture.extend(["--mic", args.mic])
+        if args.lang:
+            capture.extend(["--lang", args.lang])
+        result = main(
+            capture, session_now=now,
+            session_path=HOME / "meetings" / filename if not args.host else None,
+            after_sources=prepare_host,
+            fallback_target=f"{args.host}:{transcript_path}" if args.host else None,
+            meeting_lifecycle=lifecycle,
+            setup_before_sink=not bool(args.host),
+        )
+    except BaseException as error:
+        lifecycle.update("failed", error=" ".join(str(error).split()) or type(error).__name__)
+        raise
+    lifecycle.update("ended")
+    return result
 
 
 def _resume_mirror(argv):
