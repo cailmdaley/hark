@@ -2,6 +2,7 @@ from datetime import datetime
 import json
 import os
 from pathlib import Path
+import signal
 import threading
 import time
 from types import SimpleNamespace
@@ -114,16 +115,200 @@ def test_mirror_resume_verb_reopens_an_existing_target(tmp_path, monkeypatch):
                     "remote_path": "~/notes.txt", "resume": True}
 
 
-def test_meeting_opens_capture_before_best_effort_host_setup(tmp_path, monkeypatch, capsys):
+def fake_live_capture(monkeypatch, tmp_path, *, load_models=None):
     import hark.cli as cli
 
-    events = []
-    now = datetime(2026, 9, 25, 10, 15, 30)
+    class Source:
+        name = "mic"
 
-    class Clock(datetime):
-        @classmethod
-        def now(cls, tz=None):
-            return now
+        def __init__(self, *args, **kwargs):
+            self.anchor = None
+            self.starts = 0
+
+        def start(self):
+            self.anchor = time.time()
+            self.starts += 1
+
+        def stop(self):
+            pass
+
+        def drain(self, limit):
+            return np.zeros(0, dtype=np.float32)
+
+    class FakeTrack:
+        def __init__(self, name, *args, **kwargs):
+            self.name, self.processed, self.audio = name, 0.0, None
+
+        def feed(self, *args, **kwargs):
+            pass
+
+    monkeypatch.setattr(cli, "HOME", tmp_path)
+    monkeypatch.setattr(cli, "MicSource", Source)
+    monkeypatch.setattr(cli, "Track", FakeTrack)
+    monkeypatch.setattr(cli, "load_models", load_models or (lambda latency: (None, None)))
+    monkeypatch.setattr(cli, "flush_tracks", lambda tracks, force=False: [])
+    return cli, Source
+
+
+def record_lifecycle_phases(monkeypatch, cli, tmp_path):
+    phases = []
+    replace = cli.os.replace
+
+    def record_replace(source, target):
+        if Path(target) == tmp_path / "meeting.json":
+            phases.append(json.loads(Path(source).read_text()))
+        replace(source, target)
+
+    monkeypatch.setattr(cli.os, "replace", record_replace)
+    return phases
+
+
+def signal_when_live(tmp_path):
+    state_path = tmp_path / "meeting.json"
+    observations = []
+
+    def send_signal():
+        signal.pthread_sigmask(signal.SIG_BLOCK,
+                               {signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGUSR1})
+        deadline = time.monotonic() + 3
+        while time.monotonic() < deadline:
+            if state_path.exists() and json.loads(state_path.read_text())["phase"] == "live":
+                sent = time.monotonic()
+                os.kill(os.getpid(), signal.SIGINT)
+                deadline = time.monotonic() + 1
+                while time.monotonic() < deadline:
+                    if json.loads(state_path.read_text())["phase"] == "stopping":
+                        observations.append(time.monotonic() - sent)
+                        return
+                    time.sleep(0.005)
+                observations.append(None)
+                return
+            time.sleep(0.005)
+        observations.append(None)
+
+    thread = threading.Thread(target=send_signal)
+    thread.start()
+    return thread, observations
+
+
+def test_live_capture_ends_cleanly_and_records_lifecycle(tmp_path, monkeypatch):
+    cli, _ = fake_live_capture(monkeypatch, tmp_path)
+    phases = record_lifecycle_phases(monkeypatch, cli, tmp_path)
+    signaller, latency = signal_when_live(tmp_path)
+    out = tmp_path / "sessions" / "normal.txt"
+
+    cli.main(["--room", "-o", str(out), "--title", "Planning"])
+    signaller.join(timeout=2)
+
+    state = json.loads((tmp_path / "meeting.json").read_text())
+    assert [snapshot["phase"] for snapshot in phases] == ["loading", "live", "stopping", "ended"]
+    assert set(state) == {"pid", "phase", "title", "started", "transcript", "mirror", "error"}
+    assert state["pid"] == os.getpid()
+    assert state["title"] == "Planning"
+    assert datetime.fromisoformat(state["started"]).tzinfo is not None
+    assert state["transcript"] == str(out)
+    assert state["mirror"] is None and state["error"] is None
+    assert latency and latency[0] is not None and latency[0] < 1
+    assert "# ended " in out.read_text()
+    assert (tmp_path / "current.txt").resolve() == out
+    assert (tmp_path / "current.jsonl").resolve() == out.with_suffix(".jsonl")
+
+
+def test_signal_during_model_loading_stops_without_starting_audio(tmp_path, monkeypatch):
+    import hark.cli as cli
+
+    source_instances = []
+
+    def load_models(latency):
+        os.kill(os.getpid(), signal.SIGINT)
+        deadline = time.monotonic() + 1
+        while time.monotonic() < deadline:
+            state = json.loads((tmp_path / "meeting.json").read_text())
+            if state["phase"] == "stopping":
+                return None, None
+            time.sleep(0.005)
+        pytest.fail("stopping was not written promptly during model loading")
+
+    cli, Source = fake_live_capture(monkeypatch, tmp_path, load_models=load_models)
+    original_start = Source.start
+
+    def record_start(self):
+        source_instances.append(self)
+        original_start(self)
+
+    monkeypatch.setattr(Source, "start", record_start)
+    phases = record_lifecycle_phases(monkeypatch, cli, tmp_path)
+
+    cli.main(["--room", "--title", "Loading stop"])
+
+    state = json.loads((tmp_path / "meeting.json").read_text())
+    assert [snapshot["phase"] for snapshot in phases] == ["loading", "stopping", "ended"]
+    assert state["phase"] == "ended"
+    assert state["title"] == "Loading stop"
+    transcript = Path(state["transcript"])
+    assert transcript.is_absolute() and transcript.parent == tmp_path / "sessions"
+    assert source_instances == []
+    assert "# ended " in transcript.read_text()
+
+
+def test_signal_during_capture_finishes_mirror_after_closing_transcript(tmp_path, monkeypatch):
+    import hark.cli as cli
+
+    cli, _ = fake_live_capture(monkeypatch, tmp_path)
+    phases = record_lifecycle_phases(monkeypatch, cli, tmp_path)
+    out = tmp_path / "meetings" / "capture.txt"
+    finished = []
+
+    class FakeMirror:
+        def __init__(self, local, host, remote_path):
+            self.local, self.host, self.remote_path = local, host, remote_path
+
+        def start(self):
+            assert json.loads((tmp_path / "meeting.json").read_text())["phase"] == "live"
+
+        def finish(self, timeout):
+            assert "# ended " in self.local.read_text()
+            assert json.loads((tmp_path / "meeting.json").read_text())["phase"] == "stopping"
+            finished.append((self.host, self.remote_path))
+            return True
+
+    monkeypatch.setattr(cli, "TranscriptMirror", FakeMirror)
+    signaller, latency = signal_when_live(tmp_path)
+    cli.main(["--room", "-o", str(out), "--mirror", "candide:~/.hark/meetings/capture.txt"])
+    signaller.join(timeout=2)
+
+    state = json.loads((tmp_path / "meeting.json").read_text())
+    assert [snapshot["phase"] for snapshot in phases] == ["loading", "live", "stopping", "ended"]
+    assert state["mirror"] == "candide:~/.hark/meetings/capture.txt"
+    assert state["phase"] == "ended"
+    assert finished == [("candide", "~/.hark/meetings/capture.txt")]
+    assert latency and latency[0] is not None and latency[0] < 1
+    assert (tmp_path / "current.txt").resolve() == out
+
+
+def test_live_capture_exception_records_one_line_failure(tmp_path, monkeypatch):
+    def fail_loading(latency):
+        state = json.loads((tmp_path / "meeting.json").read_text())
+        assert state["phase"] == "loading"
+        assert Path(state["transcript"]).is_absolute()
+        raise RuntimeError("model loading failed\nwith details")
+
+    cli, _ = fake_live_capture(monkeypatch, tmp_path, load_models=fail_loading)
+    phases = record_lifecycle_phases(monkeypatch, cli, tmp_path)
+
+    with pytest.raises(RuntimeError, match="model loading failed"):
+        cli.main(["--room", "--title", "Broken"])
+
+    state = json.loads((tmp_path / "meeting.json").read_text())
+    assert [snapshot["phase"] for snapshot in phases] == ["loading", "failed"]
+    assert set(state) == {"pid", "phase", "title", "started", "transcript", "mirror", "error"}
+    assert state["phase"] == "failed"
+    assert state["error"] == "model loading failed with details"
+    assert "\n" not in state["error"]
+
+
+def test_file_replay_does_not_write_lifecycle_or_change_current(tmp_path, monkeypatch):
+    import hark.cli as cli
 
     class Source:
         name = "recording"
@@ -134,7 +319,6 @@ def test_meeting_opens_capture_before_best_effort_host_setup(tmp_path, monkeypat
             self.queue = SimpleNamespace(empty=lambda: True)
 
         def start(self):
-            events.append("source opened")
             self.done.set()
 
         def stop(self):
@@ -150,243 +334,31 @@ def test_meeting_opens_capture_before_best_effort_host_setup(tmp_path, monkeypat
         def feed(self, *args, **kwargs):
             pass
 
-    def prepare(**kwargs):
-        events.append("host setup")
-        raise RuntimeError("ssh exited 255")
-
-    monkeypatch.setattr(cli, "datetime", Clock)
-    monkeypatch.setattr(cli, "HOME", tmp_path)
-
-    def load_models(latency):
-        state = json.loads((tmp_path / "meeting.json").read_text())
-        assert state["phase"] == "loading"
-        assert state["transcript"] is None
-        events.append("models loaded")
-        return None, None
-
-    monkeypatch.setattr(cli, "load_models", load_models)
-    monkeypatch.setattr(cli, "FileSource", Source)
-    monkeypatch.setattr(cli, "Track", FakeTrack)
-    monkeypatch.setattr(cli, "flush_tracks", lambda tracks, force=False: [])
-    monkeypatch.setattr(cli, "prepare_remote_meeting", prepare)
-    audio = tmp_path / "clip.wav"
-    audio.touch()
-
-    states = []
-    replace = cli.os.replace
-
-    def record_replace(source, target):
-        if target == tmp_path / "meeting.json":
-            states.append(json.loads(Path(source).read_text()))
-        replace(source, target)
-
-    monkeypatch.setattr(cli.os, "replace", record_replace)
-    cli.main(["meeting", "--host", "candide", "--project", "/proj", "--under", "tools/hark",
-              "--title", "Smoke", "--file", str(audio), "--realtime"])
-
-    assert events == ["models loaded", "source opened", "host setup"]
-    transcript = tmp_path / "sessions/2026-09-25_101530_smoke.txt"
-    assert "# ended " in transcript.read_text()
-    assert [state["phase"] for state in states] == ["loading", "loading", "local", "ended"]
-    assert states[1]["transcript"] == str(transcript)
-    assert states[2]["transcript"] == str(transcript)
-    assert states[2]["mirror"] is None
-    state = json.loads((tmp_path / "meeting.json").read_text())
-    assert state["phase"] == "ended"
-    assert state["host"] == "candide"
-    assert state["fiber"] == "tools/hark/meetings/2026-09-25-1015-smoke"
-    assert state["transcript"] == str(transcript)
-    assert state["mirror"] is None
-    output = capsys.readouterr().err
-    assert "host setup failed (ssh exited 255)" in output
-    assert "hark mirror --resume" in output
-    assert "2026-09-25-1015-smoke" in output
-
-
-def test_local_meeting_writes_to_scribe_path_and_stops_through_lifecycle(tmp_path, monkeypatch):
-    import hark.cli as cli
-
-    now = datetime(2026, 9, 25, 10, 15, 30)
-    handlers = {}
-    phases = []
-
-    class Clock(datetime):
-        @classmethod
-        def now(cls, tz=None):
-            return now
-
-    class Source:
-        name = "mic"
-        anchor = 1.0
-
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def start(self):
-            pass
-
-        def stop(self):
-            pass
-
-        def drain(self, limit):
-            return np.zeros(0, dtype=np.float32)
-
-    class FakeTrack:
-        def __init__(self, name, *args, **kwargs):
-            self.name, self.processed, self.audio = name, 0.0, None
-
-        def feed(self, *args, **kwargs):
-            pass
-
-    def local_setup(**kwargs):
-        state = json.loads((tmp_path / "meeting.json").read_text())
-        assert state["phase"] == "loading"
-        transcript = Path(kwargs["transcript_path"])
-        assert transcript == tmp_path / "meetings/2026-09-25_1015_local-meeting.txt"
-        assert not transcript.exists()
-        assert "held 2026-09-25 10:15" in kwargs["body"]
-        assert "on cail-mac." in kwargs["body"]
-        assert "mirrored from" not in kwargs["body"]
-        transcript.touch()
-        return kwargs["fiber_id"], kwargs["transcript_path"]
-
-    monkeypatch.setattr(cli, "datetime", Clock)
-    monkeypatch.setattr(cli, "HOME", tmp_path)
-    monkeypatch.setattr(cli, "socket", SimpleNamespace(gethostname=lambda: "cail-mac.local"))
-    monkeypatch.setattr(cli, "load_models", lambda latency: (None, None))
-    monkeypatch.setattr(cli, "MicSource", Source)
-    monkeypatch.setattr(cli, "Track", FakeTrack)
-    monkeypatch.setattr(cli, "flush_tracks", lambda tracks, force=False: [])
-    monkeypatch.setattr(cli, "prepare_local_meeting", local_setup)
-    monkeypatch.setattr(cli.signal, "signal", lambda sig, handler: handlers.__setitem__(sig, handler))
-    replace = cli.os.replace
-
-    def record_replace(source, target):
-        assert Path(source).parent == Path(target).parent
-        if target == tmp_path / "meeting.json":
-            phases.append(json.loads(Path(source).read_text())["phase"])
-        replace(source, target)
-
-    monkeypatch.setattr(cli.os, "replace", record_replace)
-
-    def stop_after_live(_):
-        state = json.loads((tmp_path / "meeting.json").read_text())
-        assert state["phase"] == "live"
-        assert state["transcript"] == str(tmp_path / "meetings/2026-09-25_1015_local-meeting.txt")
-        assert state["mirror"] is None
-        handlers[cli.signal.SIGINT](cli.signal.SIGINT, None)
-
-    monkeypatch.setattr(cli.time, "sleep", stop_after_live)
-    cli.main(["meeting", "--project", "/project", "--under", "tools/hark",
-              "--title", "Local Meeting", "--room"])
-
-    transcript = tmp_path / "meetings/2026-09-25_1015_local-meeting.txt"
-    assert "# ended " in transcript.read_text()
-    assert (tmp_path / "current.txt").resolve() == transcript
-    assert phases == ["loading", "live", "stopping", "ended"]
-    state = json.loads((tmp_path / "meeting.json").read_text())
-    assert set(state) == {"pid", "phase", "title", "host", "project", "under", "store",
-                          "fiber", "started", "transcript", "mirror", "error"}
-    assert state["pid"] == os.getpid()
-    assert state["phase"] == "ended"
-    assert state["title"] == "Local Meeting"
-    assert state["host"] is None
-    assert state["project"] == "/project"
-    assert state["under"] == "tools/hark"
-    assert state["store"] == "~/loom"
-    assert state["fiber"] == "tools/hark/meetings/2026-09-25-1015-local-meeting"
-    assert state["started"] == now.astimezone().isoformat(timespec="seconds")
-    assert state["mirror"] is None
-    assert state["transcript"] == str(transcript)
-    assert state["error"] is None
-
-
-def test_remote_setup_records_live_phase_and_mirror_target(tmp_path, monkeypatch):
-    import hark.cli as cli
-
-    class Source:
-        name = "file"
-        anchor = 1.0
-
-        def __init__(self, *args, **kwargs):
-            self.done = threading.Event()
-            self.queue = SimpleNamespace(empty=lambda: True)
-
-        def start(self):
-            self.done.set()
-
-        def stop(self):
-            pass
-
-        def drain(self, limit):
-            return np.zeros(0, dtype=np.float32)
-
-    class FakeTrack:
-        def __init__(self, name, *args, **kwargs):
-            self.name, self.processed, self.audio = name, 0.0, None
-
-        def feed(self, *args, **kwargs):
-            pass
-
-    class FakeMirror:
-        def __init__(self, local, host, remote_path):
-            state = json.loads((tmp_path / "meeting.json").read_text())
-            assert state["phase"] == "live"
-            assert state["transcript"] == str(local)
-            assert state["mirror"] == f"{host}:{remote_path}"
-            self.host, self.remote_path = host, remote_path
-
-        def start(self):
-            pass
-
-        def finish(self, timeout):
-            return True
-
     monkeypatch.setattr(cli, "HOME", tmp_path)
     monkeypatch.setattr(cli, "FileSource", Source)
     monkeypatch.setattr(cli, "Track", FakeTrack)
     monkeypatch.setattr(cli, "load_models", lambda latency: (None, None))
     monkeypatch.setattr(cli, "flush_tracks", lambda tracks, force=False: [])
-    monkeypatch.setattr(cli, "TranscriptMirror", FakeMirror)
-    monkeypatch.setattr(cli.signal, "signal", lambda *args: None)
-    lifecycle = cli.MeetingLifecycle(
-        title="Remote", host="candide", project="/project", under="tools/hark",
-        store="~/loom", fiber="tools/hark/meetings/remote", started="2026-09-25T10:15:30+02:00",
-    )
-    audio = tmp_path / "clip.wav"
+    audio = tmp_path / "recording.wav"
     audio.touch()
+    previous = tmp_path / "previous.txt"
+    previous.write_text("existing transcript\n")
+    previous.with_suffix(".jsonl").write_text("existing records\n")
+    (tmp_path / "current.txt").symlink_to(previous)
+    (tmp_path / "current.jsonl").symlink_to(previous.with_suffix(".jsonl"))
 
-    cli.main(["--file", str(audio)], session_now=datetime(2026, 9, 25, 10, 15, 30),
-             after_sources=lambda out: "candide:~/.hark/meetings/remote.txt",
-             meeting_lifecycle=lifecycle)
+    cli.main(["--file", str(audio), "-o", str(tmp_path / "replay.txt")])
 
-    state = json.loads((tmp_path / "meeting.json").read_text())
-    assert state["phase"] == "live"
-    assert state["mirror"] == "candide:~/.hark/meetings/remote.txt"
+    assert not (tmp_path / "meeting.json").exists()
+    assert (tmp_path / "current.txt").resolve() == previous
+    assert (tmp_path / "current.txt").read_text() == "existing transcript\n"
+    assert (tmp_path / "current.jsonl").resolve() == previous.with_suffix(".jsonl")
+    assert (tmp_path / "current.jsonl").read_text() == "existing records\n"
+    assert "# ended " in (tmp_path / "replay.txt").read_text()
 
 
-def test_meeting_exception_records_failed_state(tmp_path, monkeypatch):
+def test_meeting_is_not_a_hark_command():
     import hark.cli as cli
 
-    now = datetime(2026, 9, 25, 10, 15, 30)
-
-    class Clock(datetime):
-        @classmethod
-        def now(cls, tz=None):
-            return now
-
-    monkeypatch.setattr(cli, "datetime", Clock)
-    monkeypatch.setattr(cli, "HOME", tmp_path)
-    monkeypatch.setattr(cli, "MicSource", lambda *args, **kwargs: object())
-    monkeypatch.setattr(cli.signal, "signal", lambda *args: None)
-    monkeypatch.setattr(cli, "load_models", lambda latency: (_ for _ in ()).throw(
-        RuntimeError("model loading failed\nwith details")))
-
-    with pytest.raises(RuntimeError, match="model loading failed"):
-        cli.main(["meeting", "--project", "/project", "--under", "tools/hark",
-                  "--title", "Broken", "--room"])
-
-    state = json.loads((tmp_path / "meeting.json").read_text())
-    assert state["phase"] == "failed"
-    assert state["transcript"] is None
-    assert state["error"] == "model loading failed with details"
+    with pytest.raises(SystemExit):
+        cli.main(["meeting"])

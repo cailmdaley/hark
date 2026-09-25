@@ -17,7 +17,6 @@ Nemotron-3-Diarization (`mlx-community/Nemotron-3-Diarization`, up to 8
 speakers, 1.04 s buffer) through mlx-audio's `SpeakerStreamingSession`.
 That session keeps one ASR decoder per speaker, so words arrive already attributed.
 Labels are anonymous, numbered in order of arrival.
-With `hark meeting`, only the resulting transcript is mirrored to the selected host.
 
 ## Setup
 
@@ -27,7 +26,7 @@ uv sync
 ln -s "$PWD/.venv/bin/hark" ~/.local/bin/hark
 ```
 
-The symlink puts the venv's `hark` executable on the Shuttle board's `PATH`.
+The symlink puts the venv's `hark` executable on the Shuttle daemon's `PATH`.
 
 macOS permissions for the terminal that runs hark: **Microphone**, and
 **Screen & System Audio Recording → System Audio Recording Only**. Restart the
@@ -44,22 +43,18 @@ uv run hark --title "shear telecon"   # names the session file
 
 ### Meetings with a scribe
 
-Start capture on the Mac and dispatch a scribe beside the project:
+Start meeting mode from Shuttle's Capture form and choose Call or Room.
+Shuttle starts hark on the board daemon and launches a capture agent on the project's host to create the meeting fiber and follow the transcript as scribe.
+
+From a terminal, record locally and mirror the transcript with:
 
 ```bash
-uv run hark meeting --host candide --project /path/to/project --under tools/hark --title "shear telecon"
+uv run hark --mirror candide:~/.hark/meetings/x.txt -o ~/.hark/meetings/x.txt --title "shear telecon"
 ```
 
-`--host` is optional; omit it when the project lives on this machine.
-Hark then runs the setup locally and writes the transcript directly to the scribe's file, without mirroring.
-The command loads models and opens the local audio source before preparing the felt fiber, assigning the scribe role, and dispatching it.
-If setup fails, capture continues locally; remote meetings print manual recovery steps.
-For a remote host, the transcript stays on the Mac and its `.txt` file streams to `~/.hark/meetings/` on the host.
-If the mirror doesn't deliver `# ended`, hark prints a `hark mirror --resume` command.
-`--room` selects mic-only capture; for rehearsals, pass `--file recording.wav --realtime`.
-Use `--agent` to select the Shuttle model and `--store` to select the felt store.
-The lifecycle state lives in `$HARK_DIR/meeting.json` (`~/.hark/meeting.json` by default); send one SIGINT to its `pid` to stop a meeting cleanly, and don't signal again while its phase is `stopping`.
-Direct capture can also mirror a transcript with `--mirror HOST:PATH`.
+A scribe can be pointed at that file by hand.
+The lifecycle file at `$HARK_DIR/meeting.json` (`~/.hark/meeting.json` by default) records the process, phase, title, start time, transcript, mirror, and any error.
+Send one SIGINT to its `pid` to stop a recording cleanly.
 
 Each line is a conversational turn, not a pause-delimited fragment: brief
 silences keep accumulating, a sustained reply (at least 1 s of speech) ends the
@@ -67,8 +62,9 @@ turn, and a 3 s silence ends it when nobody takes over. Short backchannels do
 not end another speaker's turn. A 30 s monologue is split at its longest late
 pause.
 
-The live session is `~/.hark/current.txt`, a symlink to
-`~/.hark/sessions/<date>_<time>[_title].txt`. In the absence of a sustained
+The live transcript is `~/.hark/current.txt`, a symlink to the active transcript; by default, that is
+`~/.hark/sessions/<date>_<time>[_title].txt`, and `-o` can choose another path.
+In the absence of a sustained
 reply, a line appears after 3 seconds of silence by default (`--gap`).
 Lines from different speakers can land slightly out of time order. The
 `# ended` footer marks a finished session. Beside the text file is a `.jsonl`

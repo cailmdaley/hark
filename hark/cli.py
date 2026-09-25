@@ -4,25 +4,22 @@
     hark --room          in person: the mic alone, diarized
     hark --file x.wav    transcribe a file through the same streaming path
 
-The live transcript is ~/.hark/current.txt (a symlink to the session file);
+The live transcript is ~/.hark/current.txt (a symlink to the transcript file);
 follow it with `tail -F`. A JSONL sidecar sits beside it.
 """
 
 import argparse
 import json
 import os
-import shlex
 import signal
-import socket
-import subprocess
 import sys
 import tempfile
+import threading
 import time
 from datetime import datetime
 from pathlib import Path
 
 from .capture import SAMPLE_RATE, FileSource, MicSource, SystemSource, log
-from .meeting import prepare_local_meeting, prepare_remote_meeting, render_meeting_fiber
 from .mirror import TranscriptMirror
 from .transcript import Sink, Track, flush_tracks, load_models, numbered
 
@@ -30,26 +27,41 @@ HOME = Path(os.environ.get("HARK_DIR", Path.home() / ".hark")).expanduser().reso
 
 
 class MeetingLifecycle:
-    def __init__(self, *, title, host, project, under, store, fiber, started):
+    TRANSITIONS = {
+        "loading": {"live", "stopping", "failed"},
+        "live": {"stopping", "failed"},
+        "stopping": {"ended", "failed"},
+        "ended": set(),
+        "failed": set(),
+    }
+
+    def __init__(self, *, title, started, transcript, mirror):
         self.path = HOME / "meeting.json"
+        self.lock = threading.Lock()
         self.data = {
-            "pid": os.getpid(), "phase": "loading", "title": title, "host": host,
-            "project": project, "under": under, "store": store, "fiber": fiber,
-            "started": started, "transcript": None, "mirror": None, "error": None,
+            "pid": os.getpid(), "phase": "loading", "title": title,
+            "started": started, "transcript": transcript, "mirror": mirror, "error": None,
         }
-        self.write()
+        self._write()
 
     def update(self, phase=None, **values):
-        if phase and (self.data["phase"] != "stopping" or phase in {"ended", "failed"}):
-            self.data["phase"] = phase
-        self.data.update(values)
-        self.write()
+        with self.lock:
+            changed = False
+            current = self.data["phase"]
+            if phase and phase in self.TRANSITIONS[current]:
+                self.data["phase"] = phase
+                changed = True
+            for key, value in values.items():
+                if self.data[key] != value:
+                    self.data[key] = value
+                    changed = True
+            if changed:
+                self._write()
 
     def stopping(self):
-        if self.data["phase"] in {"loading", "live", "local"}:
-            self.update("stopping")
+        self.update("stopping")
 
-    def write(self):
+    def _write(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
         fd, temporary = tempfile.mkstemp(dir=self.path.parent, prefix=".meeting-", suffix=".tmp")
         try:
@@ -62,6 +74,49 @@ class MeetingLifecycle:
                 os.unlink(temporary)
             except FileNotFoundError:
                 pass
+
+
+class SignalWatcher:
+    """Consume live-capture signals outside the model-loading thread."""
+
+    def __init__(self, lifecycle, stop):
+        self.signals = {signal.SIGINT, signal.SIGTERM, signal.SIGHUP}
+        self.wake_signal = signal.SIGUSR1
+        self.wait_signals = self.signals | {self.wake_signal}
+        self.stop = stop
+        self.lifecycle = lifecycle
+        self.closed = threading.Event()
+        self.signal_written = threading.Event()
+        self.interrupts = 0
+        self.previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, self.wait_signals)
+        self.thread = threading.Thread(target=self._watch, name="hark-signals", daemon=True)
+        try:
+            self.thread.start()
+        except BaseException:
+            signal.pthread_sigmask(signal.SIG_SETMASK, self.previous_mask)
+            raise
+
+    def _watch(self):
+        while not self.closed.is_set():
+            number = signal.sigwait(self.wait_signals)
+            if number == self.wake_signal:
+                continue
+            if number == signal.SIGINT:
+                self.interrupts += 1
+                if self.interrupts > 1:
+                    os._exit(128 + number)
+            if not self.stop.is_set():
+                self.stop.set()
+                try:
+                    self.lifecycle.stopping()
+                finally:
+                    self.signal_written.set()
+
+    def close(self):
+        self.closed.set()
+        signal.pthread_kill(self.thread.ident, self.wake_signal)
+        self.thread.join()
+        signal.pthread_sigmask(signal.SIG_SETMASK, self.previous_mask)
 
 
 def _emit(u, sink, matcher, tracks_by_name, failed_slots):
@@ -80,8 +135,7 @@ def _emit(u, sink, matcher, tracks_by_name, failed_slots):
         sys.stdout = open(os.devnull, "w")
 
 
-def main(argv=None, *, session_now=None, session_path=None, after_sources=None,
-         fallback_target=None, meeting_lifecycle=None, setup_before_sink=False):
+def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv and argv[0] == "enroll":
         _enroll(argv[1:])
@@ -94,8 +148,6 @@ def main(argv=None, *, session_now=None, session_path=None, after_sources=None,
         args = ap.parse_args(argv[1:])
         _name_current(args.speaker, args.name, args.session)
         return 0
-    if argv and argv[0] == "meeting":
-        return _meeting(argv[1:])
     if argv and argv[0] == "mirror":
         return _resume_mirror(argv[1:])
     ap = argparse.ArgumentParser(prog="hark", description=__doc__,
@@ -116,6 +168,7 @@ def main(argv=None, *, session_now=None, session_path=None, after_sources=None,
     args = ap.parse_args(argv)
     if args.realtime and not args.file:
         ap.error("--realtime only applies to --file")
+
     mirror_target = None
     if args.mirror:
         host, separator, remote_path = args.mirror.partition(":")
@@ -123,240 +176,159 @@ def main(argv=None, *, session_now=None, session_path=None, after_sources=None,
             ap.error("--mirror must be HOST:PATH")
         mirror_target = host, remote_path
 
-    stop = False
+    now = datetime.now()
+    out = (args.out.with_suffix(".txt").expanduser().resolve() if args.out
+           else _session_path(now, args.title))
+    live = not bool(args.file)
+    lifecycle = (MeetingLifecycle(
+        title=args.title, started=now.astimezone().isoformat(timespec="seconds"),
+        transcript=str(out),
+        mirror=f"{mirror_target[0]}:{mirror_target[1]}" if mirror_target else None,
+    ) if live else None)
+    stop = threading.Event()
+    watcher = None
 
     def on_signal(*_):
-        nonlocal stop
-        stop = True
-        if meeting_lifecycle:
-            meeting_lifecycle.stopping()
+        if not stop.is_set():
+            stop.set()
         signal.signal(signal.SIGINT, signal.SIG_DFL)  # a second Ctrl-C quits hard
 
     def install_signal_handlers():
         for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
             signal.signal(sig, on_signal)
 
-    if meeting_lifecycle:
-        install_signal_handlers()
-
-    if args.file:
-        sources = [(FileSource(args.file, realtime=args.realtime), numbered)]
-        what = f"file {args.file}"
-    elif args.room:
-        sources = [(MicSource(_device(args.mic)), numbered)]
-        what = "room: mic diarized as S1…"
-    else:
-        sources = [(MicSource(_device(args.mic)), lambda _: "me"), (SystemSource(), numbered)]
-        what = "call: me = mic, S1… = system audio"
-
-    log("loading models…")
-    try:
-        asr, diar = load_models(args.latency)
-    except KeyboardInterrupt:
-        if meeting_lifecycle:
-            raise
-        return 130
-    tracks = [(src, Track(src.name, asr, diar, speaker_label=label, language=args.lang,
-                          gap=args.gap))
-              for src, label in sources]
-
-    all_tracks = [track for _, track in tracks]
-    now = session_now or datetime.now()
-    out = (Path(session_path) if session_path else
-           args.out.with_suffix(".txt") if args.out else _session_path(now, args.title))
-    out.parent.mkdir(parents=True, exist_ok=True)
-    import numpy as np
-
-    voices = {path.stem: np.load(path) for path in (HOME / "voices").glob("*.npy")} if (HOME / "voices").exists() else {}
-    from .voice import VoiceMatcher
-
-    if not voices:
-        for track in all_tracks:
-            track.audio = None
-    tracks_by_name = {track.name: track for _, track in tracks}
-    sink = None
-    matcher = None
-    mirror = None
-    host_setup_failed = False
+    what = (f"file {args.file}" if args.file else
+            "room: mic diarized as S1…" if args.room else
+            "call: me = mic, S1… = system audio")
+    sources = []
+    tracks = []
+    all_tracks = []
+    started_sources = []
+    started_tracks = []
+    sink = matcher = mirror = None
+    tracks_by_name = {}
     failed_slots = set()
+    voices = {}
 
     def open_sink():
         nonlocal sink, matcher
-        if not args.file and (not args.out or session_path):
+        out.parent.mkdir(parents=True, exist_ok=True)
+        if live:
             _point_current(out)
         sink = Sink(out, f"hark {now:%Y-%m-%d %H:%M} — {what}")
         if voices:
+            from .voice import VoiceMatcher
+
             matcher = VoiceMatcher(voices, sink)
         log(f"transcript → {out}")
 
-    if not setup_before_sink:
-        open_sink()
-    if not meeting_lifecycle:
-        install_signal_handlers()
-
-    started = time.monotonic()
     try:
-        for src, track in tracks:
-            src.start()
-            track.t0 = (datetime.combine(now.date(), datetime.min.time()) if args.file
-                        else datetime.fromtimestamp(src.anchor))
-        if meeting_lifecycle and sink:
-            meeting_lifecycle.update(transcript=str(out))
-        if after_sources and not stop:
-            try:
-                meeting_target = after_sources(out)
-            except Exception as error:
-                log(f"meeting: host setup failed ({error}); continuing with the local transcript at {out}")
-                meeting_target = None
-            if meeting_target is None:
-                host_setup_failed = True
-            elif meeting_target:
-                host, _, remote_path = meeting_target.partition(":")
-                mirror_target = (host, remote_path)
-        if setup_before_sink:
-            open_sink()
-        if meeting_lifecycle:
-            meeting_lifecycle.update(
-                "local" if host_setup_failed else "live",
-                transcript=str(out),
-                mirror=f"{mirror_target[0]}:{mirror_target[1]}" if mirror_target else None,
-            )
-        if mirror_target:
-            mirror = TranscriptMirror(out, *mirror_target)
-            mirror.start()
-        log("listening (Ctrl-C to stop)")
-        while not stop:
-            sink.poll_names()
-            busy = False
-            for src, track in tracks:
-                samples = src.drain(limit=SAMPLE_RATE // 2)
-                if samples.size:
-                    busy = True
-                    track.feed(samples)
-            for u in flush_tracks(all_tracks):
-                _emit(u, sink, matcher, tracks_by_name, failed_slots)
-            if args.file and sources[0][0].done.is_set() and not busy and sources[0][0].queue.empty():
-                break
-            if not busy:
-                time.sleep(0.05)
-    finally:
+        if lifecycle:
+            watcher = SignalWatcher(lifecycle, stop)
         try:
-            for src, _ in sources:
-                src.stop()
+            if not stop.is_set():
+                if args.file:
+                    sources = [(FileSource(args.file, realtime=args.realtime), numbered)]
+                elif args.room:
+                    sources = [(MicSource(_device(args.mic)), numbered)]
+                else:
+                    sources = [(MicSource(_device(args.mic)), lambda _: "me"),
+                               (SystemSource(), numbered)]
+
+            log("loading models…")
+            if stop.is_set():
+                asr, diar = None, None
+            else:
+                try:
+                    asr, diar = load_models(args.latency)
+                except KeyboardInterrupt:
+                    if lifecycle:
+                        raise
+                    return 130
+
+            if not stop.is_set():
+                tracks = [(src, Track(src.name, asr, diar, speaker_label=label,
+                                      language=args.lang, gap=args.gap))
+                          for src, label in sources]
+                all_tracks = [track for _, track in tracks]
+                import numpy as np
+
+                voices = ({path.stem: np.load(path) for path in (HOME / "voices").glob("*.npy")}
+                          if (HOME / "voices").exists() else {})
+                if not voices:
+                    for track in all_tracks:
+                        track.audio = None
+                tracks_by_name = {track.name: track for _, track in tracks}
+
+            open_sink()
+            if not lifecycle:
+                install_signal_handlers()
+
+            capture_started = time.monotonic()
             for src, track in tracks:
-                track.feed(src.drain(limit=float("inf")), final=True)
-            for u in flush_tracks(all_tracks, force=True):
-                if sink:
+                if stop.is_set():
+                    break
+                src.start()
+                started_sources.append(src)
+                started_tracks.append((src, track))
+                track.t0 = (datetime.combine(now.date(), datetime.min.time()) if args.file
+                            else datetime.fromtimestamp(src.anchor))
+            if lifecycle and len(started_sources) == len(sources) and not stop.is_set():
+                lifecycle.update("live")
+
+            if mirror_target:
+                mirror = TranscriptMirror(out, *mirror_target)
+                mirror.start()
+            if not stop.is_set():
+                log("listening (Ctrl-C to stop)")
+            while not stop.is_set():
+                sink.poll_names()
+                busy = False
+                for src, track in started_tracks:
+                    samples = src.drain(limit=SAMPLE_RATE // 2)
+                    if samples.size:
+                        busy = True
+                        track.feed(samples)
+                for u in flush_tracks(all_tracks):
                     _emit(u, sink, matcher, tracks_by_name, failed_slots)
+                if (args.file and sources[0][0].done.is_set() and not busy
+                        and sources[0][0].queue.empty()):
+                    break
+                if not busy:
+                    time.sleep(0.05)
         finally:
-            if sink:
-                sink.close(f"ended {datetime.now():%H:%M:%S}")
-            if mirror:
-                mirror.finish(timeout=30)
-            elif host_setup_failed and fallback_target:
-                log(f"meeting: after repairing the host setup, mirror the transcript with: "
-                    f"{shlex.join(['hark', 'mirror', '--resume', str(out), fallback_target])}")
-    audio = max(t.processed for _, t in tracks)
-    wall = time.monotonic() - started
-    log(f"done: {audio:.0f} s of audio in {wall:.0f} s (real-time factor {wall / max(audio, 1e-9):.2f})")
-
-
-def _meeting(argv):
-    ap = argparse.ArgumentParser(prog="hark meeting")
-    ap.add_argument("--host", help="SSH alias; omit when the project is on this machine")
-    ap.add_argument("--project", required=True, help="project checkout on the scribe machine")
-    ap.add_argument("--under", required=True, help="parent fiber path in the felt store")
-    ap.add_argument("--title", required=True)
-    ap.add_argument("--agent", default="claude-opus")
-    ap.add_argument("--store", default="~/loom", help="felt store on the scribe machine")
-    mode = ap.add_mutually_exclusive_group()
-    mode.add_argument("--room", action="store_true", help="mic only, diarized")
-    mode.add_argument("--file", help="replay an audio file through the streaming path")
-    ap.add_argument("--realtime", action="store_true", help="with --file: replay at real-time pace")
-    ap.add_argument("--mic", help="input device name or index")
-    ap.add_argument("--lang", help="ASR language, e.g. en-US, fr-FR")
-    ap.add_argument("--latency", default="low", choices=["low", "very_low", "ultra_low"])
-    ap.add_argument("--gap", type=float, default=3.0)
-    args = ap.parse_args(argv)
-    if args.host == "":
-        ap.error("--host must be a non-empty SSH alias; omit it for local setup")
-    if args.realtime and not args.file:
-        ap.error("--realtime only applies to --file")
-    if args.file and not Path(args.file).is_file():
-        ap.error(f"audio file does not exist: {args.file}")
-
-    now = datetime.now()
-    slug = _meeting_slug(args.title)
-    filename = f"{now:%Y-%m-%d_%H%M}_{slug}.txt"
-    transcript_path = (f"~/.hark/meetings/{filename}" if args.host else
-                       str(HOME / "meetings" / filename))
-    fiber_id = f"{args.under}/meetings/{now:%Y-%m-%d-%H%M}-{slug}"
-    lifecycle = MeetingLifecycle(
-        title=args.title, host=args.host, project=args.project, under=args.under,
-        store=args.store, fiber=fiber_id,
-        started=now.astimezone().isoformat(timespec="seconds"),
-    )
-
-    try:
-        when = now.astimezone().strftime("%Y-%m-%d %H:%M %Z")
-        body = render_meeting_fiber(
-            title=args.title, when=when, host=args.host or socket.gethostname().split(".")[0],
-            transcript_path=transcript_path, mirrored=bool(args.host),
-        )
-
-        def prepare_host(out):
-            setup = dict(
-                project=args.project, store=args.store, fiber_id=fiber_id, under=args.under,
-                title=args.title, agent=args.agent, transcript_path=transcript_path, body=body,
-            )
             try:
-                if args.host:
-                    prepare_remote_meeting(host=args.host, **setup)
-                else:
-                    prepare_local_meeting(**setup)
-            except Exception as error:
-                failure = (f"SSH exited with status {error.returncode}"
-                           if isinstance(error, subprocess.CalledProcessError) else str(error))
-                if args.host:
-                    recovery = (f"Repair {fiber_id} on {args.host}; hark will print the transcript "
-                                "recovery command at shutdown")
-                else:
-                    recovery = f"Repair {fiber_id} locally"
-                log(f"meeting: host setup failed ({failure}); capturing locally at {out}. {recovery}")
-                return None
-            log(f"meeting fiber: {fiber_id}")
-            if args.host:
-                log(f"watch transcript: ssh {args.host} 'tail -F {transcript_path}'")
-                log(f"watch notes: ssh {args.host} 'felt -C {args.store} show {fiber_id}'")
-                return f"{args.host}:{transcript_path}"
-            log(f"watch transcript: tail -F {transcript_path}")
-            log(f"watch notes: felt -C {args.store} show {fiber_id}")
-            return ""
+                for src in started_sources:
+                    src.stop()
+                for src, track in started_tracks:
+                    track.feed(src.drain(limit=float("inf")), final=True)
+                for u in flush_tracks(all_tracks, force=True):
+                    if sink:
+                        _emit(u, sink, matcher, tracks_by_name, failed_slots)
+            finally:
+                try:
+                    if sink:
+                        sink.close(f"ended {datetime.now():%H:%M:%S}")
+                finally:
+                    if mirror:
+                        mirror.finish(timeout=30)
 
-        capture = ["--title", args.title, "--latency", args.latency, "--gap", str(args.gap)]
-        if args.room:
-            capture.append("--room")
-        if args.file:
-            capture.extend(["--file", args.file])
-        if args.realtime:
-            capture.append("--realtime")
-        if args.mic:
-            capture.extend(["--mic", args.mic])
-        if args.lang:
-            capture.extend(["--lang", args.lang])
-        result = main(
-            capture, session_now=now,
-            session_path=HOME / "meetings" / filename if not args.host else None,
-            after_sources=prepare_host,
-            fallback_target=f"{args.host}:{transcript_path}" if args.host else None,
-            meeting_lifecycle=lifecycle,
-            setup_before_sink=not bool(args.host),
-        )
+        if watcher and stop.is_set():
+            watcher.signal_written.wait()
+        audio = max((track.processed for _, track in tracks), default=0.0)
+        wall = time.monotonic() - capture_started
+        log(f"done: {audio:.0f} s of audio in {wall:.0f} s (real-time factor {wall / max(audio, 1e-9):.2f})")
+        if lifecycle:
+            lifecycle.update("ended")
     except BaseException as error:
-        lifecycle.update("failed", error=" ".join(str(error).split()) or type(error).__name__)
+        if watcher and stop.is_set():
+            watcher.signal_written.wait()
+        if lifecycle:
+            lifecycle.update("failed", error=" ".join(str(error).split()) or type(error).__name__)
         raise
-    lifecycle.update("ended")
-    return result
+    finally:
+        if watcher:
+            watcher.close()
 
 
 def _resume_mirror(argv):
@@ -372,12 +344,6 @@ def _resume_mirror(argv):
     mirror.start()
     return 0 if mirror.finish() else 1
 
-
-def _meeting_slug(title):
-    slug = _slug(title)
-    while "--" in slug:
-        slug = slug.replace("--", "-")
-    return slug or "meeting"
 
 
 def _enroll(argv):
