@@ -202,7 +202,8 @@ def test_live_capture_ends_cleanly_and_records_lifecycle(tmp_path, monkeypatch):
 
     state = json.loads((tmp_path / "meeting.json").read_text())
     assert [snapshot["phase"] for snapshot in phases] == ["loading", "live", "stopping", "ended"]
-    assert set(state) == {"pid", "phase", "title", "started", "transcript", "mirror", "error"}
+    assert set(state) == {"pid", "phase", "title", "started", "transcript", "mirror", "launch", "error"}
+    assert state["launch"] is None
     assert state["pid"] == os.getpid()
     assert state["title"] == "Planning"
     assert datetime.fromisoformat(state["started"]).tzinfo is not None
@@ -301,7 +302,8 @@ def test_live_capture_exception_records_one_line_failure(tmp_path, monkeypatch):
 
     state = json.loads((tmp_path / "meeting.json").read_text())
     assert [snapshot["phase"] for snapshot in phases] == ["loading", "failed"]
-    assert set(state) == {"pid", "phase", "title", "started", "transcript", "mirror", "error"}
+    assert set(state) == {"pid", "phase", "title", "started", "transcript", "mirror", "launch", "error"}
+    assert state["launch"] is None
     assert state["phase"] == "failed"
     assert state["error"] == "model loading failed with details"
     assert "\n" not in state["error"]
@@ -362,3 +364,29 @@ def test_meeting_is_not_a_hark_command():
 
     with pytest.raises(SystemExit):
         cli.main(["meeting"])
+
+
+def test_launch_id_and_unfinished_mirror_are_recorded(tmp_path, monkeypatch):
+    cli, _ = fake_live_capture(monkeypatch, tmp_path)
+
+    class Mirror:
+        def __init__(self, *args):
+            pass
+
+        def start(self):
+            pass
+
+        def finish(self, timeout=30):
+            return False
+
+    monkeypatch.setattr(cli, "TranscriptMirror", Mirror)
+    signaller, _ = signal_when_live(tmp_path)
+    out = tmp_path / "meetings" / "call.txt"
+
+    cli.main(["--room", "-o", str(out), "--launch", "L42", "--mirror", "remote:~/.hark/meetings/call.txt"])
+    signaller.join(timeout=2)
+
+    state = json.loads((tmp_path / "meeting.json").read_text())
+    assert state["phase"] == "ended" and state["launch"] == "L42"
+    assert state["error"].startswith("mirror incomplete; resume with: hark mirror --resume ")
+    assert state["error"].endswith("'remote:~/.hark/meetings/call.txt'")

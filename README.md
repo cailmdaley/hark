@@ -53,8 +53,9 @@ uv run hark --mirror candide:~/.hark/meetings/x.txt -o ~/.hark/meetings/x.txt --
 ```
 
 A scribe can be pointed at that file by hand.
-The lifecycle file at `$HARK_DIR/meeting.json` (`~/.hark/meeting.json` by default) records the process, phase, title, start time, transcript, mirror, and any error.
-Send one SIGINT to its `pid` to stop a recording cleanly.
+The lifecycle file at `$HARK_DIR/meeting.json` (`~/.hark/meeting.json` by default) records the process, phase (loading, live, stopping, ended or failed), title, start time, transcript, mirror, the launcher's `--launch` id, and any error.
+An `ended` recording whose mirror didn't finish carries the `hark mirror --resume …` command in `error`.
+Send one SIGINT to its `pid` to stop a recording cleanly; a second one quits without flushing.
 
 Each line is a conversational turn, not a pause-delimited fragment: brief
 silences keep accumulating, a sustained reply (at least 1 s of speech) ends the

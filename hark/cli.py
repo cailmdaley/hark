@@ -11,6 +11,7 @@ follow it with `tail -F`. A JSONL sidecar sits beside it.
 import argparse
 import json
 import os
+import shlex
 import signal
 import sys
 import tempfile
@@ -35,12 +36,13 @@ class MeetingLifecycle:
         "failed": set(),
     }
 
-    def __init__(self, *, title, started, transcript, mirror):
+    def __init__(self, *, title, started, transcript, mirror, launch=None):
         self.path = HOME / "meeting.json"
         self.lock = threading.Lock()
         self.data = {
             "pid": os.getpid(), "phase": "loading", "title": title,
-            "started": started, "transcript": transcript, "mirror": mirror, "error": None,
+            "started": started, "transcript": transcript, "mirror": mirror,
+            "launch": launch, "error": None,
         }
         self._write()
 
@@ -165,6 +167,7 @@ def main(argv=None):
     ap.add_argument("--title", help="appended to the session filename")
     ap.add_argument("--mirror", help="append the transcript to HOST:PATH over SSH")
     ap.add_argument("-o", "--out", type=Path, help="write the transcript here instead of ~/.hark/sessions/")
+    ap.add_argument("--launch", help="launcher's id for this recording, echoed into meeting.json")
     args = ap.parse_args(argv)
     if args.realtime and not args.file:
         ap.error("--realtime only applies to --file")
@@ -184,6 +187,7 @@ def main(argv=None):
         title=args.title, started=now.astimezone().isoformat(timespec="seconds"),
         transcript=str(out),
         mirror=f"{mirror_target[0]}:{mirror_target[1]}" if mirror_target else None,
+        launch=args.launch,
     ) if live else None)
     stop = threading.Event()
     watcher = None
@@ -206,6 +210,7 @@ def main(argv=None):
     started_sources = []
     started_tracks = []
     sink = matcher = mirror = None
+    mirror_complete = True
     tracks_by_name = {}
     failed_slots = set()
     voices = {}
@@ -311,7 +316,7 @@ def main(argv=None):
                         sink.close(f"ended {datetime.now():%H:%M:%S}")
                 finally:
                     if mirror:
-                        mirror.finish(timeout=30)
+                        mirror_complete = mirror.finish(timeout=30)
 
         if watcher and stop.is_set():
             watcher.signal_written.wait()
@@ -319,7 +324,9 @@ def main(argv=None):
         wall = time.monotonic() - capture_started
         log(f"done: {audio:.0f} s of audio in {wall:.0f} s (real-time factor {wall / max(audio, 1e-9):.2f})")
         if lifecycle:
-            lifecycle.update("ended")
+            lifecycle.update("ended", error=None if mirror_complete else (
+                "mirror incomplete; resume with: "
+                + shlex.join(["hark", "mirror", "--resume", str(out), lifecycle.data["mirror"]])))
     except BaseException as error:
         if watcher and stop.is_set():
             watcher.signal_written.wait()
