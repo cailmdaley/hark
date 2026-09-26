@@ -212,6 +212,32 @@ class SystemSource(Source):
                 log(f"audiotee: {rec.get('data', rec)}")
 
 
+class WavRecorder:
+    """One track's samples as 16 kHz mono 16-bit PCM WAV, appended as they are drained.
+
+    `wave` patches the header on every write, so the file is a valid WAV at any moment and
+    complete once `close` returns. Live sources are padded to the wall clock, so second `t` of
+    the recording is second `t` of the track: an utterance's `start`/`end` index it directly.
+    """
+
+    def __init__(self, path):
+        import wave
+
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.wav = wave.open(str(self.path), "wb")
+        self.wav.setnchannels(1)
+        self.wav.setsampwidth(2)
+        self.wav.setframerate(SAMPLE_RATE)
+
+    def write(self, samples):
+        if samples.size:
+            self.wav.writeframes((np.clip(samples, -1, 1) * 32767).astype("<i2").tobytes())
+
+    def close(self):
+        self.wav.close()
+
+
 class FileSource(Source):
     """Replays an audio file, as fast as possible or at real-time pace."""
 

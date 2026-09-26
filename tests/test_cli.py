@@ -390,3 +390,43 @@ def test_launch_id_and_unfinished_mirror_are_recorded(tmp_path, monkeypatch):
     assert state["phase"] == "ended" and state["launch"] == "L42"
     assert state["error"].startswith("mirror incomplete; resume with: hark mirror --resume ")
     assert state["error"].endswith("'remote:~/.hark/meetings/call.txt'")
+
+
+def test_save_audio_keeps_the_mic_track_as_a_16k_mono_wav(tmp_path, monkeypatch):
+    import wave
+
+    cli, Source = fake_live_capture(monkeypatch, tmp_path)
+    tone = (0.25 * np.sin(2 * np.pi * 440 * np.arange(8000) / 16000)).astype(np.float32)
+    chunks = [tone[:5000], tone[5000:]]
+    drained = []
+
+    def drain(self, limit):
+        out = chunks.pop(0) if chunks else np.zeros(0, dtype=np.float32)
+        drained.append(out.size)
+        return out
+
+    monkeypatch.setattr(Source, "drain", drain)
+    signaller, _ = signal_when_live(tmp_path)
+    out = tmp_path / "sessions" / "phrase.txt"
+
+    cli.main(["--room", "--save-audio", "-o", str(out)])
+    signaller.join(timeout=2)
+
+    audio = out.with_suffix(".wav")
+    with wave.open(str(audio), "rb") as wav:
+        assert (wav.getnchannels(), wav.getsampwidth(), wav.getframerate()) == (1, 2, 16000)
+        frames = np.frombuffer(wav.readframes(wav.getnframes()), dtype="<i2")
+    assert frames.size == sum(drained) == tone.size
+    assert np.abs(frames.astype(np.float32) / 32767 - tone).max() < 1e-3
+    assert json.loads((tmp_path / "meeting.json").read_text())["phase"] == "ended"
+
+
+def test_save_audio_is_off_by_default_and_refused_with_a_file(tmp_path, monkeypatch):
+    cli, _ = fake_live_capture(monkeypatch, tmp_path)
+    signaller, _ = signal_when_live(tmp_path)
+    out = tmp_path / "sessions" / "quiet.txt"
+    cli.main(["--room", "-o", str(out)])
+    signaller.join(timeout=2)
+    assert not out.with_suffix(".wav").exists()
+    with pytest.raises(SystemExit):
+        cli.main(["--file", str(tmp_path / "x.wav"), "--save-audio"])

@@ -3,6 +3,7 @@
     hark                 call: mic is "me", system audio (Zoom…) diarized as S1…S8
     hark --room          in person: the mic alone, diarized
     hark --file x.wav    transcribe a file through the same streaming path
+    hark --save-audio    also keep the mic track as <transcript>.wav (16 kHz mono PCM)
 
 The live transcript is ~/.hark/current.txt (a symlink to the transcript file);
 follow it with `tail -F`. A JSONL sidecar sits beside it.
@@ -20,7 +21,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from .capture import SAMPLE_RATE, FileSource, MicSource, SystemSource, log
+from .capture import SAMPLE_RATE, FileSource, MicSource, SystemSource, WavRecorder, log
 from .mirror import TranscriptMirror
 from .transcript import Sink, Track, flush_tracks, load_models, numbered
 
@@ -168,9 +169,13 @@ def main(argv=None):
     ap.add_argument("--mirror", help="append the transcript to HOST:PATH over SSH")
     ap.add_argument("-o", "--out", type=Path, help="write the transcript here instead of ~/.hark/sessions/")
     ap.add_argument("--launch", help="launcher's id for this recording, echoed into meeting.json")
+    ap.add_argument("--save-audio", action="store_true",
+                    help="keep the mic track as 16 kHz mono PCM WAV beside the transcript (<stem>.wav)")
     args = ap.parse_args(argv)
     if args.realtime and not args.file:
         ap.error("--realtime only applies to --file")
+    if args.save_audio and args.file:
+        ap.error("--save-audio records live input; a --file is already audio")
 
     mirror_target = None
     if args.mirror:
@@ -209,7 +214,7 @@ def main(argv=None):
     all_tracks = []
     started_sources = []
     started_tracks = []
-    sink = matcher = mirror = None
+    sink = matcher = mirror = recorder = None
     mirror_complete = True
     tracks_by_name = {}
     failed_slots = set()
@@ -266,6 +271,10 @@ def main(argv=None):
                 tracks_by_name = {track.name: track for _, track in tracks}
 
             open_sink()
+            mic = sources[0][0] if live and sources else None  # the mic is the first live source
+            if args.save_audio and mic is not None:
+                recorder = WavRecorder(out.with_suffix(".wav"))
+                log(f"audio → {recorder.path}")
             if not lifecycle:
                 install_signal_handlers()
 
@@ -293,6 +302,8 @@ def main(argv=None):
                     samples = src.drain(limit=SAMPLE_RATE // 2)
                     if samples.size:
                         busy = True
+                        if recorder and src is mic:
+                            recorder.write(samples)
                         track.feed(samples)
                 for u in flush_tracks(all_tracks):
                     _emit(u, sink, matcher, tracks_by_name, failed_slots)
@@ -306,12 +317,17 @@ def main(argv=None):
                 for src in started_sources:
                     src.stop()
                 for src, track in started_tracks:
-                    track.feed(src.drain(limit=float("inf")), final=True)
+                    rest = src.drain(limit=float("inf"))
+                    if recorder and src is mic:
+                        recorder.write(rest)
+                    track.feed(rest, final=True)
                 for u in flush_tracks(all_tracks, force=True):
                     if sink:
                         _emit(u, sink, matcher, tracks_by_name, failed_slots)
             finally:
                 try:
+                    if recorder:
+                        recorder.close()
                     if sink:
                         sink.close(f"ended {datetime.now():%H:%M:%S}")
                 finally:
