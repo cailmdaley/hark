@@ -39,7 +39,13 @@ uv run hark                 # a call: mic = "me", system audio (Zoom…) diarize
 uv run hark --room          # in person: the mic alone, diarized
 uv run hark --file x.m4a    # a recording, through the same streaming path (~0.15× real time)
 uv run hark --title "shear telecon"   # names the session file
+uv run hark --room --save-audio       # also keep the mic track beside the transcript (<stem>.wav)
 ```
+
+`--save-audio` writes the mic track as 16 kHz mono 16-bit PCM WAV next to the
+transcript, appended as it is captured and complete when hark stops. Live input
+is padded to the wall clock, so an utterance's JSONL `start`/`end` are seconds
+into that file.
 
 ### Meetings with a scribe
 
