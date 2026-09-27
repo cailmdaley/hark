@@ -82,18 +82,13 @@ records when labels are resolved.
 
 The file is the interface.
 
-- **Watch it live**: `uv run hark follow ~/.hark/current.txt` prints the
-  transcript in batches — everything on disk at startup as the first batch,
-  then new lines held pending until something flushes them: a line addressing
-  the agent (a case-insensitive word match on `claude`, `cloud`, `clawed`,
-  `klaud` — words the recognizer mishears "Claude" as; `--names` to change
-  the list), the pending text reaching 150 words (`--words`), 15 s since the
-  first pending line (`--seconds`), or the transcript's `# ended` footer,
-  which flushes and exits. A blank line separates batches. The file may not
-  exist yet for the first ~30 s of a fresh meeting; `follow` waits for it.
-  - **Claude Code**: run the `Monitor` tool on `hark follow
-    ~/.hark/current.txt`, which delivers each batch as an event.
-  - **Codex, pi, anything else**: run it and read stdout, batch by batch.
+- **Watch it live**: `tail -F ~/.hark/current.txt` shows each line as it
+  lands. For an agent, `felt shuttle follow <transcript>` (felt's CLI, on every
+  host a Shuttle scribe runs on) prints the transcript in batches: everything
+  already written, then new lines held until one addresses the agent by name
+  (or a mishearing of it), 150 words pile up, 15 s pass, or `# ended` arrives,
+  which flushes and exits. Run it under Claude Code's `Monitor` tool so each
+  batch arrives as an event; elsewhere, read its stdout batch by batch.
 - **Name speakers**: `uv run hark name S2 "Mike Hudson"` appends a mapping to
   the current session. The line `# S2 = Mike Hudson` records that mapping; future
   utterances use the name and JSONL retains the stable `speaker` slot plus `name`.

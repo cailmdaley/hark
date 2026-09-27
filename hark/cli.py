@@ -22,7 +22,6 @@ from datetime import datetime
 from pathlib import Path
 
 from .capture import SAMPLE_RATE, FileSource, MicSource, SystemSource, WavRecorder, log
-from .follow import DEFAULT_NAMES, Batcher, follow
 from .mirror import TranscriptMirror
 from .transcript import Sink, Track, flush_tracks, load_models, numbered
 
@@ -154,8 +153,6 @@ def main(argv=None):
         return 0
     if argv and argv[0] == "mirror":
         return _resume_mirror(argv[1:])
-    if argv and argv[0] == "follow":
-        return _follow(argv[1:])
     ap = argparse.ArgumentParser(prog="hark", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     mode = ap.add_mutually_exclusive_group()
@@ -369,23 +366,6 @@ def _resume_mirror(argv):
     mirror = TranscriptMirror(args.local, host, remote_path, resume=True)
     mirror.start()
     return 0 if mirror.finish() else 1
-
-
-
-def _follow(argv):
-    ap = argparse.ArgumentParser(prog="hark follow")
-    ap.add_argument("path", type=Path, help="transcript to watch, e.g. ~/.hark/current.txt")
-    ap.add_argument("--words", type=int, default=150,
-                    help="flush pending lines once their utterance text reaches this many words")
-    ap.add_argument("--seconds", type=float, default=15.0,
-                    help="flush pending lines this long after the first one arrived")
-    ap.add_argument("--names", default=",".join(DEFAULT_NAMES),
-                    help="comma-separated words that address the agent (case-insensitive)")
-    args = ap.parse_args(argv)
-    names = [name.strip() for name in args.names.split(",") if name.strip()]
-    batcher = Batcher(words=args.words, seconds=args.seconds, names=names)
-    follow(args.path.expanduser().resolve(), batcher)
-    return 0
 
 
 def _enroll(argv):
