@@ -82,12 +82,18 @@ records when labels are resolved.
 
 The file is the interface.
 
-- **Claude Code**: ask it to watch the meeting. It runs the `Monitor` tool on
-  `tail -n0 -F ~/.hark/current.txt`, which delivers each new line as an event.
-  `tail -F` follows the symlink, so it also picks up the next session.
-- **Codex, pi, anything else**: read the file and remember the line count, then
-  reread from there (`tail -n +$((n+1)) ~/.hark/current.txt`) whenever you want
-  to catch up, or in a sleep loop.
+- **Watch it live**: `uv run hark follow ~/.hark/current.txt` prints the
+  transcript in batches — everything on disk at startup as the first batch,
+  then new lines held pending until something flushes them: a line addressing
+  the agent (a case-insensitive word match on `claude`, `cloud`, `clawed`,
+  `klaud` — words the recognizer mishears "Claude" as; `--names` to change
+  the list), the pending text reaching 150 words (`--words`), 15 s since the
+  first pending line (`--seconds`), or the transcript's `# ended` footer,
+  which flushes and exits. A blank line separates batches. The file may not
+  exist yet for the first ~30 s of a fresh meeting; `follow` waits for it.
+  - **Claude Code**: run the `Monitor` tool on `hark follow
+    ~/.hark/current.txt`, which delivers each batch as an event.
+  - **Codex, pi, anything else**: run it and read stdout, batch by batch.
 - **Name speakers**: `uv run hark name S2 "Mike Hudson"` appends a mapping to
   the current session. The line `# S2 = Mike Hudson` records that mapping; future
   utterances use the name and JSONL retains the stable `speaker` slot plus `name`.
