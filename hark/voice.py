@@ -74,9 +74,18 @@ class AudioBuffer:
 
 
 class VoiceMatcher:
-    """Name diarizer slots from finished-token speech, abstaining on ambiguity."""
+    """Name diarizer slots from finished-token speech, abstaining on ambiguity.
 
-    def __init__(self, voices, sink, embedder=None, threshold=0.415, margin=0.21):
+    Each (track, slot) keeps its latest cosine score against every enrolled voice.
+    A slot claims a voice when that score clears `threshold` and leads its
+    runner-up voice by `margin`; a voice goes to its strongest claimant only if
+    it leads every other claimant by `margin`, so a name is held by at most one
+    slot. A clear new winner takes the name from its holder, which is written
+    back to its own label (`# S1 = S1`). Slots whose name a human set or
+    changed are left alone, and their names are never handed to another slot.
+    """
+
+    def __init__(self, voices, sink, embedder=None, threshold=0.55, margin=0.21):
         self.voices, self.sink = voices, sink
         self.embedder = embedder or Embedder()
         self.threshold, self.margin = threshold, margin
@@ -84,10 +93,21 @@ class VoiceMatcher:
         self.checked = defaultdict(int)
         self.clips = defaultdict(lambda: deque())
         self.segments = self.clips
+        self.scores = {}  # (track, slot) -> {voice: latest cosine}
+        self.given = {}  # slot -> the name this matcher wrote for it
+
+    def _automatic(self, slot):
+        return self.sink.names.get(slot) == self.given.get(slot)
+
+    def _claim(self, scores):
+        ranked = sorted(((score, name) for name, score in scores.items()), reverse=True)
+        best, name = ranked[0]
+        second = ranked[1][0] if len(ranked) > 1 else 0.0
+        return name if best >= self.threshold and best - second >= self.margin else None
 
     def finished(self, track, utterance):
         slot = utterance.speaker
-        if not slot.startswith("S") or slot in self.sink.names:
+        if not slot.startswith("S") or not self._automatic(slot):
             return
         spans = getattr(utterance, "speech", [(utterance.start, utterance.end)])
         spans = sorted(spans)
@@ -119,12 +139,30 @@ class VoiceMatcher:
         if audio.size < 5 * 16000:
             return
         embedding = self.embedder(audio)
-        scores = sorted(((float(np.dot(embedding, vector)), name)
-                         for name, vector in self.voices.items()), reverse=True)
-        best, name = scores[0]
-        second = scores[1][0] if len(scores) > 1 else 0.0
-        if best >= self.threshold and best - second >= self.margin:
-            self.sink.name(slot, name)
-            from .capture import log
+        self.scores[key] = {name: float(np.dot(embedding, vector)) for name, vector in self.voices.items()}
+        self._assign(self.scores[key])
 
-            log(f"voice: {slot} = {name} ({best:.2f}, next {second:.2f})")
+    def _assign(self, latest):
+        from .capture import log
+
+        held = set(self.sink.names.values())
+        for voice in sorted(latest, key=latest.get, reverse=True):
+            claimants = sorted(((scores[voice], slot) for (_, slot), scores in self.scores.items()
+                                if self._automatic(slot) and self._claim(scores) == voice), reverse=True)
+            if not claimants:
+                continue
+            (best, winner), rest = claimants[0], claimants[1:]
+            holder = next((slot for slot, name in self.given.items()
+                           if name == voice and self.sink.names.get(slot) == voice), None)
+            if winner == holder or (rest and best - rest[0][0] < self.margin):
+                continue
+            if holder is None and voice in held:
+                continue  # a human gave this name to a slot
+            if holder is not None:
+                self.sink.name(holder, holder)
+                self.given[holder] = None
+                log(f"voice: {holder} = {holder} ({voice} moves to {winner})")
+            self.sink.name(winner, voice)
+            self.given[winner] = voice
+            held = set(self.sink.names.values())
+            log(f"voice: {winner} = {voice} ({best:.2f}, next {rest[0][0] if rest else 0.0:.2f})")

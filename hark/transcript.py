@@ -201,7 +201,10 @@ def numbered(speaker):
 
 
 class Sink:
-    """The session's text file and JSONL sidecar, with append-only name mappings."""
+    """The session's text file and JSONL sidecar, with append-only name mappings.
+
+    `# S2 = Mike` names a slot; `# S2 = S2` returns it to its anonymous label.
+    """
 
     def __init__(self, txt_path, header):
         self.path = txt_path
@@ -212,12 +215,19 @@ class Sink:
         self.txt.write(f"# {header}\n")
         self.offset = self.path.stat().st_size
 
+    def _map(self, speaker, name):
+        if name == speaker:
+            self.names.pop(speaker, None)
+        else:
+            self.names[speaker] = name
+
     def name(self, speaker, name):
-        self.names[speaker] = name
+        self._map(speaker, name)
         self.txt.seek(0, 2)
         self.txt.write(f"# {speaker} = {name}\n")
         self.jsonl.write(json.dumps({"wall": datetime.now().isoformat(timespec="seconds"),
-                                     "name": {"speaker": speaker, "as": name}}, ensure_ascii=False) + "\n")
+                                     "name": {"speaker": speaker, "as": None if name == speaker else name}},
+                                    ensure_ascii=False) + "\n")
 
     def poll_names(self):
         with self.path.open("rb") as transcript:
@@ -228,7 +238,7 @@ class Sink:
         self.offset += complete
         for line in lines:
             if match := re.fullmatch(r"# (S\d+) = (.+)", line):
-                self.names[match[1]] = match[2]
+                self._map(match[1], match[2])
 
     def write(self, u):
         self.poll_names()

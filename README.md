@@ -92,9 +92,12 @@ The file is the interface.
 - **Name speakers**: `uv run hark name S2 "Mike Hudson"` appends a mapping to
   the current session. The line `# S2 = Mike Hudson` records that mapping; future
   utterances use the name and JSONL retains the stable `speaker` slot plus `name`.
+  `# S2 = S2` (`hark name S2 S2`) returns the slot to its anonymous label; its
+  JSONL record is `{"name": {"speaker": "S2", "as": null}}`.
 - **Resolve labels**: agents should scan the transcript for `# Sx = name` lines
-  and use those mappings for speaker labels, including for earlier utterances.
-- **Enroll a voice**: `uv run hark enroll me --seconds 30` records from the microphone; `--file x.wav` enrolls from audio (the first 30 seconds by default). Voiceprints live in `~/.hark/voices/` (`HARK_DIR` relocates the directory). During diarized tracks, hark names a slot after enough finished speech matches an enrolled voice; the same `# Sx = name` line is used as manual naming, and a manual name is never replaced.
+  and use those mappings for speaker labels, including for earlier utterances;
+  the latest line for a slot wins.
+- **Enroll a voice**: `uv run hark enroll me --seconds 30` records from the microphone; `--file x.wav` enrolls from audio (the first 30 seconds by default). Voiceprints live in `~/.hark/voices/` (`HARK_DIR` relocates the directory). During diarized tracks, hark names a slot after enough finished speech matches an enrolled voice: cosine ≥ 0.55 (above the worst impostor clips seen, about 0.5) and 0.21 ahead of both the next enrolled voice and any other slot that clears the same bar for that voice. A name belongs to one slot at a time; if a clearly stronger slot turns up, hark writes `# S1 = S1` for the old holder before naming the new one. The same `# Sx = name` line is used as manual naming; a slot a human named or renamed is never touched, and its name is never given to another slot.
 - **After the meeting**: the session file is the transcript.
 
 Latency presets: `--latency very_low` (0.64 s) or `ultra_low` (0.32 s) trade
