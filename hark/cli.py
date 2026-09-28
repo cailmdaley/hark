@@ -3,7 +3,12 @@
     hark                 call: mic is "me", system audio (Zoom…) diarized as S1…S8
     hark --room          in person: the mic alone, diarized
     hark --file x.wav    transcribe a file through the same streaming path
-    hark --save-audio    also keep the mic track as <transcript>.wav (16 kHz mono PCM)
+
+Live capture keeps each track beside the transcript as <stem>.mic.wav and
+<stem>.system.wav (16 kHz mono 16-bit PCM, t = 0 at the track's first sample,
+replayable with --file); --no-save-audio opts out. At startup, saved audio under
+~/.hark/meetings and ~/.hark/sessions older than 14 days is deleted; transcripts
+are kept.
 
 The live transcript is ~/.hark/current.txt (a symlink to the transcript file);
 follow it with `tail -F`. A JSONL sidecar sits beside it.
@@ -26,6 +31,7 @@ from .mirror import TranscriptMirror
 from .transcript import Sink, Track, flush_tracks, load_models, numbered
 
 HOME = Path(os.environ.get("HARK_DIR", Path.home() / ".hark")).expanduser().resolve()
+AUDIO_RETENTION_DAYS = 14
 
 
 class MeetingLifecycle:
@@ -169,13 +175,11 @@ def main(argv=None):
     ap.add_argument("--mirror", help="append the transcript to HOST:PATH over SSH")
     ap.add_argument("-o", "--out", type=Path, help="write the transcript here instead of ~/.hark/sessions/")
     ap.add_argument("--launch", help="launcher's id for this recording, echoed into meeting.json")
-    ap.add_argument("--save-audio", action="store_true",
-                    help="keep the mic track as 16 kHz mono PCM WAV beside the transcript (<stem>.wav)")
+    ap.add_argument("--no-save-audio", dest="save_audio", action="store_false",
+                    help="don't keep the live tracks as <stem>.<track>.wav beside the transcript")
     args = ap.parse_args(argv)
     if args.realtime and not args.file:
         ap.error("--realtime only applies to --file")
-    if args.save_audio and args.file:
-        ap.error("--save-audio records live input; a --file is already audio")
 
     mirror_target = None
     if args.mirror:
@@ -188,6 +192,8 @@ def main(argv=None):
     out = (args.out.with_suffix(".txt").expanduser().resolve() if args.out
            else _session_path(now, args.title))
     live = not bool(args.file)
+    if live:
+        expire_audio([HOME / "meetings", HOME / "sessions"])
     lifecycle = (MeetingLifecycle(
         title=args.title, started=now.astimezone().isoformat(timespec="seconds"),
         transcript=str(out),
@@ -214,7 +220,8 @@ def main(argv=None):
     all_tracks = []
     started_sources = []
     started_tracks = []
-    sink = matcher = mirror = recorder = None
+    sink = matcher = mirror = None
+    recorders = {}
     mirror_complete = True
     tracks_by_name = {}
     failed_slots = set()
@@ -271,10 +278,10 @@ def main(argv=None):
                 tracks_by_name = {track.name: track for _, track in tracks}
 
             open_sink()
-            mic = sources[0][0] if live and sources else None  # the mic is the first live source
-            if args.save_audio and mic is not None:
-                recorder = WavRecorder(out.with_suffix(".wav"))
-                log(f"audio → {recorder.path}")
+            if live and args.save_audio:
+                recorders = {src: WavRecorder(out.with_suffix(f".{src.name}.wav")) for src, _ in tracks}
+                for recorder in recorders.values():
+                    log(f"audio → {recorder.path}")
             if not lifecycle:
                 install_signal_handlers()
 
@@ -302,8 +309,8 @@ def main(argv=None):
                     samples = src.drain(limit=SAMPLE_RATE // 2)
                     if samples.size:
                         busy = True
-                        if recorder and src is mic:
-                            recorder.write(samples)
+                        if src in recorders:
+                            recorders[src].write(samples)
                         track.feed(samples)
                 for u in flush_tracks(all_tracks):
                     _emit(u, sink, matcher, tracks_by_name, failed_slots)
@@ -318,15 +325,15 @@ def main(argv=None):
                     src.stop()
                 for src, track in started_tracks:
                     rest = src.drain(limit=float("inf"))
-                    if recorder and src is mic:
-                        recorder.write(rest)
+                    if src in recorders:
+                        recorders[src].write(rest)
                     track.feed(rest, final=True)
                 for u in flush_tracks(all_tracks, force=True):
                     if sink:
                         _emit(u, sink, matcher, tracks_by_name, failed_slots)
             finally:
                 try:
-                    if recorder:
+                    for recorder in recorders.values():
                         recorder.close()
                     if sink:
                         sink.close(f"ended {datetime.now():%H:%M:%S}")
@@ -352,6 +359,17 @@ def main(argv=None):
     finally:
         if watcher:
             watcher.close()
+
+
+def expire_audio(roots, days=AUDIO_RETENTION_DAYS, now=None):
+    """Delete saved track audio (*.wav) under `roots` last modified over `days` ago."""
+    cutoff = (time.time() if now is None else now) - days * 86400
+    removed = [path for root in roots if root.is_dir() for path in sorted(root.rglob("*.wav"))
+               if path.is_file() and path.stat().st_mtime < cutoff]
+    for path in removed:
+        path.unlink()
+        log(f"expired audio older than {days} days: {path}")
+    return removed
 
 
 def _resume_mirror(argv):

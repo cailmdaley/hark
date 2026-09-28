@@ -392,41 +392,126 @@ def test_launch_id_and_unfinished_mirror_are_recorded(tmp_path, monkeypatch):
     assert state["error"].endswith("'remote:~/.hark/meetings/call.txt'")
 
 
-def test_save_audio_keeps_the_mic_track_as_a_16k_mono_wav(tmp_path, monkeypatch):
+def read_wav(path):
     import wave
 
+    with wave.open(str(path), "rb") as wav:
+        assert (wav.getnchannels(), wav.getsampwidth(), wav.getframerate()) == (1, 2, 16000)
+        return np.frombuffer(wav.readframes(wav.getnframes()), dtype="<i2").astype(np.float32) / 32768
+
+
+def feed_chunks(Source, name, chunks):
+    """Make `Source` a live track called `name` that drains `chunks`, recording what it hands out."""
+    fed = []
+
+    class Track(Source):
+        def __init__(self, *args, **kwargs):
+            super().__init__()
+            self.name, self.left = name, list(chunks)
+
+        def drain(self, limit):
+            out = self.left.pop(0) if self.left else np.zeros(0, dtype=np.float32)
+            fed.append(out)
+            return out
+
+    return Track, fed
+
+
+def tone(freq, n):
+    from hark.capture import on_pcm16_grid
+
+    return on_pcm16_grid((0.25 * np.sin(2 * np.pi * freq * np.arange(n) / 16000)).astype(np.float32))
+
+
+def test_room_saves_the_mic_track_by_default_sample_for_sample(tmp_path, monkeypatch):
     cli, Source = fake_live_capture(monkeypatch, tmp_path)
-    tone = (0.25 * np.sin(2 * np.pi * 440 * np.arange(8000) / 16000)).astype(np.float32)
-    chunks = [tone[:5000], tone[5000:]]
-    drained = []
-
-    def drain(self, limit):
-        out = chunks.pop(0) if chunks else np.zeros(0, dtype=np.float32)
-        drained.append(out.size)
-        return out
-
-    monkeypatch.setattr(Source, "drain", drain)
+    mic = tone(440, 8000)
+    Mic, fed = feed_chunks(Source, "mic", [mic[:5000], mic[5000:]])
+    monkeypatch.setattr(cli, "MicSource", Mic)
     signaller, _ = signal_when_live(tmp_path)
     out = tmp_path / "sessions" / "phrase.txt"
 
-    cli.main(["--room", "--save-audio", "-o", str(out)])
+    cli.main(["--room", "-o", str(out)])
     signaller.join(timeout=2)
 
-    audio = out.with_suffix(".wav")
-    with wave.open(str(audio), "rb") as wav:
-        assert (wav.getnchannels(), wav.getsampwidth(), wav.getframerate()) == (1, 2, 16000)
-        frames = np.frombuffer(wav.readframes(wav.getnframes()), dtype="<i2")
-    assert frames.size == sum(drained) == tone.size
-    assert np.abs(frames.astype(np.float32) / 32767 - tone).max() < 1e-3
+    assert sorted(p.name for p in out.parent.glob("*.wav")) == ["phrase.mic.wav"]
+    assert np.array_equal(read_wav(out.with_suffix(".mic.wav")), np.concatenate(fed))
+    assert np.concatenate(fed).size == mic.size
     assert json.loads((tmp_path / "meeting.json").read_text())["phase"] == "ended"
 
 
-def test_save_audio_is_off_by_default_and_refused_with_a_file(tmp_path, monkeypatch):
+def test_call_saves_mic_and_system_tracks_each_with_its_own_samples(tmp_path, monkeypatch):
+    cli, Source = fake_live_capture(monkeypatch, tmp_path)
+    Mic, mic_fed = feed_chunks(Source, "mic", [tone(440, 3000)])
+    System, system_fed = feed_chunks(Source, "system", [tone(220, 4000), tone(330, 1000)])
+    monkeypatch.setattr(cli, "MicSource", Mic)
+    monkeypatch.setattr(cli, "SystemSource", System)
+    signaller, _ = signal_when_live(tmp_path)
+    out = tmp_path / "meetings" / "call.txt"
+
+    cli.main(["-o", str(out)])
+    signaller.join(timeout=2)
+
+    assert np.array_equal(read_wav(out.with_suffix(".mic.wav")), np.concatenate(mic_fed))
+    assert np.array_equal(read_wav(out.with_suffix(".system.wav")), np.concatenate(system_fed))
+    assert read_wav(out.with_suffix(".system.wav")).size == 5000
+
+
+def test_no_save_audio_opts_out_and_a_file_is_never_rerecorded(tmp_path, monkeypatch):
     cli, _ = fake_live_capture(monkeypatch, tmp_path)
     signaller, _ = signal_when_live(tmp_path)
     out = tmp_path / "sessions" / "quiet.txt"
-    cli.main(["--room", "-o", str(out)])
+    cli.main(["--room", "--no-save-audio", "-o", str(out)])
     signaller.join(timeout=2)
-    assert not out.with_suffix(".wav").exists()
+    assert not list(out.parent.glob("*.wav"))
     with pytest.raises(SystemExit):
-        cli.main(["--file", str(tmp_path / "x.wav"), "--save-audio"])
+        cli.main(["--room", "--save-audio", "-o", str(out)])
+
+
+def test_saved_audio_replays_bit_for_bit_through_the_file_loader(tmp_path):
+    from mlx_audio.stt.utils import load_audio
+
+    from hark.capture import WavRecorder, on_pcm16_grid
+
+    heard = on_pcm16_grid(np.random.default_rng(0).uniform(-1.2, 1.2, 16000).astype(np.float32))
+    assert np.array_equal(on_pcm16_grid(heard), heard)
+    recorder = WavRecorder(tmp_path / "x.mic.wav")
+    recorder.write(heard[:7000])
+    recorder.write(heard[7000:])
+    recorder.close()
+    assert np.array_equal(np.array(load_audio(str(recorder.path), sr=16000)), heard)
+
+
+def test_expire_audio_deletes_only_old_wavs_under_the_given_roots(tmp_path, monkeypatch):
+    import hark.cli as cli
+
+    messages = []
+    monkeypatch.setattr(cli, "log", messages.append)
+    now = time.time()
+    day = 86400
+    files = {name: tmp_path / name for name in [
+        "meetings/old.mic.wav", "meetings/old.system.wav", "meetings/old.txt", "meetings/old.jsonl",
+        "meetings/recent.mic.wav", "sessions/sub/old.mic.wav", "voices/me.wav"]}
+    for name, path in files.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"x")
+        age = 3 * day if name.startswith("meetings/recent") else 15 * day
+        os.utime(path, (now - age, now - age))
+
+    removed = cli.expire_audio([tmp_path / "meetings", tmp_path / "sessions", tmp_path / "missing"], now=now)
+
+    gone = {"meetings/old.mic.wav", "meetings/old.system.wav", "sessions/sub/old.mic.wav"}
+    assert set(removed) == {files[name] for name in gone}
+    assert {name for name, path in files.items() if not path.exists()} == gone
+    assert len(messages) == 3 and all("older than 14 days" in m for m in messages)
+    assert cli.expire_audio([tmp_path / "meetings"], days=2, now=now) == [files["meetings/recent.mic.wav"]]
+
+
+def test_live_start_expires_old_audio_under_meetings_and_sessions(tmp_path, monkeypatch):
+    cli, _ = fake_live_capture(monkeypatch, tmp_path)
+    roots = []
+    monkeypatch.setattr(cli, "expire_audio", lambda r: roots.append(r))
+    signaller, _ = signal_when_live(tmp_path)
+    cli.main(["--room", "-o", str(tmp_path / "sessions" / "x.txt")])
+    signaller.join(timeout=2)
+    assert roots == [[tmp_path / "meetings", tmp_path / "sessions"]]

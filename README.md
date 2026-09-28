@@ -39,13 +39,23 @@ uv run hark                 # a call: mic = "me", system audio (Zoom…) diarize
 uv run hark --room          # in person: the mic alone, diarized
 uv run hark --file x.m4a    # a recording, through the same streaming path (~0.15× real time)
 uv run hark --title "shear telecon"   # names the session file
-uv run hark --room --save-audio       # also keep the mic track beside the transcript (<stem>.wav)
+uv run hark --no-save-audio # don't keep the audio
 ```
 
-`--save-audio` writes the mic track as 16 kHz mono 16-bit PCM WAV next to the
-transcript, appended as it is captured and complete when hark stops. Live input
-is padded to the wall clock, so an utterance's JSONL `start`/`end` are seconds
-into that file.
+Live capture keeps every track next to the transcript as 16 kHz mono 16-bit PCM
+WAV: `<stem>.mic.wav` (the mic: `me` in a call, the diarized track in a room) and,
+in a call, `<stem>.system.wav` (the diarized system audio). Each file holds exactly
+the samples its track fed the models, from the track's first sample, appended as
+captured and complete when hark stops. Live input is padded to the wall clock, so
+an utterance's JSONL `start`/`end` are seconds into its track's file. The mic is
+rounded to the 16-bit grid before the models see it, so the file is lossless:
+`hark --file x.system.wav` replays a track through the same pipeline with the same
+samples (fed in different chunk sizes).
+
+Saved audio is temporary: each live start deletes `.wav` files under
+`~/.hark/meetings/` and `~/.hark/sessions/` last modified more than 14 days ago
+(`AUDIO_RETENTION_DAYS` in `hark/cli.py`), logging each one. Transcripts are
+never deleted.
 
 ### Meetings with a scribe
 

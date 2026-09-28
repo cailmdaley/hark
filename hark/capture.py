@@ -1,4 +1,7 @@
-"""Audio sources: 16 kHz mono float32, drained by the main loop.
+"""Audio sources: 16 kHz mono float32 on the 16-bit PCM grid (k / 32768), drained by the main loop.
+
+Every live sample is exactly representable as s16le PCM, so a track saved by `WavRecorder`
+and replayed with `--file` feeds the models the same numbers they heard live.
 
 Mic via PortAudio (sounddevice); system audio via `audiotee`, a Core Audio
 process tap that writes s16le PCM to stdout (built by scripts/build-audiotee.sh).
@@ -25,6 +28,15 @@ BLOCK = SAMPLE_RATE // 10  # 100 ms
 AUDIOTEE = Path(os.environ.get("HARK_AUDIOTEE", Path(__file__).parent.parent / "bin" / "audiotee"))
 STALL_SEC = 5.0
 LATE_OK = 1.0  # a device may run this far behind the wall clock before we pad
+
+
+def to_pcm16(samples):
+    return np.clip(np.rint(samples * 32768.0), -32768, 32767).astype("<i2")
+
+
+def on_pcm16_grid(samples):
+    """Round float samples to the nearest s16le value, as `WavRecorder` and `--file` see them."""
+    return to_pcm16(samples).astype(np.float32) / 32768.0
 
 
 def log(msg):
@@ -90,7 +102,7 @@ class MicSource(Source):
             if status:
                 log(f"mic: {status}")
             self.last_audio = time.time()
-            self.queue.put(indata[:, 0].copy())
+            self.queue.put(on_pcm16_grid(indata[:, 0]))
 
         self.stream = sd.InputStream(
             samplerate=SAMPLE_RATE, channels=1, dtype="float32",
@@ -215,9 +227,11 @@ class SystemSource(Source):
 class WavRecorder:
     """One track's samples as 16 kHz mono 16-bit PCM WAV, appended as they are drained.
 
-    `wave` patches the header on every write, so the file is a valid WAV at any moment and
-    complete once `close` returns. Live sources are padded to the wall clock, so second `t` of
-    the recording is second `t` of the track: an utterance's `start`/`end` index it directly.
+    It receives exactly the samples the track is fed, from the track's first sample on, so
+    second `t` of the file is second `t` of the track: an utterance's `start`/`end` index it
+    directly. Live samples sit on the 16-bit grid, so the file is lossless and `--file`
+    replays it bit for bit. `wave` patches the header on every write, so the file is a valid
+    WAV at any moment and complete once `close` returns.
     """
 
     def __init__(self, path):
@@ -232,7 +246,7 @@ class WavRecorder:
 
     def write(self, samples):
         if samples.size:
-            self.wav.writeframes((np.clip(samples, -1, 1) * 32767).astype("<i2").tobytes())
+            self.wav.writeframes(to_pcm16(samples).tobytes())
 
     def close(self):
         self.wav.close()
