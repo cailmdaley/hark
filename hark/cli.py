@@ -170,9 +170,9 @@ def main(argv=None):
     ap.add_argument("--lang", default=None, help="ASR language, e.g. en-US, fr-FR (default: auto)")
     ap.add_argument("--latency", default="low", choices=["low", "very_low", "ultra_low"],
                     help="diarizer buffer: low=1.04 s (default), very_low=0.64 s, ultra_low=0.32 s")
-    ap.add_argument("--speaker-mask", default="shared", choices=["shared", "exclusive"],
-                    help="who hears an 80 ms frame two speakers hold: shared=both ASR streams "
-                         "(default), exclusive=the more probable speaker only")
+    ap.add_argument("--speaker-mask", default="exclusive", choices=["shared", "exclusive"],
+                    help="who hears an 80 ms frame two speakers hold: exclusive=the more "
+                         "probable speaker only (default), shared=both ASR streams")
     ap.add_argument("--gap", type=float, default=3.0,
                     help="seconds of silence that end a turn when nobody else takes over")
     ap.add_argument("--title", help="appended to the session filename")

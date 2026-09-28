@@ -118,8 +118,11 @@ Speaker masks: each speaker's ASR stream hears only the 80 ms frames the
 diarizer gives that speaker. The mask is temporal, not a voice separator, so a
 frame two speakers hold (a backchannel under someone's sentence, a turn's
 overlapping edges) carries the louder voice into both streams, and both
-transcribe it. `--speaker-mask exclusive` gives each frame to the more probable
-speaker only; `shared` (the default) gives it to every speaker over 0.5.
+transcribe it. hark therefore gives each frame to the more probable speaker
+only (`--speaker-mask exclusive`, the default). On AMI and Zoom recordings this
+cut words copied into the wrong speaker's line by 7–25× while word recall moved
+by under a point. `--speaker-mask shared` restores the upstream behaviour: every
+speaker over 0.5 hears the frame.
 
 ## Evaluating diarization
 
