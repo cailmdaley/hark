@@ -97,8 +97,8 @@ def ref_words(path, start, duration):
     out = []
     if path.suffix == ".rttm":
         meeting = path.stem
-        names = dict(re.findall(rf'nite:id="{meeting}_\d" channel="\d" nxt_agent="(\w)"[^>]*global_name="(\w+)"',
-                                (path.parent / "corpusResources/meetings.xml").read_text()))
+        speakers = re.findall(rf'<speaker nite:id="{meeting}_\d"[^>]*>', (path.parent / "corpusResources/meetings.xml").read_text())
+        names = {re.search(r'nxt_agent="(\w)"', x)[1]: re.search(r'global_name="(\w+)"', x)[1] for x in speakers}
         for xml in sorted(path.parent.glob(f"words/{meeting}.*.words.xml")):
             agent = xml.name.split(".")[1]
             for a, b, text in re.findall(r'<w [^>]*starttime="([\d.]+)" endtime="([\d.]+)"(?![^>]*punc)[^>]*>([^<]*)</w>',
@@ -152,9 +152,12 @@ def attribute(ws, rws, ref, act, mapping, window=1.5, pad=0.16):
     recall = {"recall_any": np.mean(heard) if rws else None, "recall_attributed": np.mean(attributed) if rws else None}
     matched = [w for w in ws if w["truth"] != "unmatched"]
     causes = Counter(w["cause"] for w in foreign)
+    copies = [w for w in foreign if w["dup"]]
     return recall | {"matched": len(matched), "foreign_rate": len(foreign) / max(len(matched), 1),
             "foreign_dup": np.mean([w["dup"] for w in foreign]) if foreign else None,
             "foreign_cause": {c: round(n / len(foreign), 3) for c, n in causes.items()} if foreign else {},
+            "copy_rate": len(copies) / max(len(matched), 1),
+            "copy_cause": {c: round(n / len(copies), 3) for c, n in Counter(w["cause"] for w in copies).items()},
             "dup_foreign": np.mean([w["truth"] == "foreign" for w in ws if w["dup"] and w["truth"] != "unmatched"])
             if any(w["dup"] for w in ws) else None}
 

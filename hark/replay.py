@@ -25,11 +25,11 @@ from .transcript import Track, flush_tracks, load_models, numbered
 
 def replay(audio, asr, diar, *, gap=3.0, policy=None, session_kwargs=None, log_every=60.0):
     """Run `audio` through a Track; return probs, raw tokens and utterances."""
-    track = Track("replay", asr, diar, speaker_label=numbered, gap=gap)
-    if policy or session_kwargs:
-        from .masking import GatedSession, MaskPolicy
+    track = Track("replay", asr, diar, speaker_label=numbered, gap=gap, mask=policy)
+    if session_kwargs:
+        from .session import GatedSession
 
-        track.session = GatedSession(asr, diar, policy=policy or MaskPolicy(), **(session_kwargs or {}))
+        track.session = GatedSession(asr, diar, policy=track.session.policy, **session_kwargs)
     track.audio = None
     session = track.session
     probs, tokens = [], []
@@ -89,7 +89,7 @@ def main(argv=None):
     t = time.monotonic()
     from .masking import MaskPolicy
 
-    policy = MaskPolicy.parse(args.mask) if args.mask else None
+    policy = MaskPolicy.parse(args.mask)
     result = replay(audio, asr, diar, gap=args.gap, policy=policy, session_kwargs=json.loads(args.session))
     wall = time.monotonic() - t
     args.out.mkdir(parents=True, exist_ok=True)
@@ -99,7 +99,7 @@ def main(argv=None):
             "".join(json.dumps(r, ensure_ascii=False) + "\n" for r in result[name]))
     meta = {"audio": str(args.audio.resolve()), "start": args.start, "duration": audio.size / SAMPLE_RATE,
             "latency": args.latency, "session": result["session"], "session_kwargs": json.loads(args.session),
-            "mask": vars(policy) if policy else None,
+            "mask": vars(policy),
             "wall": round(wall, 1)}
     (args.out / "meta.json").write_text(json.dumps(meta, indent=2) + "\n")
     print(f"[replay] {meta['duration']:.0f} s of audio in {wall:.0f} s → {args.out}")

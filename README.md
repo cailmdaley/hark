@@ -113,3 +113,19 @@ The file is the interface.
 Latency presets: `--latency very_low` (0.64 s) or `ultra_low` (0.32 s) trade
 diarization accuracy for speed. `--lang fr-FR` etc. pins the ASR language
 (default: auto).
+
+Speaker masks: each speaker's ASR stream hears only the 80 ms frames the
+diarizer gives that speaker. The mask is temporal, not a voice separator, so a
+frame two speakers hold (a backchannel under someone's sentence, a turn's
+overlapping edges) carries the louder voice into both streams, and both
+transcribe it. `--speaker-mask exclusive` gives each frame to the more probable
+speaker only; `shared` (the default) gives it to every speaker over 0.5.
+
+## Evaluating diarization
+
+`uv run python -m hark.replay AUDIO OUTDIR [--mask exclusive]` runs a file through
+the live pipeline and dumps the diarizer's per-frame probabilities, every
+per-speaker token and the turns. `uv run scripts/diar_eval.py OUTDIR` scores a
+dump: DER, cross-slot duplicate words, and, against AMI word alignments (an
+`<meeting>.rttm` beside the audio, with `words/` and `corpusResources/`) or a Zoom
+`.transcript.vtt`, which words landed in a slot whose speaker didn't say them.

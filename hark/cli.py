@@ -27,6 +27,7 @@ from datetime import datetime
 from pathlib import Path
 
 from .capture import SAMPLE_RATE, FileSource, MicSource, SystemSource, WavRecorder, log
+from .masking import MaskPolicy
 from .mirror import TranscriptMirror
 from .transcript import Sink, Track, flush_tracks, load_models, numbered
 
@@ -169,6 +170,9 @@ def main(argv=None):
     ap.add_argument("--lang", default=None, help="ASR language, e.g. en-US, fr-FR (default: auto)")
     ap.add_argument("--latency", default="low", choices=["low", "very_low", "ultra_low"],
                     help="diarizer buffer: low=1.04 s (default), very_low=0.64 s, ultra_low=0.32 s")
+    ap.add_argument("--speaker-mask", default="shared", choices=["shared", "exclusive"],
+                    help="who hears an 80 ms frame two speakers hold: shared=both ASR streams "
+                         "(default), exclusive=the more probable speaker only")
     ap.add_argument("--gap", type=float, default=3.0,
                     help="seconds of silence that end a turn when nobody else takes over")
     ap.add_argument("--title", help="appended to the session filename")
@@ -264,8 +268,9 @@ def main(argv=None):
                     return 130
 
             if not stop.is_set():
+                mask = MaskPolicy.parse(args.speaker_mask) if args.speaker_mask != "shared" else None
                 tracks = [(src, Track(src.name, asr, diar, speaker_label=label,
-                                      language=args.lang, gap=args.gap))
+                                      language=args.lang, gap=args.gap, mask=mask))
                           for src, label in sources]
                 all_tracks = [track for _, track in tracks]
                 import numpy as np
