@@ -231,7 +231,8 @@ class WavRecorder:
     second `t` of the file is second `t` of the track: an utterance's `start`/`end` index it
     directly. Live samples sit on the 16-bit grid, so the file is lossless and `--file`
     replays it bit for bit. `wave` patches the header on every write, so the file is a valid
-    WAV at any moment and complete once `close` returns.
+    WAV at any moment and complete once `close` returns. The audio is a by-product: an I/O
+    error (a full disk) stops this recording, logged once, and never the meeting.
     """
 
     def __init__(self, path):
@@ -245,11 +246,20 @@ class WavRecorder:
         self.wav.setframerate(SAMPLE_RATE)
 
     def write(self, samples):
-        if samples.size:
-            self.wav.writeframes(to_pcm16(samples).tobytes())
+        if samples.size and self.wav:
+            self._guard(self.wav.writeframes, to_pcm16(samples).tobytes())
 
     def close(self):
-        self.wav.close()
+        if self.wav:
+            self._guard(self.wav.close)
+            self.wav = None
+
+    def _guard(self, call, *args):
+        try:
+            call(*args)
+        except OSError as error:
+            log(f"audio: stopped saving {self.path.name}: {error}")
+            self.wav = None
 
 
 class FileSource(Source):

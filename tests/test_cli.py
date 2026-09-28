@@ -515,3 +515,36 @@ def test_live_start_expires_old_audio_under_meetings_and_sessions(tmp_path, monk
     cli.main(["--room", "-o", str(tmp_path / "sessions" / "x.txt")])
     signaller.join(timeout=2)
     assert roots == [[tmp_path / "meetings", tmp_path / "sessions"]]
+
+
+def test_wav_recorder_io_error_stops_recording_not_the_meeting(tmp_path):
+    import numpy as np
+    from hark.capture import WavRecorder
+
+    recorder = WavRecorder(tmp_path / "t.mic.wav")
+    def full(_):
+        raise OSError(28, "No space left on device")
+    recorder.wav.writeframes = full
+    recorder.write(np.ones(160, dtype=np.float32))
+    recorder.write(np.ones(160, dtype=np.float32))
+    recorder.close()
+    assert recorder.wav is None
+
+
+def test_expire_audio_skips_a_file_it_cannot_remove(tmp_path, monkeypatch):
+    import os
+    from pathlib import Path
+    from hark import cli
+
+    meetings = tmp_path / "meetings"; meetings.mkdir()
+    for name in ("a.wav", "b.wav"):
+        (meetings / name).write_bytes(b"")
+        os.utime(meetings / name, (0, 0))
+    real = Path.unlink
+    def flaky(self, *a, **k):
+        if self.name == "a.wav":
+            raise FileNotFoundError(self)
+        return real(self, *a, **k)
+    monkeypatch.setattr(Path, "unlink", flaky)
+    cli.expire_audio([meetings])
+    assert not (meetings / "b.wav").exists()

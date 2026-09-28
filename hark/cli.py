@@ -372,8 +372,11 @@ def expire_audio(roots, days=AUDIO_RETENTION_DAYS, now=None):
     removed = [path for root in roots if root.is_dir() for path in sorted(root.rglob("*.wav"))
                if path.is_file() and path.stat().st_mtime < cutoff]
     for path in removed:
-        path.unlink()
-        log(f"expired audio older than {days} days: {path}")
+        try:
+            path.unlink()
+            log(f"expired audio older than {days} days: {path}")
+        except OSError as error:
+            log(f"audio: could not expire {path}: {error}")
     return removed
 
 
