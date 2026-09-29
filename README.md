@@ -88,6 +88,32 @@ Lines from different speakers can land slightly out of time order. The
 with `wall, track, speaker, start, end, text` per utterance, plus name-mapping
 records when labels are resolved.
 
+A live source that goes quiet gets a marker line, so a dead capture never
+passes for a quiet meeting:
+
+```
+# system audio lost at 16:37:55 — no signal from the tap; nothing from the call is being transcribed
+# mic lost at 16:37:55 — only silence while others speak; the mic may not be captured
+# system audio back at 16:52:10 after 14m15s lost
+```
+
+A source is lost after 90 s (`QUIET_SEC` in `hark/health.py`) in which the
+device delivered no samples at all (a stalled or restarting tap, a vanished
+mic), or delivered only digital silence (peak ≤ 1e-4) while another track
+produced an utterance in the last 90 s, so a quiet room or a lull in the call
+never counts. The time is when it went quiet; padding hark adds to hold the
+wall clock is not sound. It is back once the device delivers sound again. A
+source has at most one open marker, and one still open when hark stops stays
+in the transcript. Each marker is mirrored in the JSONL as
+`{"source": {"track", "state": "silent"|"back", "since", "cause": "no signal"|"silence"}}`,
+with `back` holding the return time. Replays (`--file`) are never marked.
+
+`<stem>.log` beside the transcript keeps hark's log, one `HH:MM:SS` line per
+message, from the moment the transcript opens: every system-audio tap exit and
+restart (exit code, stall or EOF), mic reopens, errors, and once a minute per
+live source a heartbeat with seconds delivered by the device, seconds padded,
+peak amplitude and utterances in that minute. Heartbeats go to the file only.
+
 ## Plugging into an agent
 
 The file is the interface.

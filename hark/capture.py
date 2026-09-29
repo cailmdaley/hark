@@ -9,6 +9,8 @@ process tap that writes s16le PCM to stdout (built by scripts/build-audiotee.sh)
 Live sources are held to the wall clock: `drain` pads with silence whatever
 the device failed to deliver (a stalled tap, a vanished mic, the laptop asleep),
 so transcript times stay true and pending utterances still get flushed.
+Each live source notes when the device last delivered (`last_audio`) and when
+it last delivered sound (`last_sound`); padding never counts as either.
 """
 
 import json
@@ -19,6 +21,7 @@ import subprocess
 import sys
 import threading
 import time
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -28,6 +31,7 @@ BLOCK = SAMPLE_RATE // 10  # 100 ms
 AUDIOTEE = Path(os.environ.get("HARK_AUDIOTEE", Path(__file__).parent.parent / "bin" / "audiotee"))
 STALL_SEC = 5.0
 LATE_OK = 1.0  # a device may run this far behind the wall clock before we pad
+SOUND = 1e-4  # peak amplitude above digital silence
 
 
 def to_pcm16(samples):
@@ -39,8 +43,27 @@ def on_pcm16_grid(samples):
     return to_pcm16(samples).astype(np.float32) / 32768.0
 
 
-def log(msg):
-    print(f"[hark] {msg}", file=sys.stderr, flush=True)
+_log_file = None
+
+
+def log(msg, file_only=False):
+    """Report on stderr and, once `log_to` has opened one, in the session log."""
+    if not file_only:
+        print(f"[hark] {msg}", file=sys.stderr, flush=True)
+    if _log_file:
+        _log_file.write(f"{datetime.now():%H:%M:%S} {msg}\n")
+
+
+def log_to(path):
+    """Append every later `log` line, timestamped, to `path`; None closes the file."""
+    global _log_file
+    previous, _log_file = _log_file, open(path, "a", buffering=1) if path else None
+    if previous:
+        previous.close()
+
+
+def _no_stats():
+    return {"device": 0, "padded": 0, "peak": 0.0}
 
 
 class Source:
@@ -52,10 +75,27 @@ class Source:
         self.anchor = None  # wall-clock time of sample 0
         self.delivered = 0  # samples handed to the caller, padding included
         self.last_audio = None  # wall-clock time the device last delivered
+        self.last_sound = None  # ... and last delivered a block above digital silence
+        self.stats = _no_stats()
 
     def start(self):
-        self.anchor = self.last_audio = time.time()
+        self.anchor = self.last_audio = self.last_sound = time.time()
         self._open()
+
+    def _deliver(self, samples):
+        """Queue samples the device delivered, noting when and whether they carry sound."""
+        self.last_audio = time.time()
+        peak = float(np.abs(samples).max()) if samples.size else 0.0
+        if peak > SOUND:
+            self.last_sound = self.last_audio
+        self.stats["device"] += samples.size
+        self.stats["peak"] = max(self.stats["peak"], peak)
+        self.queue.put(samples)
+
+    def take_stats(self):
+        """Samples delivered by the device and padded by `drain`, and peak, since the last call."""
+        stats, self.stats = self.stats, _no_stats()
+        return stats
 
     def drain(self, limit=2 * SAMPLE_RATE):
         """Samples since the last call, up to about `limit`, padded to the wall clock."""
@@ -73,6 +113,7 @@ class Source:
                 behind = 0
             if behind > LATE_OK * SAMPLE_RATE:
                 blocks.append(np.zeros(int(behind - LATE_OK * SAMPLE_RATE / 2), np.float32))
+                self.stats["padded"] += blocks[-1].size
         out = np.concatenate(blocks) if blocks else np.zeros(0, np.float32)
         self.delivered += out.size
         return out
@@ -101,8 +142,7 @@ class MicSource(Source):
         def callback(indata, frames, t, status):
             if status:
                 log(f"mic: {status}")
-            self.last_audio = time.time()
-            self.queue.put(on_pcm16_grid(indata[:, 0]))
+            self._deliver(on_pcm16_grid(indata[:, 0]))
 
         self.stream = sd.InputStream(
             samplerate=SAMPLE_RATE, channels=1, dtype="float32",
@@ -114,11 +154,12 @@ class MicSource(Source):
         """Reopen the input if it goes quiet (a headset unplugged, AirPods switched)."""
         import sounddevice as sd
 
+        reopened = 0.0
         while not self.stopping.wait(1.0):
-            if time.time() - self.last_audio < STALL_SEC:
+            if time.time() - max(self.last_audio, reopened) < STALL_SEC:
                 continue
             log("mic: no input for 5 s, reopening")
-            self.last_audio = time.time()
+            reopened = time.time()
             try:
                 self._close()
                 sd._terminate()
@@ -150,7 +191,7 @@ class SystemSource(Source):
             raise SystemExit(f"audiotee not found at {AUDIOTEE} — run scripts/build-audiotee.sh")
         self.proc = None
         self.stopping = threading.Event()
-        self.heard_sound = False
+        self.warned = False
 
     def _open(self):
         threading.Thread(target=self._supervise, daemon=True).start()
@@ -169,20 +210,21 @@ class SystemSource(Source):
                 start_new_session=True,  # a terminal Ctrl-C reaches hark, not the tap
             )
             threading.Thread(target=self._stderr, args=(self.proc,), daemon=True).start()
-            got_audio = self._pump(self.proc)
+            got_audio, why = self._pump(self.proc)
             if self.proc.poll() is None:
                 self.proc.kill()
-            self.proc.wait()
+            code = self.proc.wait()
             if self.stopping.is_set():
                 break
             failures = 0 if got_audio else failures + 1
             delay = min(30.0, 2.0 ** failures)
-            if failures >= 3:
-                log(f"system audio: tap keeps failing ({failures}×), retrying in {delay:.0f} s")
+            log(f"system audio: tap {why} (exit code {code})"
+                + (f", keeps failing ({failures}× without audio)" if failures >= 3 else "")
+                + f", restarting in {delay:.0f} s")
             self.stopping.wait(delay)
 
     def _pump(self, proc):
-        """Forward PCM until the tap exits or stalls; True if any audio arrived."""
+        """Forward PCM until the tap exits or stalls: (any audio arrived, "stalled" or "hit EOF")."""
         fd = proc.stdout.fileno()
         pending = b""
         last = time.monotonic()
@@ -191,28 +233,24 @@ class SystemSource(Source):
             ready, _, _ = select.select([fd], [], [], 0.5)
             if not ready:
                 if time.monotonic() - last > STALL_SEC:
-                    return got
+                    return got, f"stalled ({STALL_SEC:.0f} s without data)"
                 continue
             chunk = os.read(fd, 2 * BLOCK)
             if not chunk:
-                return got
+                return got, "hit EOF"
             last = time.monotonic()
-            self.last_audio = time.time()
             got = True
             pending += chunk
             n = len(pending) // 2 * 2
             samples = np.frombuffer(pending[:n], dtype="<i2").astype(np.float32) / 32768.0
             pending = pending[n:]
-            if not self.heard_sound:
-                if samples.size and np.abs(samples).max() > 1e-4:
-                    self.heard_sound = True
-                elif time.time() - self.anchor > 20:
-                    log("system audio is pure silence after 20 s. If something is playing, grant "
-                        "your terminal System Settings → Privacy & Security → Screen & System "
-                        "Audio Recording → 'System Audio Recording Only', then restart the terminal.")
-                    self.heard_sound = True  # warn once
-            self.queue.put(samples)
-        return got
+            self._deliver(samples)
+            if not self.warned and self.last_sound == self.anchor and time.time() - self.anchor > 20:
+                log("system audio is pure silence after 20 s. If something is playing, grant "
+                    "your terminal System Settings → Privacy & Security → Screen & System "
+                    "Audio Recording → 'System Audio Recording Only', then restart the terminal.")
+                self.warned = True
+        return got, "stopped"
 
     def _stderr(self, proc):
         for line in proc.stderr:

@@ -11,7 +11,9 @@ replayable with --file); --no-save-audio opts out. At startup, saved audio under
 are kept.
 
 The live transcript is ~/.hark/current.txt (a symlink to the transcript file);
-follow it with `tail -F`. A JSONL sidecar sits beside it.
+follow it with `tail -F`. A JSONL sidecar sits beside it, and <stem>.log keeps
+hark's own log, timestamped, with a heartbeat per live source each minute.
+A live source that goes quiet for 90 s gets a `# … lost at …` line.
 """
 
 import argparse
@@ -26,7 +28,8 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from .capture import SAMPLE_RATE, FileSource, MicSource, SystemSource, WavRecorder, log
+from .capture import SAMPLE_RATE, FileSource, MicSource, SystemSource, WavRecorder, log, log_to
+from .health import QuietWatch
 from .masking import MaskPolicy
 from .mirror import TranscriptMirror
 from .transcript import Sink, Track, flush_tracks, load_models, numbered
@@ -224,7 +227,7 @@ def main(argv=None):
     all_tracks = []
     started_sources = []
     started_tracks = []
-    sink = matcher = mirror = None
+    sink = matcher = mirror = watch = None
     recorders = {}
     mirror_complete = True
     tracks_by_name = {}
@@ -234,6 +237,7 @@ def main(argv=None):
     def open_sink():
         nonlocal sink, matcher
         out.parent.mkdir(parents=True, exist_ok=True)
+        log_to(out.with_suffix(".log"))
         if live:
             _point_current(out)
         sink = Sink(out, f"hark {now:%Y-%m-%d %H:%M} — {what}")
@@ -307,6 +311,9 @@ def main(argv=None):
                 mirror.start()
             if not stop.is_set():
                 log("listening (Ctrl-C to stop)")
+            watch = QuietWatch() if live else None
+            spoken, said = {}, {}  # per track: wall end of the last utterance, utterances this minute
+            beat = time.monotonic() + 60
             while not stop.is_set():
                 sink.poll_names()
                 busy = False
@@ -319,6 +326,15 @@ def main(argv=None):
                         track.feed(samples)
                 for u in flush_tracks(all_tracks):
                     _emit(u, sink, matcher, tracks_by_name, failed_slots)
+                    spoken[u.track] = max(spoken.get(u.track, 0.0), u.wall_span[1])
+                    said[u.track] = said.get(u.track, 0) + 1
+                if watch:
+                    for event in watch.check(time.time(), {src.name: (src.last_audio, src.last_sound)
+                                                           for src in started_sources}, spoken):
+                        sink.source(event)
+                    if time.monotonic() >= beat:
+                        beat += 60
+                        _heartbeat(started_sources, said)
                 if (args.file and sources[0][0].done.is_set() and not busy
                         and sources[0][0].queue.empty()):
                     break
@@ -341,6 +357,9 @@ def main(argv=None):
                     for recorder in recorders.values():
                         recorder.close()
                     if sink:
+                        for track, (since, cause) in (watch.open.items() if watch else ()):
+                            log(f"{track}: still silent at the end ({cause} since "
+                                f"{datetime.fromtimestamp(since):%H:%M:%S})")
                         sink.close(f"ended {datetime.now():%H:%M:%S}")
                 finally:
                     if mirror:
@@ -364,6 +383,16 @@ def main(argv=None):
     finally:
         if watcher:
             watcher.close()
+        log_to(None)
+
+
+def _heartbeat(sources, said):
+    """One log-file line per live source for the past minute."""
+    for src in sources:
+        stats = src.take_stats()
+        log(f"heartbeat {src.name}: {stats['device'] / SAMPLE_RATE:.1f} s from the device, "
+            f"{stats['padded'] / SAMPLE_RATE:.1f} s padded, peak {stats['peak']:.4f}, "
+            f"{said.pop(src.name, 0)} utterances", file_only=True)
 
 
 def expire_audio(roots, days=AUDIO_RETENTION_DAYS, now=None):

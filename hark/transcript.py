@@ -253,7 +253,34 @@ class Sink:
         self.txt.write(u.line() + "\n")
         self.jsonl.write(json.dumps(u.record(), ensure_ascii=False) + "\n")
 
+    def source(self, event):
+        """Mark a live source going quiet (`# mic lost at …`) or coming back."""
+        who, what = ("system audio", "the call") if event.track == "system" else (event.track, "the mic")
+        since = datetime.fromtimestamp(event.since)
+        record = {"track": event.track, "state": event.state,
+                  "since": since.isoformat(timespec="seconds"), "cause": event.cause}
+        if event.state == "silent":
+            why = (f"no signal from the {'tap' if event.track == 'system' else 'device'}; "
+                   f"nothing from {what} is being transcribed" if event.cause == "no signal"
+                   else f"only silence while others speak; {what} may not be captured")
+            line = f"# {who} lost at {since:%H:%M:%S} — {why}"
+        else:
+            back = datetime.fromtimestamp(event.at)
+            record["back"] = back.isoformat(timespec="seconds")
+            line = f"# {who} back at {back:%H:%M:%S} after {_duration(event.at - event.since)} lost"
+        self.txt.seek(0, 2)
+        self.txt.write(line + "\n")
+        self.jsonl.write(json.dumps({"wall": datetime.now().isoformat(timespec="seconds"),
+                                     "source": record}) + "\n")
+
     def close(self, footer):
         self.txt.write(f"# {footer}\n")
         self.txt.close()
         self.jsonl.close()
+
+
+def _duration(seconds):
+    """14m15s, 1h02m03s, 45s."""
+    h, rest = divmod(round(seconds), 3600)
+    m, s = divmod(rest, 60)
+    return f"{h}h{m:02d}m{s:02d}s" if h else f"{m}m{s:02d}s" if m else f"{s}s"

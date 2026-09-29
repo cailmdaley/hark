@@ -118,15 +118,14 @@ def test_mirror_resume_verb_reopens_an_existing_target(tmp_path, monkeypatch):
 def fake_live_capture(monkeypatch, tmp_path, *, load_models=None):
     import hark.cli as cli
 
-    class Source:
-        name = "mic"
+    from hark.capture import Source as LiveSource
 
+    class Source(LiveSource):
         def __init__(self, *args, **kwargs):
-            self.anchor = None
+            super().__init__("mic")
             self.starts = 0
 
-        def start(self):
-            self.anchor = time.time()
+        def _open(self):
             self.starts += 1
 
         def stop(self):
