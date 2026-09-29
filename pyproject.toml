@@ -2,6 +2,8 @@
 name = "hark"
 version = "0.1.0"
 description = "Local live meeting transcript with speaker labels, streamed to a file any agent can follow"
+license = "MIT"
+readme = "README.md"
 requires-python = ">=3.11,<3.14"
 dependencies = [
     # Pinned to the v0.5.6 commit: first release with Nemotron-3-Diarization and

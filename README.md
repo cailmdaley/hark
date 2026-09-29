@@ -1,7 +1,10 @@
+<p align="center">
+  <img src="docs/assets/header.jpg" alt="hark" width="100%">
+</p>
+
 # hark
 
-A live, local meeting transcript with speaker labels, written to a plain text
-file that any agent can follow.
+**A live meeting transcript with speaker labels, written on your Mac to a plain text file that any agent can follow.**
 
 ```
 # hark 2026-09-24 19:34 — call: me = mic, S1… = system audio
@@ -11,150 +14,101 @@ file that any agent can follow.
 # ended 19:35:19
 ```
 
-Audio processing runs on the Mac (Apple Silicon, MLX): Nemotron 3.5 streaming ASR
-(`mlx-community/nemotron-3.5-asr-streaming-0.6b`) gated by
-Nemotron-3-Diarization (`mlx-community/Nemotron-3-Diarization`, up to 8
-speakers, 1.04 s buffer) through mlx-audio's `SpeakerStreamingSession`.
-That session keeps one ASR decoder per speaker, so words arrive already attributed.
-Labels are anonymous, numbered in order of arrival.
+Run `hark` and talk. Each time someone finishes a turn, hark appends one line to the transcript, labelled with who said it. Your coding agent (Claude Code, Codex, pi, or a shell loop) reads the file as it grows, so it can take notes, answer when you address it, or pick up a task mid-meeting. There is no UI and no server, and nothing is uploaded: speech recognition and speaker diarization run locally on Apple Silicon via [MLX](https://github.com/ml-explore/mlx).
 
-## Setup
+hark exists because dictation tools don't work well in meetings. They transcribe one voice at a time, don't separate speakers, and aren't built to run for an hour. hark does one job: turning a conversation into a file.
+
+## Requirements
+
+- A Mac with Apple Silicon, running macOS 14.2 or later (the system-audio tap needs it)
+- [uv](https://docs.astral.sh/uv/) (it fetches Python 3.11–3.13 if needed) and the Swift toolchain (Xcode or the Command Line Tools)
+- About 3 GB of disk for the models, which download from Hugging Face on first run
+
+## Install
 
 ```bash
-scripts/build-audiotee.sh   # system-audio tap (Swift, pinned commit) → bin/audiotee
+git clone https://github.com/cailmdaley/hark && cd hark
+scripts/build-audiotee.sh   # builds the system-audio tap → bin/audiotee
 uv sync
-ln -s "$PWD/.venv/bin/hark" ~/.local/bin/hark
 ```
 
-The symlink puts the venv's `hark` executable on the Shuttle daemon's `PATH`.
+`scripts/build-audiotee.sh` builds [audiotee](https://github.com/makeusabrew/audiotee) at a pinned commit. It's a small Swift program that captures everything the Mac plays through a Core Audio process tap. Run hark with `uv run hark`, or link `.venv/bin/hark` somewhere on your `PATH`.
 
-macOS permissions for the terminal that runs hark: **Microphone**, and
-**Screen & System Audio Recording → System Audio Recording Only**. Restart the
-terminal after granting them.
+Grant two macOS permissions to the terminal that runs hark: **Microphone**, and **Screen & System Audio Recording → System Audio Recording Only**. Restart the terminal afterwards. If system audio stays silent for the first 20 s of a call, hark prints a reminder pointing at the second setting.
 
 ## Use
 
 ```bash
-uv run hark                 # a call: mic = "me", system audio (Zoom…) diarized S1…S8
-uv run hark --room          # in person: the mic alone, diarized
-uv run hark --file x.m4a    # a recording, through the same streaming path (~0.15× real time)
-uv run hark --title "shear telecon"   # names the session file
-uv run hark --no-save-audio # don't keep the audio
+uv run hark                    # a call: your mic is "me", the call's audio is diarized S1…S8
+uv run hark --room             # in person: the mic alone, diarized
+uv run hark --file talk.m4a    # a recording, through the same streaming pipeline
+uv run hark --title "telecon"  # names the session file
 ```
 
-Live capture keeps every track next to the transcript as 16 kHz mono 16-bit PCM
-WAV: `<stem>.mic.wav` (the mic: `me` in a call, the diarized track in a room) and,
-in a call, `<stem>.system.wav` (the diarized system audio). Each file holds exactly
-the samples its track fed the models, from the track's first sample, appended as
-captured and complete when hark stops. Live input is padded to the wall clock, so
-an utterance's JSONL `start`/`end` are seconds into its track's file. The mic is
-rounded to the 16-bit grid before the models see it, so the file is lossless:
-`hark --file x.system.wav` replays a track through the same pipeline with the same
-samples (fed in different chunk sizes).
+Press Ctrl-C to end the session. hark flushes the last turn and writes `# ended`.
 
-Saved audio is temporary: each live start deletes `.wav` files under
-`~/.hark/meetings/` and `~/.hark/sessions/` last modified more than 14 days ago
-(`AUDIO_RETENTION_DAYS` in `hark/cli.py`), logging each one. Transcripts are
-never deleted.
+**On a call, wear headphones.** In call mode hark assumes the mic hears only you and system audio holds everyone else. On speakers, the call leaks into the mic and gets attributed to you.
 
-### Meetings with a scribe
-
-Start meeting mode from Shuttle's Capture form and choose Call or Room.
-Shuttle starts hark on the board daemon and launches a capture agent on the project's host to create the meeting fiber and follow the transcript as scribe.
-
-From a terminal, record locally and mirror the transcript with:
-
-```bash
-uv run hark --mirror candide:~/.hark/meetings/x.txt -o ~/.hark/meetings/x.txt --title "shear telecon"
-```
-
-A scribe can be pointed at that file by hand.
-The lifecycle file at `$HARK_DIR/meeting.json` (`~/.hark/meeting.json` by default) records the process, phase (loading, live, stopping, ended or failed), title, start time, transcript, mirror, the launcher's `--launch` id, and any error.
-An `ended` recording whose mirror didn't finish carries the `hark mirror --resume …` command in `error`.
-Send one SIGINT to its `pid` to stop a recording cleanly; a second one quits without flushing.
-
-Each line is a conversational turn, not a pause-delimited fragment: brief
-silences keep accumulating, a sustained reply (at least 1 s of speech) ends the
-turn, and a 3 s silence ends it when nobody takes over. Short backchannels do
-not end another speaker's turn. A 30 s monologue is split at its longest late
-pause.
-
-The live transcript is `~/.hark/current.txt`, a symlink to the active transcript; by default, that is
-`~/.hark/sessions/<date>_<time>[_title].txt`, and `-o` can choose another path.
-In the absence of a sustained
-reply, a line appears after 3 seconds of silence by default (`--gap`).
-Lines from different speakers can land slightly out of time order. The
-`# ended` footer marks a finished session. Beside the text file is a `.jsonl`
-with `wall, track, speaker, start, end, text` per utterance, plus name-mapping
-records when labels are resolved.
-
-A live source that goes quiet gets a marker line, so a dead capture never
-passes for a quiet meeting:
-
-```
-# system audio lost at 16:37:55 — no signal from the tap; nothing from the call is being transcribed
-# mic lost at 16:37:55 — only silence while others speak; the mic may not be captured
-# system audio back at 16:52:10 after 14m15s lost
-```
-
-A source is lost after 90 s (`QUIET_SEC` in `hark/health.py`) in which the
-device delivered no samples at all (a stalled or restarting tap, a vanished
-mic), or delivered only digital silence (peak ≤ 1e-4) while another track
-produced an utterance in the last 90 s, so a quiet room or a lull in the call
-never counts. The time is when it went quiet; padding hark adds to hold the
-wall clock is not sound. It is back once the device delivers sound again. A
-source has at most one open marker, and one still open when hark stops stays
-in the transcript. Each marker is mirrored in the JSONL as
-`{"source": {"track", "state": "silent"|"back", "since", "cause": "no signal"|"silence"}}`,
-with `back` holding the return time. Replays (`--file`) are never marked.
-
-`<stem>.log` beside the transcript keeps hark's log, one `HH:MM:SS` line per
-message, from the moment the transcript opens: every system-audio tap exit and
-restart (exit code, stall or EOF), mic reopens, errors, and once a minute per
-live source a heartbeat with seconds delivered by the device, seconds padded,
-peak amplitude and utterances in that minute. Heartbeats go to the file only.
+Transcripts go to `~/.hark/sessions/<date>_<time>[_title].txt`, and `~/.hark/current.txt` always points at the live one. A `.jsonl` file beside each transcript has the same utterances with timing and track.
 
 ## Plugging into an agent
 
-The file is the interface.
+The transcript file is the whole interface, so any agent that can read a file can follow a meeting.
 
-- **Watch it live**: `tail -F ~/.hark/current.txt` shows each line as it
-  lands. For an agent, `felt shuttle follow <transcript>` (felt's CLI, on every
-  host a Shuttle scribe runs on) prints the transcript in batches: everything
-  already written, then new lines held until one addresses the agent by name
-  (or a mishearing of it), 150 words pile up, 15 s pass, or `# ended` arrives,
-  which flushes and exits. Run it under Claude Code's `Monitor` tool so each
-  batch arrives as an event; elsewhere, read its stdout batch by batch.
-- **Name speakers**: `uv run hark name S2 "Mike Hudson"` appends a mapping to
-  the current session. The line `# S2 = Mike Hudson` records that mapping; future
-  utterances use the name and JSONL retains the stable `speaker` slot plus `name`.
-  `# S2 = S2` (`hark name S2 S2`) returns the slot to its anonymous label; its
-  JSONL record is `{"name": {"speaker": "S2", "as": null}}`.
-- **Resolve labels**: agents should scan the transcript for `# Sx = name` lines
-  and use those mappings for speaker labels, including for earlier utterances;
-  the latest line for a slot wins.
-- **Enroll a voice**: `uv run hark enroll me --seconds 30` records from the microphone; `--file x.wav` enrolls from audio (the first 30 seconds by default). Voiceprints live in `~/.hark/voices/` (`HARK_DIR` relocates the directory). During diarized tracks, hark names a slot after enough finished speech matches an enrolled voice: cosine ≥ 0.55 (above the worst impostor clips seen, about 0.5) and 0.21 ahead of both the next enrolled voice and any other slot that clears the same bar for that voice. A name belongs to one slot at a time; if a clearly stronger slot turns up, hark writes `# S1 = S1` for the old holder before naming the new one. The same `# Sx = name` line is used as manual naming; a slot a human named or renamed is never touched, and its name is never given to another slot.
-- **After the meeting**: the session file is the transcript.
+**Claude Code.** Ask it to watch the transcript with the `Monitor` tool:
 
-Latency presets: `--latency very_low` (0.64 s) or `ultra_low` (0.32 s) trade
-diarization accuracy for speed. `--lang fr-FR` etc. pins the ASR language
-(default: auto).
+```
+Monitor `tail -n +1 -F ~/.hark/current.txt` and follow the meeting. Take notes
+in notes.md; if someone says your name, answer in the terminal.
+```
 
-Speaker masks: each speaker's ASR stream hears only the 80 ms frames the
-diarizer gives that speaker. The mask is temporal, not a voice separator, so a
-frame two speakers hold (a backchannel under someone's sentence, a turn's
-overlapping edges) carries the louder voice into both streams, and both
-transcribe it. hark therefore gives each frame to the more probable speaker
-only (`--speaker-mask exclusive`, the default). On AMI and Zoom recordings this
-cut words copied into the wrong speaker's line by 7–25× while word recall moved
-by under a point. `--speaker-mask shared` restores the upstream behaviour: every
-speaker over 0.5 hears the frame.
+Each new line arrives as an event. When a line starting with `# ended` arrives, the meeting is over.
 
-## Evaluating diarization
+**Harnesses without a monitor tool.** Poll by line count: remember how many lines you've read, and on each pass read from there with `tail -n +$((n+1)) ~/.hark/current.txt`. hark only ever appends, so line numbers are stable.
 
-`uv run python -m hark.replay AUDIO OUTDIR [--mask exclusive]` runs a file through
-the live pipeline and dumps the diarizer's per-frame probabilities, every
-per-speaker token and the turns. `uv run scripts/diar_eval.py OUTDIR` scores a
-dump: DER, cross-slot duplicate words, and, against AMI word alignments (an
-`<meeting>.rttm` beside the audio, with `words/` and `corpusResources/`) or a Zoom
-`.transcript.vtt`, which words landed in a slot whose speaker didn't say them.
+**Names.** Speakers start out anonymous (`S1`, `S2`, … in order of arrival). You or your agent can name one mid-meeting:
+
+```bash
+uv run hark name S2 "Ada"    # appends "# S2 = Ada"; later lines say Ada
+```
+
+Enroll voices ahead of time and hark names diarized speakers itself when it's confident:
+
+```bash
+uv run hark enroll Ada --seconds 30       # record Ada speaking into the mic for 30 s
+uv run hark enroll Ada --file ada.wav     # or enroll from audio
+```
+
+An agent reading the transcript should apply the latest `# Sx = name` line for each slot, including to lines written before it.
+
+## How it works
+
+Two models from NVIDIA, both running in MLX through [mlx-audio](https://github.com/Blaizzy/mlx-audio):
+
+- **Nemotron 3.5 streaming ASR** (`mlx-community/nemotron-3.5-asr-streaming-0.6b`) turns speech into words
+- **Nemotron-3-Diarization** (`mlx-community/Nemotron-3-Diarization`) decides who is speaking in each 80 ms frame, for up to 8 speakers, with about a second of lookahead
+
+The diarizer masks the audio features for each speaker, and each speaker gets their own ASR decoder, so words arrive already attributed. hark adds turn-taking on top: a line ends when someone else speaks for more than a moment (0.8 s), or after 3 s of silence. Brief backchannels ("mm-hm") don't cut someone off. It also watches its own inputs. If the system-audio tap dies mid-call, the transcript says so (`# system audio lost at 16:37:55 …`) rather than looking like a quiet meeting.
+
+The docs go deeper:
+
+- [docs/usage.md](docs/usage.md): every option, saved audio, logs, mirroring over SSH, and the lifecycle file for launchers
+- [docs/format.md](docs/format.md): the text and JSONL formats, which are the contract for agents
+- [docs/how-it-works.md](docs/how-it-works.md): the pipeline, turn segmentation, speaker masks, voice matching, and how to evaluate diarization
+
+## Limitations
+
+- macOS on Apple Silicon only.
+- Diarization is good but not perfect. Expect the occasional mislabelled turn, and more of them when people talk over each other.
+- Lines from different speakers can land slightly out of time order, because each speaker's turn closes on its own schedule.
+- Speaker numbers are per session; the same person can be `S1` today and `S3` tomorrow unless their voice is enrolled.
+
+## Development
+
+```bash
+uv run pytest
+```
+
+## License
+
+MIT; see [LICENSE](LICENSE). The model weights and audiotee have their own licenses.
