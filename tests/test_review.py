@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 
 from hark.capture import SAMPLE_RATE
@@ -60,3 +61,12 @@ def test_interleaved_turns_cut_a_before_b_and_keep_a_resumption():
     out += flush_tracks([room])
     assert [(u.speaker, u.text) for u in out] == [("A", "first part of a"), ("B", "wait no stop"),
                                                     ("A", "and back again")]
+
+
+def test_name_back_to_own_label_records_null(tmp_path):
+    session = tmp_path / "s.txt"
+    session.write_text("# session\n")
+    _name_current("S2", "Grace", session)
+    _name_current("S2", "S2", session)
+    records = [json.loads(line) for line in session.with_suffix(".jsonl").read_text().splitlines()]
+    assert [r["name"]["as"] for r in records] == ["Grace", None]

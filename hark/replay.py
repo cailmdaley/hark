@@ -80,7 +80,8 @@ def main(argv=None):
     ap.add_argument("--duration", type=float)
     ap.add_argument("--latency", default="low")
     ap.add_argument("--gap", type=float, default=3.0)
-    ap.add_argument("--mask", help="speaker mask policy (hark.masking.MaskPolicy.parse)")
+    ap.add_argument("--mask", default="exclusive",
+                    help="speaker mask policy (hark.masking.MaskPolicy.parse); default: exclusive, as live")
     ap.add_argument("--session", default="{}", help="JSON kwargs for the speaker-streaming session")
     args = ap.parse_args(argv)
 

@@ -4,6 +4,10 @@
     hark --room          in person: the mic alone, diarized
     hark --file x.wav    transcribe a file through the same streaming path
 
+    hark name S2 "Ada" [--session PATH]     name a diarized speaker in the live session
+    hark enroll NAME [--seconds 30 | --file x.wav] [--mic DEV]   record a voiceprint
+    hark mirror --resume LOCAL HOST:PATH    finish a mirror that didn't complete
+
 Live capture keeps each track beside the transcript as <stem>.mic.wav and
 <stem>.system.wav (16 kHz mono 16-bit PCM, t = 0 at the track's first sample,
 replayable with --file); --no-save-audio opts out. At startup, saved audio under
@@ -476,7 +480,7 @@ def _name_current(speaker, name, session=None):
         transcript.write(f"# {speaker} = {name}\n")
     with txt.with_suffix(".jsonl").open("a") as records:
         record = {"wall": datetime.now().isoformat(timespec="seconds"),
-                  "name": {"speaker": speaker, "as": name}}
+                  "name": {"speaker": speaker, "as": None if name == speaker else name}}
         records.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
