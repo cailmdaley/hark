@@ -267,6 +267,7 @@ class PauseMonitor:
         self.events = []
         self.automatic = ()
         self.lock = threading.Lock()
+        self.stop_lock = threading.Lock()
         self.stopping = threading.Event()
         self.thread = None
         self.warned = set()
@@ -326,9 +327,14 @@ class PauseMonitor:
             return self.state.last_mute_end
 
     def stop(self):
-        self.stopping.set()
-        if self.thread:
-            self.thread.join()
+        """Join the watcher and sample once more before the held mic audio is flushed."""
+        with self.stop_lock:
+            if self.stopping.is_set():
+                return
+            self.stopping.set()
+            if self.thread:
+                self.thread.join()
+            self.poll()
 
 
 if __name__ == "__main__":

@@ -188,6 +188,53 @@ def test_monitor_polls_manual_state_even_with_automatic_detection_disabled(tmp_p
     assert monitor.muted(12)
 
 
+@pytest.mark.parametrize("reason", ["automatic", "manual"])
+def test_stop_polls_after_join_to_mute_shutdown_onset_and_is_idempotent(tmp_path, monkeypatch, reason):
+    clock = [100.2]
+    monkeypatch.setattr("hark.pause.time.time", lambda: clock[0])
+    monitor = PauseMonitor(tmp_path, ("aquavoice",))
+    joined, app_running, reads = [], [], []
+
+    def read():
+        reads.append(clock[0])
+        return [AudioProcess(1, 10, "aquavoice", bool(app_running))]
+
+    monitor.reader = SimpleNamespace(read=read)
+    monitor.poll()
+    assert monitor.take_events() == []
+    gate = MicGate(100)
+    original = pcm(.2)
+    assert monitor.feed(gate, original, clock[0]).size == 0
+
+    clock[0] = 100.25  # onset after the last poll, inside the final 75 ms polling window
+    if reason == "manual":
+        ManualPause(tmp_path).set(True)
+    else:
+        app_running.append(True)
+
+    def join():
+        assert monitor.stopping.is_set()
+        assert reads == [100.2] and monitor.state.active == {}
+        joined.append(True)
+
+    monitor.thread = SimpleNamespace(join=join)
+    monitor.stop()
+    assert joined == [True] and reads == [100.2, 100.25]
+    event, = monitor.take_events()
+    assert event.reason == reason and event.paused and event.at == 100.25
+    interval, = monitor.state.intervals
+    assert interval.start == 100.25 - MIC_LOOKBACK_SEC and interval.end is None
+    final = monitor.feed(gate, original[:0], clock[0], final=True)
+    assert final.size == original.size and not final.any()
+    # The CLI consumes final events before flushing, then calls stop defensively again.
+    clock[0] = 100.3
+    ManualPause(tmp_path).set(False)
+    app_running.clear()
+    monitor.stop()
+    assert joined == [True] and reads == [100.2, 100.25]
+    assert monitor.take_events() == []
+
+
 def test_monitor_retains_automatic_pause_on_read_failure_and_resumes_on_success(tmp_path, monkeypatch):
     clock = [10.0]
     monkeypatch.setattr("hark.pause.time.time", lambda: clock[0])
