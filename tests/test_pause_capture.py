@@ -98,7 +98,7 @@ def test_live_modes_feed_and_save_identical_gated_pcm_and_leave_system_untouched
 
         def feed(self, gate, samples, now, final=False):
             if not final:
-                step = round((now - gate.anchor) * 10)
+                step = round((now - gate.source.anchor) * 10)
                 self.events.extend(self.state.update(
                     now, 12 <= step < 14, ("aquavoice",) if 5 <= step < 8 else ()))
             return super().feed(gate, samples, now, final=final)

@@ -42,7 +42,7 @@ def test_drain_does_not_pad_while_backlog_is_queued():
     src = Source("mic")
     src.anchor = time.time() - 2.0  # the loop stalled 2 s (first MLX inference, an ONNX embed…)
     for _ in range(20):
-        src.queue.put(np.ones(1600, np.float32))  # …while the device delivered all 2 s
+        src.queue.put((time.time(), np.ones(1600, np.float32)))  # …while the device delivered all 2 s
     out = src.drain(limit=SAMPLE_RATE // 2)
     assert np.count_nonzero(out == 0) == 0, f"{np.count_nonzero(out == 0) / SAMPLE_RATE:.2f} s of fake silence"
 

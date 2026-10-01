@@ -239,18 +239,26 @@ class PauseState:
 
 
 class MicGate:
-    """Hold the latest 300 ms by wall time; emit every sample once, including on final flush."""
+    """Hold the mic's newest 300 ms, timed by when the device delivered it, then emit every
+    sample once (on the final flush too), zeroed inside mute intervals.
 
-    def __init__(self, anchor):
-        self.anchor = anchor
+    A sample's wall time comes from `source.heard`, not from its index since `anchor`:
+    the device runs up to `LATE_OK` behind the padded timeline (0.1 s from the start,
+    0.5-1 s after any padding), which would otherwise shift every mute interval later.
+    """
+
+    def __init__(self, source):
+        self.source = source
         self.emitted = 0
         self.pending = np.zeros(0, np.float32)
 
     def feed(self, samples, now, state, final=False):
         self.pending = np.concatenate((self.pending, samples))
-        ready = math.floor((now - MIC_LOOKBACK_SEC - self.anchor) * SAMPLE_RATE + 1e-6)
-        count = self.pending.size if final else min(self.pending.size, max(0, ready - self.emitted))
-        out = state.gate(self.pending[:count], self.anchor + self.emitted / SAMPLE_RATE)
+        index, arrived = self.source.heard
+        start = arrived - (index - self.emitted) / SAMPLE_RATE  # wall time of pending[0]
+        ready = math.floor((now - MIC_LOOKBACK_SEC - start) * SAMPLE_RATE + 1e-6)
+        count = self.pending.size if final else min(self.pending.size, max(0, ready))
+        out = state.gate(self.pending[:count], start)
         self.pending = self.pending[count:]
         self.emitted += count
         return out

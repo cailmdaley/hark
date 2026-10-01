@@ -11,7 +11,9 @@ Live sources are held to the wall clock: `drain` pads with silence whatever
 the device failed to deliver (a stalled tap, a vanished mic, the laptop asleep),
 so transcript times stay true and pending utterances still get flushed.
 Each live source notes when the device last delivered (`last_audio`) and when
-it last delivered sound (`last_sound`); padding never counts as either.
+it last delivered sound (`last_sound`); padding never counts as either. `heard` pins the
+newest device sample drained so far to the wall time it arrived, because a device can run
+up to `LATE_OK` behind the padded timeline.
 """
 
 import json
@@ -77,21 +79,23 @@ class Source:
         self.delivered = 0  # samples handed to the caller, padding included
         self.last_audio = None  # wall-clock time the device last delivered
         self.last_sound = None  # ... and last delivered a block above digital silence
+        self.heard = None  # (samples drained, wall time the last of them arrived)
         self.stats = _no_stats()
 
     def start(self):
         self.anchor = self.last_audio = self.last_sound = time.time()
+        self.heard = 0, self.anchor
         self._open()
 
     def _deliver(self, samples):
         """Queue samples the device delivered, noting when and whether they carry sound."""
-        self.last_audio = time.time()
+        now = self.last_audio = time.time()
         peak = float(np.abs(samples).max()) if samples.size else 0.0
         if peak > SOUND:
-            self.last_sound = self.last_audio
+            self.last_sound = now
         self.stats["device"] += samples.size
         self.stats["peak"] = max(self.stats["peak"], peak)
-        self.queue.put(samples)
+        self.queue.put((now, samples))
 
     def take_stats(self):
         """Samples delivered by the device and padded by `drain`, and peak, since the last call."""
@@ -100,14 +104,17 @@ class Source:
 
     def drain(self, limit=2 * SAMPLE_RATE):
         """Samples since the last call, up to about `limit`, padded to the wall clock."""
-        blocks = []
-        while sum(b.size for b in blocks) < limit:
+        blocks, got = [], 0
+        while got < limit:
             try:
-                blocks.append(self.queue.get_nowait())
+                arrived, block = self.queue.get_nowait()
             except queue.Empty:
                 break
+            blocks.append(block)
+            got += block.size
+            if arrived is not None:
+                self.heard = self.delivered + got, arrived
         if self.live and self.anchor is not None:
-            got = sum(b.size for b in blocks)
             if self.queue.empty():
                 behind = (time.time() - self.anchor) * SAMPLE_RATE - self.delivered - got
             else:
@@ -406,7 +413,7 @@ class FileSource(Source):
             for i in range(0, audio.size, BLOCK):
                 if self.stopping.is_set():
                     break
-                self.queue.put(audio[i : i + BLOCK])
+                self.queue.put((None, audio[i : i + BLOCK]))
                 if self.realtime:
                     time.sleep(BLOCK / SAMPLE_RATE)
             self.done.set()

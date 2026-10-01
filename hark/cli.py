@@ -339,7 +339,7 @@ def main(argv=None):
                 started_sources.append(src)
                 started_tracks.append((src, track))
                 if live and src.name == "mic":
-                    mic_gates[src] = MicGate(src.anchor)
+                    mic_gates[src] = MicGate(src)
                 track.t0 = (datetime.combine(now.date(), datetime.min.time()) if args.file
                             else datetime.fromtimestamp(src.anchor))
             if lifecycle and len(started_sources) == len(sources) and not stop.is_set():

@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from hark.capture import SAMPLE_RATE, on_pcm16_grid
+from hark.capture import SAMPLE_RATE, Source, on_pcm16_grid
 from hark.health import Quiet, QuietWatch
 from hark.pause import (AUTO_RESUME_TAIL_SEC, MIC_LOOKBACK_SEC, AudioProcess,
                         CoreAudioProcesses, ManualPause, MicGate, PauseMonitor,
@@ -22,6 +22,11 @@ def pcm(seconds):
 
 def samples_at(seconds):
     return round(seconds * SAMPLE_RATE)
+
+
+def timeline(anchor):
+    """A source whose samples arrived exactly on the padded timeline."""
+    return SimpleNamespace(anchor=anchor, heard=(0, anchor))
 
 
 def test_matching_overrides_default_ignores_self_idle_and_implicit_corespeech():
@@ -69,7 +74,7 @@ def test_process_reader_reads_bundle_ids_even_when_input_is_off_and_skips_self()
 
 
 def test_lookback_retroactively_mutes_onset_and_tail_without_changing_timeline():
-    state, gate = PauseState(), MicGate(0)
+    state, gate = PauseState(), MicGate(timeline(0))
     original = pcm(1.5)
     first = gate.feed(original[:samples_at(.4)], .4, state)
     assert np.array_equal(first, original[:samples_at(.4 - MIC_LOOKBACK_SEC)])
@@ -86,8 +91,33 @@ def test_lookback_retroactively_mutes_onset_and_tail_without_changing_timeline()
     assert np.array_equal(on_pcm16_grid(heard), heard)
 
 
+def test_gate_times_samples_by_delivery_when_the_device_runs_behind(monkeypatch):
+    """A mic can sit up to LATE_OK behind the padded timeline (0.5-1 s after any padding).
+    A pause must still reach back over audio captured just before detection."""
+    clock = [0.0]
+    monkeypatch.setattr("time.time", lambda: clock[0])
+    src = Source("mic")
+    src._open = lambda: None
+    src.start()
+    state, gate = PauseState(), MicGate(src)
+    original, lag, out = pcm(3), 0.7, []
+    for k in range(30):
+        clock[0] = lag + (k + 1) / 10  # block k's last sample arrives 0.7 s after its index time
+        src._deliver(original[k * 1600:(k + 1) * 1600])
+        if k == 12:
+            detected = clock[0]
+            state.update(detected, False, ("aquavoice",))
+        out.append(gate.feed(src.drain(), clock[0], state))
+    out.append(gate.feed(src.drain(), clock[0], state, final=True))
+    heard = np.concatenate(out)
+    assert heard.size == original.size
+    onset = samples_at(detected - MIC_LOOKBACK_SEC - lag)  # 1.0 s, not 1.7 s
+    assert np.array_equal(heard[:onset - 1], original[:onset - 1])
+    assert not heard[onset + 1:].any()
+
+
 def test_shutdown_flushes_held_audio_and_an_active_pause_as_zeros():
-    state, gate = PauseState(), MicGate(100)
+    state, gate = PauseState(), MicGate(timeline(100))
     original = pcm(.2)
     assert gate.feed(original, 100.2, state).size == 0
     state.update(100.2, True)
@@ -96,7 +126,7 @@ def test_shutdown_flushes_held_audio_and_an_active_pause_as_zeros():
 
 
 def test_disabled_detection_passes_all_original_samples_including_shutdown_lookback():
-    state, gate = PauseState(), MicGate(10)
+    state, gate = PauseState(), MicGate(timeline(10))
     original = pcm(1)
     first = gate.feed(original[:samples_at(.5)], 10.5, state)
     held = gate.feed(original[samples_at(.5):], 11, state)
@@ -202,7 +232,7 @@ def test_stop_polls_after_join_to_mute_shutdown_onset_and_is_idempotent(tmp_path
     monitor.reader = SimpleNamespace(read=read)
     monitor.poll()
     assert monitor.take_events() == []
-    gate = MicGate(100)
+    gate = MicGate(timeline(100))
     original = pcm(.2)
     assert monitor.feed(gate, original, clock[0]).size == 0
 
