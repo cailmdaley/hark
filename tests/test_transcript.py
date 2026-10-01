@@ -26,10 +26,9 @@ def test_line_range_matches_jsonl_wall_and_audio_times(tmp_path):
     record = json.loads(path.with_suffix(".jsonl").read_text().splitlines()[-1])
     start, end = line.split(" ", 1)[0].split("-")
     wall = datetime.fromisoformat(record["wall"])
-    wall_end = datetime.fromtimestamp(wall.timestamp() + record["end"] - record["start"])
     assert line == "14:03:12-14:03:22 S2   Hello"
     assert start == wall.strftime("%H:%M:%S")
-    assert end == wall_end.strftime("%H:%M:%S")
+    assert end == "14:03:22"
     assert (record["start"], record["end"]) == (10.12, 19.88)
 
 

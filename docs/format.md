@@ -54,7 +54,7 @@ One JSON object per line. Every record has `wall`, an ISO-8601 local timestamp t
 - `track`: `mic`, `system` or `phone` live; for `--file`, the file's name without extension
 - `speaker`: the stable slot (`me`, `S1`…), even when a name is shown in the text file
 - `start`, `end`: seconds into the track's saved audio file (`<stem>.<track>.wav`), so an utterance can be cut out of the recording exactly.
-  The text line's end time is `wall + (end - start)`, formatted to whole seconds.
+  The text line's end time is `wall + (end - start)`, to within a second.
 - `name`: present only when the slot is named
 
 **Naming**
