@@ -46,14 +46,18 @@ class Utterance:
     def wall_span(self):
         return self.wall.timestamp(), self.wall.timestamp() + self.end - self.start
 
+    @property
+    def wall_end(self):
+        return datetime.fromtimestamp(self.wall_span[1])
+
     def line(self):
         label = self.name or f"{self.speaker:<4}"
-        return f"{self.wall:%H:%M:%S} {label} {self.text}"
+        return f"{self.wall:%H:%M:%S}-{self.wall_end:%H:%M:%S} {label} {self.text}"
 
     def record(self):
-        record = {"wall": self.wall.isoformat(timespec="seconds"), "track": self.track,
-                  "speaker": self.speaker, "start": round(self.start, 2),
-                  "end": round(self.end, 2), "text": self.text}
+        record = {"wall": self.wall.isoformat(), "track": self.track,
+                  "speaker": self.speaker, "start": round(self.start, 6),
+                  "end": round(self.end, 6), "text": self.text}
         if self.name:
             record["name"] = self.name
         return record
@@ -189,7 +193,7 @@ def flush_tracks(tracks, force=False):
         plans = [track._flush_plan(tracks, True, wall_times) for track in tracks]
         out.extend(utterance for track, cuts in zip(tracks, plans)
                    for utterance in track._apply_flush(cuts))
-    return sorted(out, key=lambda u: u.wall)
+    return sorted(out, key=lambda u: u.wall_span[1])
 
 
 def _monologue_cut(tokens):

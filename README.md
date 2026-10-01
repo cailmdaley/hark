@@ -8,13 +8,17 @@
 
 ```
 # hark 2026-09-24 19:34 — call: me = mic, S1… = system audio
-19:34:17 S1   Okay, let's get started. I want to go over the cosmic shear covariance
-19:34:23 me   Sure, I reran the pipeline last night with the new masks
-19:34:29 S2   Did anyone check whether the redshift distributions changed?
+19:34:12-19:34:18 me   Sure, I reran the pipeline last night with the new masks
+19:34:00-19:34:30 S1   Okay, let's get started. I want to go over the cosmic shear covariance
+19:34:29-19:34:38 S2   Did anyone check whether the redshift distributions changed?
 # ended 19:35:19
 ```
 
-Run `hark` and talk. Each time someone finishes a turn, hark appends one line to the transcript, labelled with who said it. Your coding agent (Claude Code, Codex, pi, or a shell loop) reads the file as it grows, so it can take notes, answer when you address it, or pick up a task mid-meeting. There is no UI and no server, and nothing is uploaded: speech recognition and speaker diarization run locally on Apple Silicon via [MLX](https://github.com/ml-explore/mlx).
+Run `hark` and talk.
+Each time someone finishes a turn, hark appends one line with the turn's start and end time, labelled with who said it.
+Lines arrive in end-time order, so start times can move backward across speakers.
+Your coding agent (Claude Code, Codex, pi, or a shell loop) reads the file as it grows, so it can take notes, answer when you address it, or pick up a task mid-meeting.
+There is no UI and no server, and nothing is uploaded: speech recognition and speaker diarization run locally on Apple Silicon via [MLX](https://github.com/ml-explore/mlx).
 
 hark exists because dictation tools don't work well in meetings. They transcribe one voice at a time, don't separate speakers, and aren't built to run for an hour. hark does one job: turning a conversation into a file.
 
@@ -101,7 +105,6 @@ The docs go deeper:
 
 - macOS on Apple Silicon only.
 - Diarization is good but not perfect. Expect the occasional mislabelled turn, and more of them when people talk over each other.
-- Lines from different speakers can land slightly out of time order, because each speaker's turn closes on its own schedule.
 - Speaker numbers are per session; the same person can be `S1` today and `S3` tomorrow unless their voice is enrolled.
 
 ## Development

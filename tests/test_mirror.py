@@ -45,7 +45,7 @@ def test_streams_new_bytes_in_order_and_remote_stays_a_prefix(tmp_path):
                               command=lambda offset, reset=False: positioned_command(remote, offset, reset=reset),
                               size_command=remote_size(remote), backoff=0.01)
     mirror.start()
-    for line in (b"10:00:00 S1   hello\n", b"10:00:01 me   yes\n"):
+    for line in (b"10:00:00-10:00:01 S1   hello\n", b"10:00:01-10:00:02 me   yes\n"):
         with local.open("ab") as stream:
             stream.write(line)
         wait_for(lambda: remote.exists() and remote.read_bytes() == local.read_bytes())
@@ -57,7 +57,7 @@ def test_streams_new_bytes_in_order_and_remote_stays_a_prefix(tmp_path):
 @pytest.mark.parametrize("drop_at", [17, 39], ids=["mid-line", "line-boundary"])
 def test_resumes_from_remote_byte_count_after_a_drop(tmp_path, drop_at):
     local, remote = tmp_path / "local.txt", tmp_path / "remote.txt"
-    local.write_bytes(b"# hark\n10:00:00 S1   a transcript line\n# ended 10:00:01\n")
+    local.write_bytes(b"# hark\n10:00:00-10:00:01 S1   a transcript line\n# ended 10:00:01\n")
     launches = 0
 
     def command(offset, reset=False):
@@ -96,7 +96,7 @@ def test_remote_larger_than_local_is_rewritten_from_the_local_transcript(tmp_pat
 
 def test_finish_waits_until_ended_footer_is_mirrored(tmp_path):
     local, remote = tmp_path / "local.txt", tmp_path / "remote.txt"
-    local.write_bytes(b"# hark\n10:00:00 S1   goodbye\n")
+    local.write_bytes(b"# hark\n10:00:00-10:00:01 S1   goodbye\n")
     mirror = TranscriptMirror(local, "fake", str(remote),
                               command=lambda offset, reset=False: positioned_command(remote, offset, reset=reset),
                               size_command=remote_size(remote), backoff=0.01)

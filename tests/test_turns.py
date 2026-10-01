@@ -37,6 +37,17 @@ def test_gap_flushes_when_nobody_takes_over():
     assert [(line.speaker, line.text) for line in flush_tracks([own])] == [("S1", "hello there")]
 
 
+def test_flush_tracks_orders_completed_lines_by_end_time():
+    longer = track("mic", {"S1": [(0, 10, " long utterance")]}, processed=14)
+    interjection = track("system", {"S2": [(5, 6, " brief interjection")]}, processed=14)
+
+    result = flush_tracks([longer, interjection])
+
+    assert [(line.speaker, line.start, line.end) for line in result] == [
+        ("S2", 5, 6), ("S1", 0, 10),
+    ]
+
+
 def test_track_places_tokens_in_pending_as_soon_as_asr_emits_them():
     token = SimpleNamespace(text="hello", start=0, end=0.5)
     session = SimpleNamespace(feed=lambda samples, final=False:

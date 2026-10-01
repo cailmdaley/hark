@@ -14,6 +14,25 @@ def test_speaker_slot_column_is_four_characters_and_names_are_unpadded():
     assert slot.line().endswith(" Alexander Hamilton Hello")
 
 
+def test_line_range_matches_jsonl_wall_and_audio_times(tmp_path):
+    path = tmp_path / "meeting.txt"
+    sink = Sink(path, "session")
+    item = Utterance("system", "S2", 10.125, 19.875,
+                     datetime(2026, 9, 24, 14, 3, 12, 250_000), "Hello")
+    sink.write(item)
+    sink.close("ended")
+
+    line = path.read_text().splitlines()[-2]
+    record = json.loads(path.with_suffix(".jsonl").read_text().splitlines()[-1])
+    start, end = line.split(" ", 1)[0].split("-")
+    wall = datetime.fromisoformat(record["wall"])
+    wall_end = datetime.fromtimestamp(wall.timestamp() + record["end"] - record["start"])
+    assert line == "14:03:12-14:03:22 S2   Hello"
+    assert start == wall.strftime("%H:%M:%S")
+    assert end == wall_end.strftime("%H:%M:%S")
+    assert (record["start"], record["end"]) == (10.125, 19.875)
+
+
 def test_external_name_line_applies_to_next_line_and_jsonl(tmp_path):
     path = tmp_path / "meeting.txt"
     sink = Sink(path, "session")

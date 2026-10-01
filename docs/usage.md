@@ -16,6 +16,19 @@ Phone mode suits a room where the laptop's mic is in the wrong place. hark liste
 
 Ctrl-C ends a session cleanly: hark flushes open turns, finishes writing the audio, and writes `# ended`. SIGTERM and SIGHUP do the same, so closing the terminal doesn't lose the end. A second signal quits at once without flushing.
 
+## Transcript timing
+
+Each utterance line includes its full start and end time as `HH:MM:SS-HH:MM:SS`:
+
+```
+14:03:12-14:03:18 me   Sure, I reran the pipeline last night with the new masks
+14:03:00-14:03:30 S1   Okay, let's get started.
+14:03:29-14:03:38 S2   Did anyone check whether the redshift distributions changed?
+```
+
+Hark appends lines as turns finish, in end-time order; start times can move backward across speakers.
+The [format contract](format.md) defines the text and JSONL records.
+
 ## Options
 
 | Option | Default | |

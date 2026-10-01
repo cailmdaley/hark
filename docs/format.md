@@ -6,11 +6,18 @@ By default `<stem>` is `~/.hark/sessions/<YYYY-MM-DD>_<HHMMSS>[_title]`; `-o PAT
 
 ## The text file
 
-Utterance lines are `HH:MM:SS <speaker> <text>`, with the wall-clock time the turn began (for `--file`, the offset into the file, starting at `00:00:00`):
+Utterance lines are `HH:MM:SS-HH:MM:SS <speaker> <text>`.
+The first full 24-hour timestamp is the start and the second is the end; both use `HH:MM:SS`, an ASCII hyphen, and no shared-hour elision.
+For live sessions these are wall-clock times.
+For `--file`, they are offsets into the file, starting at `00:00:00`.
+
+Utterance lines are appended as turns finish, in end-time order rather than start-time order.
+A short interjection can therefore appear before a longer turn that started earlier, while its two timestamps keep the intervals clear.
 
 ```
-19:34:17 S1   Okay, let's get started.
-19:34:23 me   Sure, I reran the pipeline last night with the new masks
+19:34:12-19:34:18 me   Sure, I reran the pipeline last night with the new masks
+19:34:00-19:34:30 S1   Okay, let's get started.
+19:34:29-19:34:38 S2   Did anyone check whether the redshift distributions changed?
 ```
 
 Speaker labels:
@@ -32,21 +39,22 @@ Every other line starts with `# `:
 | `# system audio back at 16:52:10 after 14m15s lost` | The source recovered |
 | `# ended 19:35:19` | The session is over; nothing follows |
 
-Lines from different speakers can arrive slightly out of time order, because each speaker's turn closes on its own schedule. Sort by timestamp if order matters.
-
 ## The JSONL file
 
-One JSON object per line. Every record has `wall`, an ISO-8601 local timestamp. There are three kinds.
+One JSON object per line.
+Every record has `wall`, an ISO-8601 local timestamp, with subsecond precision when present.
+There are three kinds.
 
 **Utterance**
 
 ```json
-{"wall": "2026-09-24T19:34:17", "track": "system", "speaker": "S1", "start": 12.4, "end": 18.9, "text": "Okay, let's get started.", "name": "Ada"}
+{"wall": "2026-09-24T19:34:00", "track": "system", "speaker": "S1", "start": 12.4, "end": 42.4, "text": "Okay, let's get started."}
 ```
 
 - `track`: `mic`, `system` or `phone` live; for `--file`, the file's name without extension
 - `speaker`: the stable slot (`me`, `S1`…), even when a name is shown in the text file
-- `start`, `end`: seconds into the track's saved audio file (`<stem>.<track>.wav`), so an utterance can be cut out of the recording exactly
+- `start`, `end`: seconds into the track's saved audio file (`<stem>.<track>.wav`), so an utterance can be cut out of the recording exactly.
+  The text line's end time is `wall + (end - start)`, formatted to whole seconds.
 - `name`: present only when the slot is named
 
 **Naming**
