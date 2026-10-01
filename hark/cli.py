@@ -8,6 +8,8 @@
     hark name S2 "Ada" [--session PATH]     name a diarized speaker in the live session
     hark enroll NAME [--seconds 30 | --file x.wav] [--mic DEV]   record a voiceprint
     hark mirror --resume LOCAL HOST:PATH    finish a mirror that didn't complete
+    hark pause [--status] | hark resume     mute the live session's mic, and unmute it
+    hark processes                          list CoreAudio processes and their input flags
 
 Live capture keeps each track beside the transcript as <stem>.mic.wav and
 <stem>.system.wav (or <stem>.phone.wav) (16 kHz mono 16-bit PCM, t = 0 at the track's first sample,
@@ -19,6 +21,7 @@ The live transcript is ~/.hark/current.txt (a symlink to the transcript file);
 follow it with `tail -F`. A JSONL sidecar sits beside it, and <stem>.log keeps
 hark's own log, timestamped, with a heartbeat per live source each minute.
 A live source that goes quiet for 90 s gets a `# … lost at …` line.
+The mic is muted while a dictation app records (--pause-for, default aquavoice).
 """
 
 import argparse
