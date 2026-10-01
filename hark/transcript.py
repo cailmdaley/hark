@@ -55,7 +55,7 @@ class Utterance:
         return f"{self.wall:%H:%M:%S}-{self.wall_end:%H:%M:%S} {label} {self.text}"
 
     def record(self):
-        record = {"wall": self.wall.isoformat(timespec="milliseconds"), "track": self.track,
+        record = {"wall": self.wall.isoformat(timespec="seconds"), "track": self.track,
                   "speaker": self.speaker, "start": round(self.start, 2),
                   "end": round(self.end, 2), "text": self.text}
         if self.name:
@@ -283,7 +283,7 @@ class Sink:
         at, since = datetime.fromtimestamp(event.at), datetime.fromtimestamp(event.since)
         state = "paused" if event.paused else "resumed"
         record = {"track": "mic", "reason": event.reason, "state": state,
-                  "since": since.isoformat(timespec="milliseconds"),
+                  "since": since.isoformat(timespec="seconds"),
                   "bundles": list(event.bundles)}
         if not event.paused:
             record["duration"] = round(event.at - event.since, 3)
@@ -292,7 +292,7 @@ class Sink:
                     f"# resumed at {at:%H:%M:%S} after {_duration(event.at - event.since)}")
             self.txt.seek(0, 2)
             self.txt.write(line + "\n")
-        self.jsonl.write(json.dumps({"wall": at.isoformat(timespec="milliseconds"),
+        self.jsonl.write(json.dumps({"wall": at.isoformat(timespec="seconds"),
                                      "pause": record}, ensure_ascii=False) + "\n")
 
     def close(self, footer):

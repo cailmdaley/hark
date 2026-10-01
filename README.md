@@ -48,13 +48,23 @@ uv run hark --room             # in person: the mic alone, diarized
 uv run hark --phone            # in person, a phone streaming its mic in as PCM (docs/usage.md)
 uv run hark --file talk.m4a    # a recording, through the same streaming pipeline
 uv run hark --title "telecon"  # names the session file
+uv run hark --pause-for aquavoice,superwhisper  # pause for either dictation app
+uv run hark pause                # manually mute the mic
+uv run hark resume               # resume the mic
+uv run hark pause --status       # show the manual pause state
 ```
 
 Press Ctrl-C to end the session. hark flushes the last turn and writes `# ended`.
 
+By default, hark watches CoreAudio for an input-capturing process whose bundle ID contains `aquavoice` (Aqua Voice).
+It mutes only the mic while that app records; system audio keeps flowing.
+Pass comma-separated bundle-ID matches to `--pause-for`, or use `--pause-for none` to disable automatic detection.
+The mic audio saved to WAV contains silence during pauses.
+Manual pauses add `# paused` and `# resumed` markers so an agent knows you stepped away.
+
 **On a call, wear headphones.** In call mode hark assumes the mic hears only you and system audio holds everyone else. On speakers, the call leaks into the mic and gets attributed to you.
 
-Transcripts go to `~/.hark/sessions/<date>_<time>[_title].txt`, and `~/.hark/current.txt` always points at the live one. A `.jsonl` file beside each transcript has the same utterances with timing and track.
+Transcripts go to `~/.hark/sessions/<date>_<time>[_title].txt`, and `~/.hark/current.txt` always points at the live one. A `.jsonl` file beside each transcript has utterances, source-health records, and mic-pause events.
 
 ## Plugging into an agent
 

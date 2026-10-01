@@ -41,6 +41,7 @@ The [format contract](format.md) defines the text and JSONL records.
 | `--gap SECONDS` | `3` | silence that ends a turn when nobody else takes over |
 | `--speaker-mask` | `exclusive` | who hears a frame two speakers share; see [how it works](how-it-works.md#speaker-masks) |
 | `--no-save-audio` | | don't keep the audio |
+| `--pause-for PATTERNS` | `aquavoice` | pause the mic while a matching CoreAudio process captures input; give comma-separated bundle-ID substrings or `none` |
 | `--mirror HOST:PATH` | | also append the transcript to a file on another machine over SSH |
 | `--launch ID` | | a launcher's id, echoed into `meeting.json` |
 
@@ -51,21 +52,46 @@ hark name S2 "Ada" [--session PATH]         # name a speaker in the current (or 
 hark enroll NAME [--seconds 30] [--mic DEV] # record a voiceprint from the mic
 hark enroll NAME --file x.wav               # or from audio (the first 30 s by default)
 hark mirror --resume LOCAL HOST:PATH        # finish a mirror that didn't complete
+hark pause                                 # manually pause mic intake
+hark resume                                # resume mic intake
+hark pause --status                        # show manual pause state
+hark processes                             # list CoreAudio process objects and input flags
 ```
 
-Enrollment needs at least 5 s of audio; the voiceprint and the clip it came from (`<name>.wav`) live in `~/.hark/voices/`. With voices enrolled, hark names a diarized slot on its own once enough of that slot's speech matches one voice clearly; see [how it works](how-it-works.md#voice-matching). A slot someone named by hand is never renamed automatically.
+Enrollment needs at least 5 s of audio; the voiceprint and the clip it came from (`<name>.wav`) live in `~/.hark/voices/`.
+With voices enrolled, hark names a diarized slot on its own once enough of that slot's speech matches one voice clearly; see [how it works](how-it-works.md#voice-matching).
+A slot someone named by hand is never renamed automatically.
+
+`hark pause` and `hark resume` toggle a manual mic-pause file under `~/.hark` (or `$HARK_DIR`).
+A running live session polls it and mutes the mic; `hark pause --status` reports its state.
+The manual pause stays set until `hark resume`, including across session restarts.
+`--pause-for none` disables app detection without disabling manual pause.
+
+Automatic pause detection reads CoreAudio process objects without requesting additional permissions.
+The default match is `aquavoice`; `--pause-for aqua,whisper` watches any process whose bundle ID contains either string.
+`hark processes` prints each process object's PID, bundle ID and input-capture flag, including apps that are idle.
+hark ignores its own process.
+Only the mic track is muted, so the call continues to reach hark through system audio.
+A 300 ms mic lookback catches speech that begins before the detector poll, and a 300 ms tail keeps the last words out after recording stops.
+The ASR and saved mic WAV receive the same samples, with zeros during every pause; system audio is unchanged.
+Dictation pauses appear in the session log and JSONL, not as `.txt` lines.
+Manual pauses add `# paused` and `# resumed at … after …` comments to the `.txt` transcript.
 
 ## Saved audio
 
 Live sessions keep each track beside the transcript as 16 kHz mono 16-bit WAV: `<stem>.mic.wav`, and in call mode `<stem>.system.wav`. Each file holds exactly the samples the models heard, starting from the track's first sample. JSONL `start`/`end` times are seconds into these files. Live input is padded to hold the wall clock, so the files stay aligned with real time even when a device stalls.
 
-The mic is rounded to 16-bit before the models see it, so `hark --file <stem>.mic.wav` replays a track through the same pipeline with identical samples. This is how diarization changes get tested against real meetings.
+The mic is rounded to 16-bit before the models see it, so `hark --file <stem>.mic.wav` replays a track through the same pipeline with identical samples.
+Paused mic spans contain digital silence in the WAV; system audio remains untouched.
+This is how diarization changes get tested against real meetings.
 
 Audio is temporary. Each live start deletes `.wav` files under `~/.hark/sessions/` and `~/.hark/meetings/` that are older than 14 days (`AUDIO_RETENTION_DAYS` in `hark/cli.py`). Transcripts are never deleted. If writing audio fails (a full disk, say), the recording stops and the transcript carries on.
 
 ## Session log
 
-`<stem>.log` keeps hark's own log, one timestamped line per message. It records every system-audio tap exit and restart, mic reopens and errors, plus a heartbeat once a minute for each live source: seconds the device delivered, seconds hark padded, peak amplitude, and utterances. It's the first place to look when a transcript has a gap.
+`<stem>.log` keeps hark's own log, one timestamped line per message.
+It records every system-audio tap exit and restart, mic reopens and errors, dictation-pause transitions, plus a heartbeat once a minute for each live source: seconds the device delivered, seconds hark padded, peak amplitude, and utterances.
+It's the first place to look when a transcript has a gap.
 
 ## Lost sources
 
@@ -87,5 +113,5 @@ A program that starts hark (such as [Shuttle](https://github.com/cailmdaley/felt
 
 | Variable | |
 |---|---|
-| `HARK_DIR` | moves `~/.hark` (sessions, voices, `current.txt`, `meeting.json`) |
+| `HARK_DIR` | moves `~/.hark` (sessions, voices, manual mic-pause state, `current.txt`, `meeting.json`) |
 | `HARK_AUDIOTEE` | path to the audiotee binary, if not `bin/audiotee` in the checkout |

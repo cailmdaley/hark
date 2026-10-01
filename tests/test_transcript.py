@@ -44,7 +44,7 @@ def test_external_name_line_applies_to_next_line_and_jsonl(tmp_path):
     assert "Mike Hudson" in path.read_text().splitlines()[-2]
     assert path.read_text().splitlines()[-2].endswith("Hello there")
     records = [json.loads(line) for line in path.with_suffix(".jsonl").read_text().splitlines()]
-    assert records == [{"wall": named.wall.isoformat(timespec="milliseconds"), "track": "system",
+    assert records == [{"wall": named.wall.isoformat(timespec="seconds"), "track": "system",
                         "speaker": "S2", "start": 10, "end": 11, "text": "Hello there",
                         "name": "Mike Hudson"}]
 

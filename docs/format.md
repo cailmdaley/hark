@@ -37,18 +37,18 @@ Every other line starts with `# `:
 | `# mic lost at 16:37:55 — only silence while others speak; the mic may not be captured` | A source delivers only digital silence while other tracks have speech |
 | `# phone lost at 10:02:13 — no signal from the device; nothing from the phone is being transcribed` | The phone disconnected (screen locked, tab closed, network gone) |
 | `# system audio back at 16:52:10 after 14m15s lost` | The source recovered |
+| `# paused` | Manual microphone pause; the user stepped away |
+| `# resumed at 16:39:58 after 2m03s` | Manual microphone pause ended |
 | `# ended 19:35:19` | The session is over; nothing follows |
 
 ## The JSONL file
 
-One JSON object per line.
-Every record has `wall`, an ISO-8601 local timestamp (to the millisecond on utterances, to the second elsewhere).
-There are three kinds.
+One JSON object per line. Every record has `wall`, an ISO-8601 local timestamp to the second. There are four kinds.
 
 **Utterance**
 
 ```json
-{"wall": "2026-09-24T19:34:00.412", "track": "system", "speaker": "S1", "start": 12.4, "end": 42.4, "text": "Okay, let's get started."}
+{"wall": "2026-09-24T19:34:00", "track": "system", "speaker": "S1", "start": 12.4, "end": 42.4, "text": "Okay, let's get started."}
 ```
 
 - `track`: `mic`, `system` or `phone` live; for `--file`, the file's name without extension
@@ -73,6 +73,21 @@ There are three kinds.
 ```
 
 `cause` is `no signal` (the device delivered nothing) or `silence` (it delivered only digital silence while another track had speech).
+
+**Microphone pause**
+
+```json
+{"wall": "2026-09-24T19:40:02.125", "pause": {"track": "mic", "reason": "automatic", "state": "paused", "since": "2026-09-24T19:40:02.125", "bundles": ["aquavoice.macOSBridge"]}}
+{"wall": "2026-09-24T19:40:02.725", "pause": {"track": "mic", "reason": "automatic", "state": "resumed", "since": "2026-09-24T19:40:02.125", "bundles": ["aquavoice.macOSBridge"], "duration": 0.6}}
+{"wall": "2026-09-24T19:41:00.000", "pause": {"track": "mic", "reason": "manual", "state": "paused", "since": "2026-09-24T19:41:00.000", "bundles": []}}
+{"wall": "2026-09-24T19:43:03.000", "pause": {"track": "mic", "reason": "manual", "state": "resumed", "since": "2026-09-24T19:41:00.000", "bundles": [], "duration": 123.0}}
+```
+
+A pause record's `reason` is `automatic` for a watched dictation app or `manual` for `hark pause`.
+`state` is `paused` or `resumed`; on resume, `since` is the start time and `duration` is the pause length in seconds.
+`bundles` lists the matching bundle IDs for automatic pauses and is empty for a manual pause.
+Automatic pauses have no `.txt` line; the JSONL event and session log record them.
+Manual pauses also write the `# paused` and `# resumed at … after …` comments shown above.
 
 ## Reading it from an agent
 
