@@ -56,7 +56,7 @@ uv run hark pause --status       # show the manual pause state
 
 Press Ctrl-C to end the session. hark flushes the last turn and writes `# ended`.
 
-By default, hark watches CoreAudio for an input-capturing process whose bundle ID contains `aquavoice` (Aqua Voice).
+By default, hark watches CoreAudio for an input-capturing process whose bundle ID contains `aquavoice` or `aqua-voice` (Aqua Voice).
 It mutes only the mic while that app records; system audio keeps flowing.
 Pass comma-separated bundle-ID matches to `--pause-for`, or use `--pause-for none` to disable automatic detection.
 The mic audio saved to WAV contains silence during pauses.

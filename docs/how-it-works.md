@@ -12,7 +12,7 @@ The mic is read through PortAudio (`sounddevice`). System audio comes from [audi
 
 A background watcher pauses the mic while a dictation app records.
 Every 75 ms it reads CoreAudio's process-object list with `ctypes` and checks each process's input-capture flag and bundle ID.
-It matches `aquavoice` by default (Aqua Voice records through `aquavoice.macOSBridge`) and ignores hark's own process.
+It matches `aquavoice` and `aqua-voice` by default (Aqua Voice records through `aquavoice.macOSBridge`; the second covers its app processes) and ignores hark's own process.
 `--pause-for` accepts comma-separated bundle-ID substrings; `--pause-for none` disables app detection.
 `hark pause` and `hark resume` pause the mic by hand through a flag file the watcher also polls.
 Each pause becomes a wall-clock mute interval: from 300 ms before it was detected to when it ends, plus 300 ms after a dictation app stops.

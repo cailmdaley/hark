@@ -41,7 +41,7 @@ The [format contract](format.md) defines the text and JSONL records.
 | `--gap SECONDS` | `3` | silence that ends a turn when nobody else takes over |
 | `--speaker-mask` | `exclusive` | who hears a frame two speakers share; see [how it works](how-it-works.md#speaker-masks) |
 | `--no-save-audio` | | don't keep the audio |
-| `--pause-for PATTERNS` | `aquavoice` | pause the mic while a matching CoreAudio process captures input; give comma-separated bundle-ID substrings or `none` |
+| `--pause-for PATTERNS` | `aquavoice,aqua-voice` | pause the mic while a matching CoreAudio process captures input; give comma-separated bundle-ID substrings or `none` |
 | `--mirror HOST:PATH` | | also append the transcript to a file on another machine over SSH |
 | `--launch ID` | | a launcher's id, echoed into `meeting.json` |
 
@@ -68,7 +68,7 @@ Manual pauses add `# paused` and `# resumed at … after …` lines to the `.txt
 `--pause-for none` disables app detection but not manual pauses.
 
 Automatic pause detection reads CoreAudio process objects and needs no extra permission.
-The default match is `aquavoice`; `--pause-for aqua,whisper` watches any process whose bundle ID contains either string.
+The default match is `aquavoice,aqua-voice` (Aqua's audio bridge and its app); `--pause-for aqua,whisper` watches any process whose bundle ID contains either string.
 `hark processes` prints each process object's PID, bundle ID and input-capture flag, idle apps included, so you can find what to match.
 Dictation pauses appear in the session log and JSONL, not as `.txt` lines.
 

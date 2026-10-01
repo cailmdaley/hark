@@ -21,7 +21,7 @@ The live transcript is ~/.hark/current.txt (a symlink to the transcript file);
 follow it with `tail -F`. A JSONL sidecar sits beside it, and <stem>.log keeps
 hark's own log, timestamped, with a heartbeat per live source each minute.
 A live source that goes quiet for 90 s gets a `# … lost at …` line.
-The mic is muted while a dictation app records (--pause-for, default aquavoice).
+The mic is muted while a dictation app records (--pause-for, default aquavoice,aqua-voice).
 """
 
 import argparse
@@ -199,7 +199,7 @@ def main(argv=None):
     ap.add_argument("--mic", help="input device name or index (default: system default)")
     ap.add_argument("--pause-for", default=DEFAULT_PAUSE_FOR,
                     help="mute mic for these comma-separated bundle ID substrings "
-                         "(case-insensitive; default: aquavoice; none disables app detection)")
+                         "(case-insensitive; default: aquavoice,aqua-voice; none disables app detection)")
     ap.add_argument("--lang", default=None, help="ASR language, e.g. en-US, fr-FR (default: auto)")
     ap.add_argument("--latency", default="low", choices=["low", "very_low", "ultra_low"],
                     help="diarizer buffer: low=1.04 s (default), very_low=0.64 s, ultra_low=0.32 s")

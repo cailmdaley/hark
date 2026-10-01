@@ -22,7 +22,7 @@ from .capture import SAMPLE_RATE, log
 MIC_LOOKBACK_SEC = 0.300
 AUTO_RESUME_TAIL_SEC = 0.300
 PAUSE_POLL_SEC = 0.075
-DEFAULT_PAUSE_FOR = "aquavoice"
+DEFAULT_PAUSE_FOR = "aquavoice,aqua-voice"
 
 
 def fourcc(value):
