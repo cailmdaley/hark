@@ -264,17 +264,20 @@ def test_monitor_retains_automatic_pause_on_read_failure_and_resumes_on_success(
 def test_health_suppression_resets_stale_device_times_without_lost_or_back_markers():
     watch = QuietWatch(quiet=10)
     sources = {"mic": (0, 0)}
-    assert watch.check(100, sources, {"system": 100}, suppressed={"mic"}) == []
+    watch.suppress("mic", 100)
+    assert watch.check(100, sources, {"system": 100}) == []
     assert watch.check(105, sources, {"system": 105}) == []
     assert watch.check(110, sources, {"system": 110}) == [Quiet("mic", "silent", 100, "no signal")]
-    # An episode already open before intentional muting is cleared without a false back.
-    assert watch.check(111, sources, {}, suppressed={"mic"}) == []
-    assert "mic" not in watch.open
+    # An episode already open before intentional muting retains its real origin.
+    watch.suppress("mic", 111)
+    assert watch.check(111, sources, {}) == []
+    assert watch.open["mic"] == (100, "no signal")
     # A pause entirely between inference-heavy loop iterations also resets the clock.
     watch.suppress("mic", 120 + AUTO_RESUME_TAIL_SEC)
     assert watch.check(125, sources, {"system": 125}) == []
     # Other sources remain watched during the mic pause.
-    assert watch.check(140, {"mic": (0, 0), "system": (100, 100)}, {}, suppressed={"mic"}) == [
+    watch.suppress("mic", 140)
+    assert watch.check(140, {"mic": (0, 0), "system": (100, 100)}, {}) == [
         Quiet("system", "silent", 100, "no signal")]
 
 

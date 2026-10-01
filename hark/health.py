@@ -32,26 +32,22 @@ class QuietWatch:
         """Reset health across an intentional pause, including one between main-loop checks."""
         if until > self.intentional.get(track, float("-inf")):
             self.intentional[track] = until
-            self.open.pop(track, None)
 
-    def check(self, now, sources, spoken, suppressed=()):
+    def check(self, now, sources, spoken):
         """`sources`: {track: (last_audio, last_sound)}; `spoken`: {track: wall end of its last
-        utterance}. `suppressed` tracks are intentionally muted; their health clock restarts
-        after the pause so old device/sound times do not create spurious lost/back markers.
+        utterance}. `suppress()` restarts health timers across intentional pauses, without
+        changing an existing lost episode or counting the artificial baseline as sound.
         Returns the events since the previous call."""
         events = []
         for track, (audio, sound) in sources.items():
-            if track in suppressed:
-                self.suppress(track, now)
-                continue
-            baseline = self.intentional.get(track, float("-inf"))
-            audio, sound = max(audio, baseline), max(sound, baseline)
             if track in self.open:
                 since, cause = self.open[track]
                 if sound > since:
                     del self.open[track]
                     events.append(Quiet(track, "back", since, cause, sound))
                 continue
+            baseline = self.intentional.get(track, float("-inf"))
+            audio, sound = max(audio, baseline), max(sound, baseline)
             others = any(end > now - self.quiet for other, end in spoken.items() if other != track)
             if now - audio >= self.quiet:
                 self.open[track] = audio, "no signal"
