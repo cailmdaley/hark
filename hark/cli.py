@@ -38,6 +38,8 @@ from .capture import (SAMPLE_RATE, FileSource, MicSource, PhoneSource, SystemSou
 from .health import QuietWatch
 from .masking import MaskPolicy
 from .mirror import TranscriptMirror
+from .pause import (AUTO_RESUME_TAIL_SEC, DEFAULT_PAUSE_FOR, ManualPause, MicGate,
+                    PauseMonitor, parse_patterns, read_processes)
 from .transcript import Sink, Track, flush_tracks, load_models, numbered
 
 HOME = Path(os.environ.get("HARK_DIR", Path.home() / ".hark")).expanduser().resolve()
@@ -156,6 +158,16 @@ def _emit(u, sink, matcher, tracks_by_name, failed_slots):
 
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] in {"pause", "resume"}:
+        return _manual_pause(argv)
+    if argv and argv[0] == "processes":
+        ap = argparse.ArgumentParser(prog="hark processes", description="List CoreAudio process objects")
+        ap.parse_args(argv[1:])
+        from dataclasses import asdict
+
+        for process in read_processes():
+            print(json.dumps(asdict(process), ensure_ascii=False))
+        return 0
     if argv and argv[0] == "enroll":
         _enroll(argv[1:])
         return 0
@@ -178,6 +190,9 @@ def main(argv=None):
     mode.add_argument("--file", help="transcribe an audio file instead of live input")
     ap.add_argument("--realtime", action="store_true", help="with --file: replay at real-time pace")
     ap.add_argument("--mic", help="input device name or index (default: system default)")
+    ap.add_argument("--pause-for", default=DEFAULT_PAUSE_FOR,
+                    help="mute mic for these comma-separated bundle ID substrings "
+                         "(case-insensitive; default: aquavoice; none disables app detection)")
     ap.add_argument("--lang", default=None, help="ASR language, e.g. en-US, fr-FR (default: auto)")
     ap.add_argument("--latency", default="low", choices=["low", "very_low", "ultra_low"],
                     help="diarizer buffer: low=1.04 s (default), very_low=0.64 s, ultra_low=0.32 s")
@@ -195,6 +210,10 @@ def main(argv=None):
     args = ap.parse_args(argv)
     if args.realtime and not args.file:
         ap.error("--realtime only applies to --file")
+    try:
+        pause_patterns = parse_patterns(args.pause_for)
+    except ValueError as error:
+        ap.error(str(error))
 
     mirror_target = None
     if args.mirror:
@@ -239,6 +258,8 @@ def main(argv=None):
     started_tracks = []
     sink = matcher = mirror = watch = None
     recorders = {}
+    mic_gates = {}
+    pause_monitor = None
     mirror_complete = True
     tracks_by_name = {}
     failed_slots = set()
@@ -306,6 +327,10 @@ def main(argv=None):
             if not lifecycle:
                 install_signal_handlers()
 
+            if live and not stop.is_set():
+                pause_monitor = PauseMonitor(HOME, pause_patterns)
+                pause_monitor.start()
+                _pause_events(pause_monitor, sink)
             capture_started = time.monotonic()
             for src, track in tracks:
                 if stop.is_set():
@@ -313,6 +338,8 @@ def main(argv=None):
                 src.start()
                 started_sources.append(src)
                 started_tracks.append((src, track))
+                if live and src.name == "mic":
+                    mic_gates[src] = MicGate(src.anchor)
                 track.t0 = (datetime.combine(now.date(), datetime.min.time()) if args.file
                             else datetime.fromtimestamp(src.anchor))
             if lifecycle and len(started_sources) == len(sources) and not stop.is_set():
@@ -328,11 +355,15 @@ def main(argv=None):
             beat = time.monotonic() + 60
             while not stop.is_set():
                 sink.poll_names()
+                if pause_monitor:
+                    _pause_events(pause_monitor, sink, watch)
                 busy = False
                 for src, track in started_tracks:
                     samples = src.drain(limit=SAMPLE_RATE // 2)
+                    busy = busy or bool(samples.size)
+                    if src in mic_gates:
+                        samples = pause_monitor.feed(mic_gates[src], samples, time.time())
                     if samples.size:
-                        busy = True
                         if src in recorders:
                             recorders[src].write(samples)
                         track.feed(samples)
@@ -341,8 +372,12 @@ def main(argv=None):
                     spoken[u.track] = max(spoken.get(u.track, 0.0), u.wall_span[1])
                     said[u.track] = said.get(u.track, 0) + 1
                 if watch:
-                    for event in watch.check(time.time(), {src.name: (src.last_audio, src.last_sound)
-                                                           for src in started_sources}, spoken):
+                    health_now = time.time()
+                    intentional = pause_monitor.health_since(health_now)
+                    if intentional is not None:
+                        watch.suppress("mic", intentional)
+                    for event in watch.check(health_now, {src.name: (src.last_audio, src.last_sound)
+                                                         for src in started_sources}, spoken):
                         sink.source(event)
                     if time.monotonic() >= beat:
                         beat += 60
@@ -356,8 +391,13 @@ def main(argv=None):
             try:
                 for src in started_sources:
                     src.stop()
+                if pause_monitor:
+                    pause_monitor.stop()
+                    _pause_events(pause_monitor, sink, watch)
                 for src, track in started_tracks:
                     rest = src.drain(limit=float("inf"))
+                    if src in mic_gates:
+                        rest = pause_monitor.feed(mic_gates[src], rest, time.time(), final=True)
                     if src in recorders:
                         recorders[src].write(rest)
                     track.feed(rest, final=True)
@@ -393,9 +433,36 @@ def main(argv=None):
             lifecycle.update("failed", error=" ".join(str(error).split()) or type(error).__name__)
         raise
     finally:
+        if pause_monitor:
+            pause_monitor.stop()
         if watcher:
             watcher.close()
         log_to(None)
+
+
+def _manual_pause(argv):
+    command = argv[0]
+    ap = argparse.ArgumentParser(prog=f"hark {command}")
+    if command == "pause":
+        ap.add_argument("--status", action="store_true", help="show the persistent manual pause state")
+    args = ap.parse_args(argv[1:])
+    state = ManualPause(HOME)
+    if not getattr(args, "status", False):
+        state.set(command == "pause")
+    print("manual pause: " + ("paused" if state.read() else "resumed"))
+    return 0
+
+
+def _pause_events(monitor, sink, watch=None):
+    for event in monitor.take_events():
+        state = "paused" if event.paused else "resumed"
+        detail = f" ({', '.join(event.bundles)})" if event.bundles else ""
+        log(f"mic {state}: {event.reason}{detail} at "
+            f"{datetime.fromtimestamp(event.at):%H:%M:%S}")
+        sink.pause(event)
+        if watch:
+            tail = AUTO_RESUME_TAIL_SEC if event.reason == "automatic" and not event.paused else 0
+            watch.suppress("mic", event.at + tail)
 
 
 def _heartbeat(sources, said):

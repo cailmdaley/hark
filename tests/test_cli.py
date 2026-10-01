@@ -143,6 +143,7 @@ def fake_live_capture(monkeypatch, tmp_path, *, load_models=None):
 
     monkeypatch.setattr(cli, "HOME", tmp_path)
     monkeypatch.setattr(cli, "MicSource", Source)
+    monkeypatch.setattr("hark.pause.CoreAudioProcesses", lambda: SimpleNamespace(read=lambda: []))
     monkeypatch.setattr(cli, "Track", FakeTrack)
     monkeypatch.setattr(cli, "load_models", load_models or (lambda latency: (None, None)))
     monkeypatch.setattr(cli, "flush_tracks", lambda tracks, force=False: [])
