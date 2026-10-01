@@ -1,14 +1,18 @@
-"""Dictation detection, manual pause state, and a wall-clock microphone lookback gate."""
+"""Mute the mic track while a dictation app records or the user has run `hark pause`.
+
+A watcher thread polls CoreAudio's per-process input flag (through ctypes) and the manual
+pause flag, and turns each pause into a wall-clock mute interval. The mic is held back by
+MIC_LOOKBACK_SEC, so an interval opened at detection still reaches the audio captured
+just before it. Muted samples become zeros, so the track and its WAV keep their timeline.
+"""
 
 import ctypes as C
-import json
 import math
 import os
 import sys
-import tempfile
 import threading
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -108,24 +112,20 @@ class CoreAudioProcesses:
         finally:
             self.cf.CFRelease(value)
 
-    def read(self, exclude_pid=None):
-        exclude_pid = os.getpid() if exclude_pid is None else exclude_pid
+    def read(self, idle=True):
+        """Every process object, or with `idle=False` only those capturing input."""
         processes = []
         for object_id in self.object_ids():
             try:
+                running = bool(self._get(object_id, "piri", C.c_uint32()).value)
+                if not (running or idle):
+                    continue
                 pid = self._get(object_id, "ppid", C.c_int32()).value
                 bundle = self.bundle_id(object_id)
-                running = bool(self._get(object_id, "piri", C.c_uint32()).value)
             except OSError:  # a process may disappear while its properties are being read
                 continue
-            if pid != exclude_pid:
-                processes.append(AudioProcess(object_id, pid, bundle, running))
+            processes.append(AudioProcess(object_id, pid, bundle, running))
         return processes
-
-
-def read_processes():
-    """Callable process-list probe; no model or microphone is opened."""
-    return CoreAudioProcesses().read()
 
 
 def parse_patterns(value):
@@ -151,31 +151,20 @@ def watched_bundles(processes, patterns, pid=None):
 
 
 class ManualPause:
-    """Persistent manual state shared by commands and live sessions, atomically replaced."""
+    """`hark pause` creates a flag file that the live session polls; `hark resume` removes it."""
 
     def __init__(self, home):
-        self.path = Path(home) / "pause.json"
+        self.path = Path(home) / "paused"
 
     def read(self):
-        try:
-            state = json.loads(self.path.read_text())
-            if not isinstance(state, dict) or not isinstance(state.get("paused"), bool):
-                raise ValueError(f"invalid manual pause state in {self.path}")
-            return state["paused"]
-        except FileNotFoundError:
-            return False
+        return self.path.exists()
 
     def set(self, paused):
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        fd, temporary = tempfile.mkstemp(dir=self.path.parent, prefix=".pause-", suffix=".tmp")
-        try:
-            with os.fdopen(fd, "w") as state:
-                json.dump({"paused": bool(paused)}, state)
-                state.write("\n")
-            os.replace(temporary, self.path)
-        finally:
-            if os.path.exists(temporary):
-                os.unlink(temporary)
+        if paused:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.path.touch()
+        else:
+            self.path.unlink(missing_ok=True)
 
 
 @dataclass(frozen=True)
@@ -260,7 +249,8 @@ class MicGate:
 
 
 class PauseMonitor:
-    """Poll independently of model inference so pauses also cover a main-loop backlog."""
+    """Poll on its own thread, so a pause is timed when it happens even while the main loop
+    is busy with inference."""
 
     def __init__(self, home, patterns):
         self.manual = ManualPause(home)
@@ -270,7 +260,6 @@ class PauseMonitor:
         self.events = []
         self.automatic = ()
         self.lock = threading.Lock()
-        self.stop_lock = threading.Lock()
         self.stopping = threading.Event()
         self.thread = None
         self.warned = set()
@@ -281,6 +270,10 @@ class PauseMonitor:
             log(f"pause: {kind}: {error}")
 
     def start(self):
+        """A session starts unpaused: a manual pause left by an earlier session is cleared."""
+        if self.manual.read():
+            self.manual.set(False)
+            log("pause: cleared a manual pause left from an earlier session")
         if self.patterns:
             try:
                 self.reader = CoreAudioProcesses()
@@ -293,21 +286,23 @@ class PauseMonitor:
     def poll(self):
         try:
             manual = self.manual.read()
-        except (OSError, ValueError) as error:
-            self._warn("cannot read manual state", error)
+        except OSError as error:
+            self._warn("cannot read the manual pause flag", error)
             manual = "manual" in self.state.active
         if self.reader:
             try:
-                self.automatic = watched_bundles(self.reader.read(), self.patterns)
-            except OSError as error:
-                # Keep an observed pause until detection works again, rather than leak audio.
-                self._warn("automatic detection read failed", error)
+                self.automatic = watched_bundles(self.reader.read(idle=False), self.patterns)
+            except Exception as error:  # noqa: BLE001 — keep the last observation, never leak
+                self._warn("automatic detection failed", error)
         with self.lock:
             self.events.extend(self.state.update(time.time(), manual, self.automatic))
 
     def _watch(self):
         while not self.stopping.wait(PAUSE_POLL_SEC):
-            self.poll()
+            try:
+                self.poll()
+            except Exception as error:  # noqa: BLE001 — the watcher must outlive any one poll
+                self._warn("poll failed", error)
 
     def take_events(self):
         with self.lock:
@@ -319,16 +314,11 @@ class PauseMonitor:
             return gate.feed(samples, now, self.state, final=final)
 
     def stop(self):
-        """Join the watcher and sample once more before the held mic audio is flushed."""
-        with self.stop_lock:
-            if self.stopping.is_set():
-                return
-            self.stopping.set()
-            if self.thread:
-                self.thread.join()
-            self.poll()
-
-
-if __name__ == "__main__":
-    for process in read_processes():
-        print(json.dumps(asdict(process), ensure_ascii=False))
+        """Join the watcher, then poll once more so a pause that began in the last poll
+        interval still mutes the held mic audio before it is flushed."""
+        if self.stopping.is_set():
+            return
+        self.stopping.set()
+        if self.thread:
+            self.thread.join()
+        self.poll()

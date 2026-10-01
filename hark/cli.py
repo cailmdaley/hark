@@ -38,8 +38,8 @@ from .capture import (SAMPLE_RATE, FileSource, MicSource, PhoneSource, SystemSou
 from .health import QuietWatch
 from .masking import MaskPolicy
 from .mirror import TranscriptMirror
-from .pause import (DEFAULT_PAUSE_FOR, ManualPause, MicGate,
-                    PauseMonitor, parse_patterns, read_processes)
+from .pause import (DEFAULT_PAUSE_FOR, CoreAudioProcesses, ManualPause, MicGate, PauseMonitor,
+                    parse_patterns)
 from .transcript import Sink, Track, flush_tracks, load_models, numbered
 
 HOME = Path(os.environ.get("HARK_DIR", Path.home() / ".hark")).expanduser().resolve()
@@ -165,7 +165,11 @@ def main(argv=None):
         ap.parse_args(argv[1:])
         from dataclasses import asdict
 
-        for process in read_processes():
+        try:
+            processes = CoreAudioProcesses().read()
+        except OSError as error:
+            ap.exit(1, f"hark processes: {error}\n")
+        for process in processes:
             print(json.dumps(asdict(process), ensure_ascii=False))
         return 0
     if argv and argv[0] == "enroll":
@@ -327,7 +331,7 @@ def main(argv=None):
             if not lifecycle:
                 install_signal_handlers()
 
-            if live and not stop.is_set():
+            if live and not stop.is_set() and any(src.name == "mic" for src, _ in tracks):
                 pause_monitor = PauseMonitor(HOME, pause_patterns)
                 pause_monitor.start()
                 _pause_events(pause_monitor, sink)

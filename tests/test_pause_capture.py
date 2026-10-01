@@ -92,7 +92,7 @@ def test_live_modes_feed_and_save_identical_gated_pcm_and_leave_system_untouched
         def start(self):
             # No thread or CoreAudio: the clock supplies periodic observations, while stop
             # uses the real post-join poll against the current manual/app state.
-            self.reader = SimpleNamespace(read=lambda: [
+            self.reader = SimpleNamespace(read=lambda idle: [
                 AudioProcess(1, 10, "aquavoice", bool(app_running))])
             self.poll()
 

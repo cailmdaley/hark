@@ -2,6 +2,7 @@
 
 import ctypes
 import json
+import time
 from datetime import datetime
 from types import SimpleNamespace
 
@@ -53,16 +54,16 @@ def test_matching_overrides_default_ignores_self_idle_and_implicit_corespeech():
             parse_patterns(invalid)
 
 
-def test_process_reader_reads_bundle_ids_even_when_input_is_off_and_skips_self():
+def test_process_reader_lists_idle_processes_or_only_capturing_ones():
     reader = object.__new__(CoreAudioProcesses)  # no frameworks loaded
-    reader.object_ids = lambda: [1, 2, 3, 4]
+    reader.object_ids = lambda: [1, 2, 3]
     calls = []
 
     def get(obj, selector, value):
         calls.append((obj, selector))
-        if obj == 4:
+        if obj == 3:
             raise OSError("process exited")
-        value.value = {"ppid": {1: 10, 2: 20, 3: 99}[obj], "piri": obj != 1}[selector]
+        value.value = {"ppid": {1: 10, 2: 20}[obj], "piri": obj != 1}[selector]
         return value
 
     def bundle(obj):
@@ -70,10 +71,11 @@ def test_process_reader_reads_bundle_ids_even_when_input_is_off_and_skips_self()
         return f"bundle.{obj}"
 
     reader._get, reader.bundle_id = get, bundle
-    assert reader.read(exclude_pid=99) == [AudioProcess(1, 10, "bundle.1", False),
-                                          AudioProcess(2, 20, "bundle.2", True)]
-    assert (1, "pbid") in calls and (1, "piri") in calls
-    assert ctypes.sizeof(ctypes.c_int32()) == 4
+    assert reader.read() == [AudioProcess(1, 10, "bundle.1", False),
+                             AudioProcess(2, 20, "bundle.2", True)]
+    calls.clear()
+    assert reader.read(idle=False) == [AudioProcess(2, 20, "bundle.2", True)]
+    assert (1, "pbid") not in calls and (1, "ppid") not in calls  # idle: one read only
 
 
 def test_lookback_retroactively_mutes_onset_and_tail_without_changing_timeline():
@@ -194,7 +196,7 @@ def test_manual_commands_and_status_are_persistent_and_status_does_not_write(tmp
     assert (state.path.read_bytes(), state.path.stat().st_mtime_ns) == before
     assert cli.main(["resume"]) == 0
     assert "resumed" in capsys.readouterr().out and not state.read()
-    assert sorted(p.name for p in tmp_path.iterdir()) == ["pause.json"]
+    assert sorted(p.name for p in tmp_path.iterdir()) == []
 
 
 def test_monitor_polls_manual_state_even_with_automatic_detection_disabled(tmp_path, monkeypatch):
@@ -213,12 +215,30 @@ def test_monitor_polls_manual_state_even_with_automatic_detection_disabled(tmp_p
     monitor.poll()
     event, = monitor.take_events()
     assert not event.paused and event.at - event.since == 2
-    # Malformed state cannot silently unmute an existing pause or kill the watcher.
-    ManualPause(tmp_path).set(True)
-    monitor.poll()
-    monitor.manual.path.write_text('{"paused": "false"}')
-    monitor.poll()
-    assert muted(monitor.state, 12)
+
+
+def test_a_session_starts_unpaused_and_the_watcher_survives_a_failing_poll(tmp_path, monkeypatch):
+    messages = []
+    monkeypatch.setattr("hark.pause.log", messages.append)
+    monkeypatch.setattr("hark.pause.PAUSE_POLL_SEC", 0.001)
+    ManualPause(tmp_path).set(True)  # left over from an earlier session
+    monitor = PauseMonitor(tmp_path, ("aquavoice",))
+    reads = []
+
+    def read(idle):
+        reads.append(idle)
+        raise RuntimeError("HAL returned garbage")
+
+    monkeypatch.setattr("hark.pause.CoreAudioProcesses", lambda: SimpleNamespace(read=read))
+    monitor.start()
+    deadline = time.monotonic() + 5
+    while len(reads) < 3 and time.monotonic() < deadline:
+        time.sleep(0.001)
+    monitor.stop()
+    assert not ManualPause(tmp_path).read() and monitor.take_events() == []
+    assert monitor.state.active == {} and reads[:3] == [False] * 3
+    assert sum("automatic detection failed" in m for m in messages) == 1
+    assert any("cleared a manual pause" in m for m in messages)
 
 
 @pytest.mark.parametrize("reason", ["automatic", "manual"])
@@ -228,7 +248,8 @@ def test_stop_polls_after_join_to_mute_shutdown_onset_and_is_idempotent(tmp_path
     monitor = PauseMonitor(tmp_path, ("aquavoice",))
     joined, app_running, reads = [], [], []
 
-    def read():
+    def read(idle):
+        assert not idle
         reads.append(clock[0])
         return [AudioProcess(1, 10, "aquavoice", bool(app_running))]
 
@@ -273,7 +294,7 @@ def test_monitor_retains_automatic_pause_on_read_failure_and_resumes_on_success(
     monkeypatch.setattr("hark.pause.time.time", lambda: clock[0])
     outcomes = iter([[AudioProcess(1, 10, "aquavoice", True)], OSError("HAL unavailable"), []])
 
-    def read():
+    def read(idle):
         outcome = next(outcomes)
         if isinstance(outcome, Exception):
             raise outcome
@@ -326,7 +347,8 @@ def test_manual_annotations_are_append_only_and_auto_events_only_go_to_log_jsonl
 def test_processes_cli_exposes_structured_reader_without_loading_models(monkeypatch, capsys):
     from hark import cli
 
-    monkeypatch.setattr(cli, "read_processes", lambda: [AudioProcess(1, 10, "idle.bundle", False)])
+    monkeypatch.setattr(cli, "CoreAudioProcesses", lambda: SimpleNamespace(
+        read=lambda: [AudioProcess(1, 10, "idle.bundle", False)]))
     assert cli.main(["processes"]) == 0
     assert json.loads(capsys.readouterr().out) == {
         "object_id": 1, "pid": 10, "bundle_id": "idle.bundle", "running_input": False}
