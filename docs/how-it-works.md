@@ -10,13 +10,16 @@ system audio ──────────────────────�
 
 The mic is read through PortAudio (`sounddevice`). System audio comes from [audiotee](https://github.com/makeusabrew/audiotee), a Swift program that opens a Core Audio process tap and writes raw PCM to stdout. hark supervises it: if the tap stalls for 5 s or exits, hark restarts it with a backoff that grows to at most 30 s, and logs each restart. A mic that delivers nothing for 5 s is reopened the same way. Both tracks are captured at 16 kHz mono and padded to hold the wall clock, so timestamps stay true even when a device falls behind.
 
-A background watcher reads CoreAudio's process-object list with `ctypes` and checks each process's bundle ID and input-capture flag.
-It matches `aquavoice` by default, ignores hark's own PID, and polls every 75 ms.
+A background watcher pauses the mic while a dictation app records.
+Every 75 ms it reads CoreAudio's process-object list with `ctypes` and checks each process's input-capture flag and bundle ID.
+It matches `aquavoice` by default (Aqua Voice records through `aquavoice.macOSBridge`) and ignores hark's own process.
 `--pause-for` accepts comma-separated bundle-ID substrings; `--pause-for none` disables app detection.
-The mic gate holds 300 ms of audio before sending it downstream, so a newly detected pause can mute the first words already captured.
-It sends zeros to both the ASR and mic recorder while a watched app captures input, then holds the mute for another 300 ms after capture stops.
-System audio is neither delayed nor muted.
-The gate preserves the mic's capture-time offsets, and `QuietWatch` excludes intentional mic pauses from lost-source markers.
+`hark pause` and `hark resume` pause the mic by hand through a flag file the watcher also polls.
+Each pause becomes a wall-clock mute interval: from 300 ms before it was detected to when it ends, plus 300 ms after a dictation app stops.
+The mic gate holds the newest 300 ms of mic audio before passing it on, so an interval can still reach the first words captured before detection.
+Samples are timed by when the device delivered them, not by their position in the padded track, because a mic can run up to a second behind that timeline after a stall.
+Muted samples become zeros for both the ASR and the saved WAV, so the track keeps its length and timeline.
+System and phone audio are neither delayed nor muted, and the lost-source watch reads the device's own signal, so a pause never looks like a lost mic.
 
 In call mode the mic is one speaker (`me`) and only system audio is diarized. In room mode the mic is diarized.
 

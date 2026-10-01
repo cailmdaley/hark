@@ -77,14 +77,15 @@ One JSON object per line. Every record has `wall`, an ISO-8601 local timestamp t
 **Microphone pause**
 
 ```json
-{"wall": "2026-09-24T19:40:02.125", "pause": {"track": "mic", "reason": "automatic", "state": "paused", "since": "2026-09-24T19:40:02.125", "bundles": ["aquavoice.macOSBridge"]}}
-{"wall": "2026-09-24T19:40:02.725", "pause": {"track": "mic", "reason": "automatic", "state": "resumed", "since": "2026-09-24T19:40:02.125", "bundles": ["aquavoice.macOSBridge"], "duration": 0.6}}
-{"wall": "2026-09-24T19:41:00.000", "pause": {"track": "mic", "reason": "manual", "state": "paused", "since": "2026-09-24T19:41:00.000", "bundles": []}}
-{"wall": "2026-09-24T19:43:03.000", "pause": {"track": "mic", "reason": "manual", "state": "resumed", "since": "2026-09-24T19:41:00.000", "bundles": [], "duration": 123.0}}
+{"wall": "2026-09-24T19:40:02", "pause": {"track": "mic", "reason": "automatic", "state": "paused", "since": "2026-09-24T19:40:02", "bundles": ["aquavoice.macOSBridge"]}}
+{"wall": "2026-09-24T19:40:08", "pause": {"track": "mic", "reason": "automatic", "state": "resumed", "since": "2026-09-24T19:40:02", "bundles": ["aquavoice.macOSBridge"], "duration": 6.4}}
+{"wall": "2026-09-24T19:41:00", "pause": {"track": "mic", "reason": "manual", "state": "paused", "since": "2026-09-24T19:41:00", "bundles": []}}
+{"wall": "2026-09-24T19:43:03", "pause": {"track": "mic", "reason": "manual", "state": "resumed", "since": "2026-09-24T19:41:00", "bundles": [], "duration": 123.0}}
 ```
 
 A pause record's `reason` is `automatic` for a watched dictation app or `manual` for `hark pause`.
-`state` is `paused` or `resumed`; on resume, `since` is the start time and `duration` is the pause length in seconds.
+`state` is `paused` or `resumed`; `since` is when the pause was detected, and on resume `duration` is its length in seconds.
+The muted audio extends 300 ms before `since` and, for automatic pauses, 300 ms past the resume.
 `bundles` lists the matching bundle IDs for automatic pauses and is empty for a manual pause.
 Automatic pauses have no `.txt` line; the JSONL event and session log record them.
 Manual pauses also write the `# paused` and `# resumed at … after …` comments shown above.

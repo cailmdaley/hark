@@ -62,20 +62,19 @@ Enrollment needs at least 5 s of audio; the voiceprint and the clip it came from
 With voices enrolled, hark names a diarized slot on its own once enough of that slot's speech matches one voice clearly; see [how it works](how-it-works.md#voice-matching).
 A slot someone named by hand is never renamed automatically.
 
-`hark pause` and `hark resume` toggle a manual mic-pause file under `~/.hark` (or `$HARK_DIR`).
-A running live session polls it and mutes the mic; `hark pause --status` reports its state.
-The manual pause stays set until `hark resume`, including across session restarts.
-`--pause-for none` disables app detection without disabling manual pause.
+`hark pause` mutes the mic of the running session until `hark resume`; it creates `~/.hark/paused` (or `$HARK_DIR/paused`), which the session polls, and `hark pause --status` reports it.
+A new session starts unpaused, clearing a pause an earlier session left behind.
+Manual pauses add `# paused` and `# resumed at … after …` lines to the `.txt` transcript.
+`--pause-for none` disables app detection but not manual pauses.
 
-Automatic pause detection reads CoreAudio process objects without requesting additional permissions.
+Automatic pause detection reads CoreAudio process objects and needs no extra permission.
 The default match is `aquavoice`; `--pause-for aqua,whisper` watches any process whose bundle ID contains either string.
-`hark processes` prints each process object's PID, bundle ID and input-capture flag, including apps that are idle.
-hark ignores its own process.
-Only the mic track is muted, so the call continues to reach hark through system audio.
-A 300 ms mic lookback catches speech that begins before the detector poll, and a 300 ms tail keeps the last words out after recording stops.
-The ASR and saved mic WAV receive the same samples, with zeros during every pause; system audio is unchanged.
+`hark processes` prints each process object's PID, bundle ID and input-capture flag, idle apps included, so you can find what to match.
 Dictation pauses appear in the session log and JSONL, not as `.txt` lines.
-Manual pauses add `# paused` and `# resumed at … after …` comments to the `.txt` transcript.
+
+Pauses apply to the mic track only (not to `--phone`); system audio keeps flowing, so the call still reaches hark.
+A 300 ms lookback mutes speech that began before the watcher noticed, and a 300 ms tail keeps out the last words after a dictation app stops.
+The ASR and the saved mic WAV receive the same samples, with zeros for every pause.
 
 ## Saved audio
 
