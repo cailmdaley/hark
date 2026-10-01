@@ -55,9 +55,9 @@ class Utterance:
         return f"{self.wall:%H:%M:%S}-{self.wall_end:%H:%M:%S} {label} {self.text}"
 
     def record(self):
-        record = {"wall": self.wall.isoformat(), "track": self.track,
-                  "speaker": self.speaker, "start": round(self.start, 6),
-                  "end": round(self.end, 6), "text": self.text}
+        record = {"wall": self.wall.isoformat(timespec="milliseconds"), "track": self.track,
+                  "speaker": self.speaker, "start": round(self.start, 2),
+                  "end": round(self.end, 2), "text": self.text}
         if self.name:
             record["name"] = self.name
         return record

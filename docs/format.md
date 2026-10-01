@@ -42,13 +42,13 @@ Every other line starts with `# `:
 ## The JSONL file
 
 One JSON object per line.
-Every record has `wall`, an ISO-8601 local timestamp, with subsecond precision when present.
+Every record has `wall`, an ISO-8601 local timestamp (to the millisecond on utterances, to the second elsewhere).
 There are three kinds.
 
 **Utterance**
 
 ```json
-{"wall": "2026-09-24T19:34:00", "track": "system", "speaker": "S1", "start": 12.4, "end": 42.4, "text": "Okay, let's get started."}
+{"wall": "2026-09-24T19:34:00.412", "track": "system", "speaker": "S1", "start": 12.4, "end": 42.4, "text": "Okay, let's get started."}
 ```
 
 - `track`: `mic`, `system` or `phone` live; for `--file`, the file's name without extension

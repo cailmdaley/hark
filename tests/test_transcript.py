@@ -30,7 +30,7 @@ def test_line_range_matches_jsonl_wall_and_audio_times(tmp_path):
     assert line == "14:03:12-14:03:22 S2   Hello"
     assert start == wall.strftime("%H:%M:%S")
     assert end == wall_end.strftime("%H:%M:%S")
-    assert (record["start"], record["end"]) == (10.125, 19.875)
+    assert (record["start"], record["end"]) == (10.12, 19.88)
 
 
 def test_external_name_line_applies_to_next_line_and_jsonl(tmp_path):
@@ -44,7 +44,7 @@ def test_external_name_line_applies_to_next_line_and_jsonl(tmp_path):
     assert "Mike Hudson" in path.read_text().splitlines()[-2]
     assert path.read_text().splitlines()[-2].endswith("Hello there")
     records = [json.loads(line) for line in path.with_suffix(".jsonl").read_text().splitlines()]
-    assert records == [{"wall": named.wall.isoformat(timespec="seconds"), "track": "system",
+    assert records == [{"wall": named.wall.isoformat(timespec="milliseconds"), "track": "system",
                         "speaker": "S2", "start": 10, "end": 11, "text": "Hello there",
                         "name": "Mike Hudson"}]
 
