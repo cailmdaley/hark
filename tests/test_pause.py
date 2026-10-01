@@ -9,7 +9,6 @@ import numpy as np
 import pytest
 
 from hark.capture import SAMPLE_RATE, Source, on_pcm16_grid
-from hark.health import Quiet, QuietWatch
 from hark.pause import (AUTO_RESUME_TAIL_SEC, MIC_LOOKBACK_SEC, AudioProcess,
                         CoreAudioProcesses, ManualPause, MicGate, PauseMonitor,
                         PauseState, parse_patterns, watched_bundles)
@@ -22,6 +21,10 @@ def pcm(seconds):
 
 def samples_at(seconds):
     return round(seconds * SAMPLE_RATE)
+
+
+def muted(state, now):
+    return any(i.start <= now and (i.end is None or now < i.end) for i in state.intervals)
 
 
 def timeline(anchor):
@@ -140,11 +143,11 @@ def test_overlap_manual_resume_cannot_unmute_automatic_or_its_tail():
     assert [(e.reason, e.paused) for e in state.update(1, True)] == [("manual", True)]
     assert [(e.reason, e.paused) for e in state.update(2, True, ("a",))] == [("automatic", True)]
     assert [(e.reason, e.paused) for e in state.update(3, False, ("a",))] == [("manual", False)]
-    assert state.muted(3.5)
+    assert muted(state, 3.5)
     event, = state.update(4, False)
     assert event.reason == "automatic" and event.since == 2 and not event.paused
-    assert state.muted(4 + AUTO_RESUME_TAIL_SEC / 2)
-    assert not state.muted(4 + AUTO_RESUME_TAIL_SEC)
+    assert muted(state, 4 + AUTO_RESUME_TAIL_SEC / 2)
+    assert not muted(state, 4 + AUTO_RESUME_TAIL_SEC)
     original = pcm(5)
     expected = original.copy()
     expected[samples_at(1 - MIC_LOOKBACK_SEC):samples_at(4 + AUTO_RESUME_TAIL_SEC)] = 0
@@ -158,10 +161,10 @@ def test_overlap_automatic_resume_cannot_unmute_manual_and_duplicate_updates_are
     event, = state.update(3, True)
     assert event.reason == "automatic"
     assert state.update(4, True) == []
-    assert state.muted(10)
+    assert muted(state, 10)
     event, = state.update(11, False)
     assert event.reason == "manual" and event.since == 2
-    assert not state.muted(11)  # no automatic tail on a manual resume
+    assert not muted(state, 11)  # no automatic tail on a manual resume
 
 
 def test_changing_watched_apps_while_capturing_is_one_automatic_episode():
@@ -215,7 +218,7 @@ def test_monitor_polls_manual_state_even_with_automatic_detection_disabled(tmp_p
     monitor.poll()
     monitor.manual.path.write_text('{"paused": "false"}')
     monitor.poll()
-    assert monitor.muted(12)
+    assert muted(monitor.state, 12)
 
 
 @pytest.mark.parametrize("reason", ["automatic", "manual"])
@@ -283,51 +286,12 @@ def test_monitor_retains_automatic_pause_on_read_failure_and_resumes_on_success(
     assert event.paused and event.reason == "automatic"
     clock[0] = 11
     monitor.poll()
-    assert monitor.take_events() == [] and monitor.muted(11)
+    assert monitor.take_events() == [] and muted(monitor.state, 11)
     clock[0] = 12
     monitor.poll()
     event, = monitor.take_events()
     assert not event.paused and event.since == 10
-    assert monitor.muted(12 + AUTO_RESUME_TAIL_SEC / 2)
-
-
-def test_health_suppression_resets_stale_device_times_without_lost_or_back_markers():
-    watch = QuietWatch(quiet=10)
-    sources = {"mic": (0, 0)}
-    watch.suppress("mic", 100)
-    assert watch.check(100, sources, {"system": 100}) == []
-    assert watch.check(105, sources, {"system": 105}) == []
-    assert watch.check(110, sources, {"system": 110}) == [Quiet("mic", "silent", 100, "no signal")]
-    # An episode already open before intentional muting retains its real origin.
-    watch.suppress("mic", 111)
-    assert watch.check(111, sources, {}) == []
-    assert watch.open["mic"] == (100, "no signal")
-    # A pause entirely between inference-heavy loop iterations also resets the clock.
-    watch.suppress("mic", 120 + AUTO_RESUME_TAIL_SEC)
-    assert watch.check(125, sources, {"system": 125}) == []
-    # Other sources remain watched during the mic pause.
-    watch.suppress("mic", 140)
-    assert watch.check(140, {"mic": (0, 0), "system": (100, 100)}, {}) == [
-        Quiet("system", "silent", 100, "no signal")]
-
-
-def test_health_remembers_a_pause_consumed_during_a_long_main_loop_iteration(tmp_path):
-    monitor = PauseMonitor(tmp_path, ())
-    monitor.state.update(90, False, ("aquavoice",))
-    monitor.state.update(100, False)
-    # Audio processing can consume and prune the interval before the health check runs.
-    monitor.state.gate(pcm(120), 0)
-    assert monitor.state.intervals == []
-    watch = QuietWatch(quiet=90)
-    baseline = monitor.health_since(120)
-    assert baseline == 100 + AUTO_RESUME_TAIL_SEC
-    watch.suppress("mic", baseline)
-    assert watch.check(120, {"mic": (0, 0)}, {"system": 120}) == []
-    assert watch.check(201, {"mic": (0, 0)}, {}) == [Quiet("mic", "silent", baseline, "no signal")]
-    # Reusing an old suppression timestamp must not erase genuine later health episodes.
-    watch.suppress("mic", monitor.health_since(202))
-    assert watch.check(202, {"mic": (0, 0)}, {}) == []
-    assert "mic" in watch.open
+    assert muted(monitor.state, 12 + AUTO_RESUME_TAIL_SEC / 2)
 
 
 def test_manual_annotations_are_append_only_and_auto_events_only_go_to_log_jsonl(tmp_path, monkeypatch):

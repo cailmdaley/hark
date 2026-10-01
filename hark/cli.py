@@ -38,7 +38,7 @@ from .capture import (SAMPLE_RATE, FileSource, MicSource, PhoneSource, SystemSou
 from .health import QuietWatch
 from .masking import MaskPolicy
 from .mirror import TranscriptMirror
-from .pause import (AUTO_RESUME_TAIL_SEC, DEFAULT_PAUSE_FOR, ManualPause, MicGate,
+from .pause import (DEFAULT_PAUSE_FOR, ManualPause, MicGate,
                     PauseMonitor, parse_patterns, read_processes)
 from .transcript import Sink, Track, flush_tracks, load_models, numbered
 
@@ -356,7 +356,7 @@ def main(argv=None):
             while not stop.is_set():
                 sink.poll_names()
                 if pause_monitor:
-                    _pause_events(pause_monitor, sink, watch)
+                    _pause_events(pause_monitor, sink)
                 busy = False
                 for src, track in started_tracks:
                     samples = src.drain(limit=SAMPLE_RATE // 2)
@@ -372,12 +372,8 @@ def main(argv=None):
                     spoken[u.track] = max(spoken.get(u.track, 0.0), u.wall_span[1])
                     said[u.track] = said.get(u.track, 0) + 1
                 if watch:
-                    health_now = time.time()
-                    intentional = pause_monitor.health_since(health_now)
-                    if intentional is not None:
-                        watch.suppress("mic", intentional)
-                    for event in watch.check(health_now, {src.name: (src.last_audio, src.last_sound)
-                                                         for src in started_sources}, spoken):
+                    for event in watch.check(time.time(), {src.name: (src.last_audio, src.last_sound)
+                                                           for src in started_sources}, spoken):
                         sink.source(event)
                     if time.monotonic() >= beat:
                         beat += 60
@@ -393,7 +389,7 @@ def main(argv=None):
                     src.stop()
                 if pause_monitor:
                     pause_monitor.stop()
-                    _pause_events(pause_monitor, sink, watch)
+                    _pause_events(pause_monitor, sink)
                 for src, track in started_tracks:
                     rest = src.drain(limit=float("inf"))
                     if src in mic_gates:
@@ -453,16 +449,13 @@ def _manual_pause(argv):
     return 0
 
 
-def _pause_events(monitor, sink, watch=None):
+def _pause_events(monitor, sink):
     for event in monitor.take_events():
         state = "paused" if event.paused else "resumed"
         detail = f" ({', '.join(event.bundles)})" if event.bundles else ""
         log(f"mic {state}: {event.reason}{detail} at "
             f"{datetime.fromtimestamp(event.at):%H:%M:%S}")
         sink.pause(event)
-        if watch:
-            tail = AUTO_RESUME_TAIL_SEC if event.reason == "automatic" and not event.paused else 0
-            watch.suppress("mic", event.at + tail)
 
 
 def _heartbeat(sources, said):

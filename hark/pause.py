@@ -199,7 +199,6 @@ class PauseState:
     def __init__(self):
         self.active = {}
         self.intervals = []
-        self.last_mute_end = None
 
     def update(self, now, manual, automatic=()):
         events = []
@@ -214,15 +213,11 @@ class PauseState:
             elif not enabled and previous is not None:
                 since, interval, previous_bundles = self.active.pop(reason)
                 interval.end = now + (AUTO_RESUME_TAIL_SEC if reason == "automatic" else 0)
-                self.last_mute_end = max(self.last_mute_end or float("-inf"), interval.end)
                 events.append(PauseEvent(reason, False, now, since, previous_bundles))
             elif enabled:
                 since, interval, _ = previous
                 self.active[reason] = since, interval, bundles
         return events
-
-    def muted(self, now):
-        return any(i.start <= now and (i.end is None or now < i.end) for i in self.intervals)
 
     def gate(self, samples, start):
         """Preserve the PCM grid and timeline, replacing samples in mute intervals with zeros."""
@@ -322,17 +317,6 @@ class PauseMonitor:
     def feed(self, gate, samples, now, final=False):
         with self.lock:
             return gate.feed(samples, now, self.state, final=final)
-
-    def muted(self, now):
-        with self.lock:
-            return self.state.muted(now)
-
-    def health_since(self, now):
-        """Keep pause history for health even after the gated audio/intervals were consumed."""
-        with self.lock:
-            if self.state.active or self.state.muted(now):
-                return now
-            return self.state.last_mute_end
 
     def stop(self):
         """Join the watcher and sample once more before the held mic audio is flushed."""

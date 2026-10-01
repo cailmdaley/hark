@@ -50,23 +50,6 @@ def test_one_marker_per_episode_then_back_then_a_new_episode():
         Quiet("system", "silent", back, "silence")]
 
 
-def test_intentional_pause_preserves_a_genuinely_lost_episode_until_real_sound_returns():
-    watch = QuietWatch(quiet=10)
-    stale = {"mic": (T0, T0)}
-    assert watch.check(T0 + 10, stale, {}) == [Quiet("mic", "silent", T0, "no signal")]
-    watch.suppress("mic", T0 + 20)
-    assert watch.check(T0 + 20, stale, {}) == []
-    watch.suppress("mic", T0 + 50)
-    assert watch.check(T0 + 51, stale, {}) == []  # resumed, but no fresh device timestamps
-    assert watch.check(T0 + 70, stale, {"system": T0 + 70}) == []
-    assert watch.open["mic"] == (T0, "no signal")
-    sound = T0 + 75
-    assert watch.check(sound, {"mic": (sound, sound)}, {}) == [
-        Quiet("mic", "back", T0, "no signal", sound)]
-    assert watch.check(sound + 1, {"mic": (sound + 1, sound)}, {}) == []
-    assert watch.open == {}
-
-
 def test_sink_writes_marker_lines_and_records_without_touching_names(tmp_path):
     path = tmp_path / "meeting.txt"
     sink = Sink(path, "session")
