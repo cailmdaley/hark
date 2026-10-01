@@ -345,7 +345,7 @@ def main(argv=None):
                 src.start()
                 started_sources.append(src)
                 started_tracks.append((src, track))
-                if live and src.name == "mic":
+                if pause_monitor and src.name == "mic":
                     mic_gates[src] = MicGate(src)
                 track.t0 = (datetime.combine(now.date(), datetime.min.time()) if args.file
                             else datetime.fromtimestamp(src.anchor))
@@ -447,7 +447,7 @@ def _manual_pause(argv):
     command = argv[0]
     ap = argparse.ArgumentParser(prog=f"hark {command}")
     if command == "pause":
-        ap.add_argument("--status", action="store_true", help="show the persistent manual pause state")
+        ap.add_argument("--status", action="store_true", help="show whether the mic is manually paused")
     args = ap.parse_args(argv[1:])
     state = ManualPause(HOME)
     if not getattr(args, "status", False):
