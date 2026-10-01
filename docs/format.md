@@ -23,11 +23,12 @@ Every other line starts with `# `:
 
 | Line | Meaning |
 |---|---|
-| `# hark 2026-09-24 19:34 — call: me = mic, S1… = system audio` | Header: start time and mode. Room mode says `room: mic diarized as S1…`, a replay `file <path>` |
+| `# hark 2026-09-24 19:34 — call: me = mic, S1… = system audio` | Header: start time and mode. Room mode says `room: mic diarized as S1…`, phone mode `phone: the phone's mic diarized as S1…`, a replay `file <path>` |
 | `# S2 = Ada` | From here on, slot S2 is Ada. The latest line for a slot wins. Apply it to earlier lines from that slot too |
 | `# S2 = S2` | S2 is anonymous again |
 | `# system audio lost at 16:37:55 — no signal from the tap; nothing from the call is being transcribed` | A live source stopped delivering audio. The time is when it went quiet |
 | `# mic lost at 16:37:55 — only silence while others speak; the mic may not be captured` | A source delivers only digital silence while other tracks have speech |
+| `# phone lost at 10:02:13 — no signal from the device; nothing from the phone is being transcribed` | The phone disconnected (screen locked, tab closed, network gone) |
 | `# system audio back at 16:52:10 after 14m15s lost` | The source recovered |
 | `# ended 19:35:19` | The session is over; nothing follows |
 
@@ -43,7 +44,7 @@ One JSON object per line. Every record has `wall`, an ISO-8601 local timestamp. 
 {"wall": "2026-09-24T19:34:17", "track": "system", "speaker": "S1", "start": 12.4, "end": 18.9, "text": "Okay, let's get started.", "name": "Ada"}
 ```
 
-- `track`: `mic` or `system` live; for `--file`, the file's name without extension
+- `track`: `mic`, `system` or `phone` live; for `--file`, the file's name without extension
 - `speaker`: the stable slot (`me`, `S1`…), even when a name is shown in the text file
 - `start`, `end`: seconds into the track's saved audio file (`<stem>.<track>.wav`), so an utterance can be cut out of the recording exactly
 - `name`: present only when the slot is named

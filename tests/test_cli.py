@@ -201,8 +201,8 @@ def test_live_capture_ends_cleanly_and_records_lifecycle(tmp_path, monkeypatch):
 
     state = json.loads((tmp_path / "meeting.json").read_text())
     assert [snapshot["phase"] for snapshot in phases] == ["loading", "live", "stopping", "ended"]
-    assert set(state) == {"pid", "phase", "title", "started", "transcript", "mirror", "launch", "error"}
-    assert state["launch"] is None
+    assert set(state) == {"pid", "phase", "title", "started", "transcript", "mirror", "launch", "phone", "error"}
+    assert state["launch"] is None and state["phone"] is None
     assert state["pid"] == os.getpid()
     assert state["title"] == "Planning"
     assert datetime.fromisoformat(state["started"]).tzinfo is not None
@@ -301,7 +301,7 @@ def test_live_capture_exception_records_one_line_failure(tmp_path, monkeypatch):
 
     state = json.loads((tmp_path / "meeting.json").read_text())
     assert [snapshot["phase"] for snapshot in phases] == ["loading", "failed"]
-    assert set(state) == {"pid", "phase", "title", "started", "transcript", "mirror", "launch", "error"}
+    assert set(state) == {"pid", "phase", "title", "started", "transcript", "mirror", "launch", "phone", "error"}
     assert state["launch"] is None
     assert state["phase"] == "failed"
     assert state["error"] == "model loading failed with details"
@@ -437,6 +437,30 @@ def test_room_saves_the_mic_track_by_default_sample_for_sample(tmp_path, monkeyp
     assert np.array_equal(read_wav(out.with_suffix(".mic.wav")), np.concatenate(fed))
     assert np.concatenate(fed).size == mic.size
     assert json.loads((tmp_path / "meeting.json").read_text())["phase"] == "ended"
+
+
+def test_phone_listens_on_the_hark_dir_socket_and_saves_a_phone_track(tmp_path, monkeypatch):
+    cli, Source = fake_live_capture(monkeypatch, tmp_path)
+    paths = []
+    Phone, fed = feed_chunks(Source, "phone", [tone(440, 4000)])
+
+    class RecordingPhone(Phone):
+        def __init__(self, path):
+            paths.append(path)
+            super().__init__()
+
+    monkeypatch.setattr(cli, "PhoneSource", RecordingPhone)
+    signaller, _ = signal_when_live(tmp_path)
+    out = tmp_path / "sessions" / "walk.txt"
+
+    cli.main(["--phone", "-o", str(out)])
+    signaller.join(timeout=2)
+
+    state = json.loads((tmp_path / "meeting.json").read_text())
+    assert paths == [tmp_path / "phone.sock"]
+    assert state["phone"] == str(tmp_path / "phone.sock") and state["phase"] == "ended"
+    assert out.read_text().startswith("# hark ") and "phone:" in out.read_text().splitlines()[0]
+    assert np.array_equal(read_wav(out.with_suffix(".phone.wav")), np.concatenate(fed))
 
 
 def test_call_saves_mic_and_system_tracks_each_with_its_own_samples(tmp_path, monkeypatch):

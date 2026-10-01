@@ -2,6 +2,7 @@
 
     hark                 call: mic is "me", system audio (Zoom…) diarized as S1…S8
     hark --room          in person: the mic alone, diarized
+    hark --phone         in person, a phone as the mic: PCM into ~/.hark/phone.sock, diarized
     hark --file x.wav    transcribe a file through the same streaming path
 
     hark name S2 "Ada" [--session PATH]     name a diarized speaker in the live session
@@ -9,7 +10,7 @@
     hark mirror --resume LOCAL HOST:PATH    finish a mirror that didn't complete
 
 Live capture keeps each track beside the transcript as <stem>.mic.wav and
-<stem>.system.wav (16 kHz mono 16-bit PCM, t = 0 at the track's first sample,
+<stem>.system.wav (or <stem>.phone.wav) (16 kHz mono 16-bit PCM, t = 0 at the track's first sample,
 replayable with --file); --no-save-audio opts out. At startup, saved audio under
 ~/.hark/meetings and ~/.hark/sessions older than 14 days is deleted; transcripts
 are kept.
@@ -32,7 +33,8 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from .capture import SAMPLE_RATE, FileSource, MicSource, SystemSource, WavRecorder, log, log_to
+from .capture import (SAMPLE_RATE, FileSource, MicSource, PhoneSource, SystemSource, WavRecorder,
+                      log, log_to)
 from .health import QuietWatch
 from .masking import MaskPolicy
 from .mirror import TranscriptMirror
@@ -51,13 +53,13 @@ class MeetingLifecycle:
         "failed": set(),
     }
 
-    def __init__(self, *, title, started, transcript, mirror, launch=None):
+    def __init__(self, *, title, started, transcript, mirror, launch=None, phone=None):
         self.path = HOME / "meeting.json"
         self.lock = threading.Lock()
         self.data = {
             "pid": os.getpid(), "phase": "loading", "title": title,
             "started": started, "transcript": transcript, "mirror": mirror,
-            "launch": launch, "error": None,
+            "launch": launch, "phone": phone, "error": None,
         }
         self._write()
 
@@ -171,6 +173,8 @@ def main(argv=None):
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     mode = ap.add_mutually_exclusive_group()
     mode.add_argument("--room", action="store_true", help="mic only, diarized")
+    mode.add_argument("--phone", action="store_true",
+                      help="a phone as the mic: listen for s16le 16 kHz PCM on ~/.hark/phone.sock, diarized")
     mode.add_argument("--file", help="transcribe an audio file instead of live input")
     ap.add_argument("--realtime", action="store_true", help="with --file: replay at real-time pace")
     ap.add_argument("--mic", help="input device name or index (default: system default)")
@@ -203,13 +207,14 @@ def main(argv=None):
     out = (args.out.with_suffix(".txt").expanduser().resolve() if args.out
            else _session_path(now, args.title))
     live = not bool(args.file)
+    phone_socket = HOME / "phone.sock" if args.phone else None
     if live:
         expire_audio([HOME / "meetings", HOME / "sessions"])
     lifecycle = (MeetingLifecycle(
         title=args.title, started=now.astimezone().isoformat(timespec="seconds"),
         transcript=str(out),
         mirror=f"{mirror_target[0]}:{mirror_target[1]}" if mirror_target else None,
-        launch=args.launch,
+        launch=args.launch, phone=str(phone_socket) if phone_socket else None,
     ) if live else None)
     stop = threading.Event()
     watcher = None
@@ -225,6 +230,7 @@ def main(argv=None):
 
     what = (f"file {args.file}" if args.file else
             "room: mic diarized as S1…" if args.room else
+            "phone: the phone's mic diarized as S1…" if args.phone else
             "call: me = mic, S1… = system audio")
     sources = []
     tracks = []
@@ -258,6 +264,8 @@ def main(argv=None):
             if not stop.is_set():
                 if args.file:
                     sources = [(FileSource(args.file, realtime=args.realtime), numbered)]
+                elif args.phone:
+                    sources = [(PhoneSource(phone_socket), numbered)]
                 elif args.room:
                     sources = [(MicSource(_device(args.mic)), numbered)]
                 else:

@@ -41,6 +41,7 @@ Grant two macOS permissions to the terminal that runs hark: **Microphone**, and 
 ```bash
 uv run hark                    # a call: your mic is "me", the call's audio is diarized S1…S8
 uv run hark --room             # in person: the mic alone, diarized
+uv run hark --phone            # in person, a phone streaming its mic in as PCM (docs/usage.md)
 uv run hark --file talk.m4a    # a recording, through the same streaming pipeline
 uv run hark --title "telecon"  # names the session file
 ```

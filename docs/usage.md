@@ -5,11 +5,14 @@
 ```bash
 hark                  # call: mic = "me", system audio diarized as S1…S8
 hark --room           # in person: the mic alone, diarized
+hark --phone          # in person, a phone as the mic: PCM arrives on a socket, diarized
 hark --file x.m4a     # a recording through the same streaming path (about 0.15× real time)
 hark --file x.wav --realtime   # replay at real-time pace, e.g. to test an agent against it
 ```
 
 Call mode assumes headphones: the mic hears only you, and everything the Mac plays (Zoom, Meet, a video) is the other side. On speakers the call leaks into the mic.
+
+Phone mode suits a room where the laptop's mic is in the wrong place. hark listens on `~/.hark/phone.sock` (named in `meeting.json` as `phone`) for raw 16 kHz mono s16le PCM; a relay writes it there, such as the Shuttle board's phone page, which streams the phone's mic over the tailnet. Anything that produces that PCM works too, for example `ffmpeg -i talk.m4a -f s16le -ac 1 -ar 16000 - | nc -U ~/.hark/phone.sock`. One sender at a time: a new connection replaces the old one. While nothing is connected hark records silence, and after 90 s the transcript says `# phone lost at …`. The track is saved as `<stem>.phone.wav`.
 
 Ctrl-C ends a session cleanly: hark flushes open turns, finishes writing the audio, and writes `# ended`. SIGTERM and SIGHUP do the same, so closing the terminal doesn't lose the end. A second signal quits at once without flushing.
 

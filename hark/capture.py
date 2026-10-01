@@ -4,7 +4,8 @@ Every live sample is exactly representable as s16le PCM, so a track saved by `Wa
 and replayed with `--file` feeds the models the same numbers they heard live.
 
 Mic via PortAudio (sounddevice); system audio via `audiotee`, a Core Audio
-process tap that writes s16le PCM to stdout (built by scripts/build-audiotee.sh).
+process tap that writes s16le PCM to stdout (built by scripts/build-audiotee.sh);
+a phone (or any remote mic) as s16le PCM written into a Unix socket hark listens on.
 
 Live sources are held to the wall clock: `drain` pads with silence whatever
 the device failed to deliver (a stalled tap, a vanished mic, the laptop asleep),
@@ -260,6 +261,90 @@ class SystemSource(Source):
                 continue
             if rec.get("message_type") == "error":
                 log(f"audiotee: {rec.get('data', rec)}")
+
+
+class PhoneSource(Source):
+    """A remote microphone streaming s16le 16 kHz mono PCM into a Unix socket.
+
+    hark listens at `path`; whoever relays the phone (the Shuttle board's phone page)
+    connects and writes raw PCM. One sender at a time: a new connection (the page
+    reloaded, the phone reconnected) replaces the old one. Between senders `drain` pads
+    the gap with silence, and a long one reaches the transcript as `# phone lost at …`.
+    """
+
+    def __init__(self, path):
+        super().__init__("phone")
+        self.path = Path(path)
+        self.server = None
+        self.conn = None
+        self.lock = threading.Lock()
+        self.stopping = threading.Event()
+
+    def _open(self):
+        import socket
+
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.path.unlink(missing_ok=True)
+        self.server = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        self.server.bind(str(self.path))
+        self.server.listen(2)
+        self.server.settimeout(0.5)
+        threading.Thread(target=self._accept, daemon=True).start()
+        log(f"phone: waiting for audio at {self.path}")
+
+    def _accept(self):
+        import socket
+
+        while not self.stopping.is_set():
+            try:
+                conn, _ = self.server.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            with self.lock:
+                previous, self.conn = self.conn, conn
+            if previous:
+                log("phone: a new sender replaced the previous one")
+                previous.close()
+            threading.Thread(target=self._pump, args=(conn,), daemon=True).start()
+
+    def _pump(self, conn):
+        log("phone: connected")
+        pending = b""
+        try:
+            while not self.stopping.is_set():
+                chunk = conn.recv(4 * BLOCK)
+                if not chunk:
+                    break
+                with self.lock:
+                    if self.conn is not conn:
+                        return  # replaced; the new sender owns the track
+                pending += chunk
+                n = len(pending) // 2 * 2
+                if n:
+                    self._deliver(np.frombuffer(pending[:n], dtype="<i2").astype(np.float32) / 32768.0)
+                    pending = pending[n:]
+        except OSError:
+            pass
+        with self.lock:
+            if self.conn is conn:
+                self.conn = None
+                if not self.stopping.is_set():
+                    log("phone: disconnected; waiting for it to come back")
+        conn.close()
+
+    def stop(self):
+        self.stopping.set()
+        with self.lock:
+            conn, self.conn = self.conn, None
+        for s in (conn, self.server):
+            if s:
+                try:
+                    s.close()
+                except OSError:
+                    pass
+        self.path.unlink(missing_ok=True)
 
 
 class WavRecorder:

@@ -255,7 +255,8 @@ class Sink:
 
     def source(self, event):
         """Mark a live source going quiet (`# mic lost at …`) or coming back."""
-        who, what = ("system audio", "the call") if event.track == "system" else (event.track, "the mic")
+        who, what = {"system": ("system audio", "the call"),
+                     "phone": ("phone", "the phone")}.get(event.track, (event.track, "the mic"))
         since = datetime.fromtimestamp(event.since)
         record = {"track": event.track, "state": event.state,
                   "since": since.isoformat(timespec="seconds"), "cause": event.cause}
