@@ -9,6 +9,7 @@ import time
 import wave
 
 import numpy as np
+import pytest
 
 from gradium_mock import MockGradium
 from hark import cli
@@ -111,6 +112,75 @@ def test_sustained_outage_full_backlog_admits_no_empty_jobs_and_recovers():
             assert len([c for c in mock.connections if c['samples']]) == 3
         finally:
             t.close()
+
+
+@pytest.mark.parametrize('drop_at', [None, 1])
+def test_nonrealtime_file_preserves_all_twenty_seconds_through_transient_outage(drop_at):
+    with MockGradium(plans=[[('part', 0, 2)]], drop_first_at=drop_at) as mock:
+        t = track(mock, max_duration=2, realtime=False, backlog_seconds=4, backoff=.2)
+        t.start()
+        try:
+            t.feed(speech(20))
+            output = finish(t)
+            assert [u.text for u in output] == ['part'] * 10
+            assert [u.start for u in output] == list(range(0, 20, 2))
+            assert t.backlog_samples == 0 and t.missed is None
+            assert not any('missed recognition' in notice for notice in t.take_notices())
+        finally:
+            t.close()
+
+
+def test_nonrealtime_file_full_job_queue_waits_through_transient_outage():
+    with MockGradium(plans=[[('part', 0, 2)]], drop_first_at=1) as mock:
+        t = track(mock, max_duration=2, realtime=False, queue_size=1, backlog_seconds=6, backoff=.2)
+        t.start()
+        try:
+            t.feed(speech(20))
+            output = finish(t)
+            assert [u.start for u in output] == list(range(0, 20, 2))
+            assert t.backlog_samples == 0 and t.missed is None
+        finally:
+            t.close()
+
+
+def test_nonrealtime_final_retries_beyond_live_stop_attempt_limit():
+    with MockGradium(plans=[[('part', 0, 2)]], stall_setup={1: .1, 2: .1, 3: .1}) as mock:
+        t = track(mock, realtime=False, retries=0, timeout=.05, shutdown_timeout=1)
+        t.start()
+        try:
+            t.feed(speech(2))
+            assert [u.text for u in finish(t)] == ['part']
+            assert len(mock.connections) == 5
+        finally:
+            t.close()
+
+
+def test_nonrealtime_final_permanent_outage_is_bounded():
+    with MockGradium(http_status=503) as mock:
+        t = track(mock, realtime=False, shutdown_timeout=.15)
+        t.start()
+        try:
+            t.feed(speech(.08))
+            began = time.monotonic()
+            assert finish(t) == []
+            assert .14 <= time.monotonic() - began < .6
+            assert not t.thread.is_alive()
+        finally:
+            t.close()
+
+
+def test_final_does_not_join_again_after_abort_times_out():
+    t = track(type('Mock', (), {'url': 'ws://127.0.0.1:1'})())
+    joins = []
+    class StuckThread:
+        def join(self, timeout): joins.append(timeout)
+    t.thread = StuckThread()
+    t.degraded = True
+    try:
+        finish(t)
+        assert joins == [t.timeout + 2]
+    finally:
+        t.close()
 
 
 def test_speaker_warm_failure_falls_back_without_stopping_capture():

@@ -230,21 +230,24 @@ class GradiumTrack:
             self._end_request()
             self.stopping.set()
             self._report_missed()
-            if self.degraded:
+            if self.realtime and self.degraded:
                 self.abort()
             self.last_progress = time.monotonic()
             finish_started = self.last_progress
             while not self.finished.is_set():
                 self._collect()
-                if ((self.degraded and time.monotonic() - finish_started > 0.5)
+                # Offline EOS has a fixed drain budget; live outages favor a prompt stop.
+                if (self.cancel.is_set()
+                        or (self.realtime and self.degraded and time.monotonic() - finish_started > 0.5)
+                        or (not self.realtime and time.monotonic() - finish_started > self.shutdown_timeout)
                         or time.monotonic() - self.last_progress > self.shutdown_timeout):
                     break
                 time.sleep(0.01)
-            if not self.finished.is_set():
+            if not self.finished.is_set() and not self.cancel.is_set():
                 log("gradium: stop abandons uncommitted recognition; saved audio is retained")
                 self.abort()
-            if self.thread:
-                self.thread.join()
+            if self.thread and self.finished.is_set():
+                self.thread.join(timeout=self.timeout + 2)
             self._collect()
             self.check()
 
@@ -311,7 +314,7 @@ class GradiumTrack:
                     self.backlog_samples += count
                     return True
             self._collect()
-            if self.degraded or self.realtime or self.cancel.is_set() or time.monotonic() - self.last_progress > self.shutdown_timeout:
+            if self.realtime or self.cancel.is_set() or time.monotonic() - self.last_progress > self.shutdown_timeout:
                 return False
             time.sleep(0.01)
 
@@ -323,7 +326,7 @@ class GradiumTrack:
                 self.jobs.put_nowait(burst)
                 return True
             except queue.Full:
-                if self.degraded or self.realtime or self.cancel.is_set() or time.monotonic() - self.last_progress > self.shutdown_timeout:
+                if self.realtime or self.cancel.is_set() or time.monotonic() - self.last_progress > self.shutdown_timeout:
                     return False
                 time.sleep(0.01)
 
@@ -500,10 +503,10 @@ class GradiumTrack:
                 why = str(error) or type(error).__name__
             self._degrade(True)
             self.ready.set()  # Capture starts after the first failure, not after service recovery.
-            if self.stopping.is_set() and attempt >= self.retries:
+            if self.realtime and self.stopping.is_set() and attempt >= self.retries:
                 raise asyncio.CancelledError
             delay = min(30.0, self.backoff * 2 ** min(attempt, 16))
-            if self.stopping.is_set():
+            if self.realtime and self.stopping.is_set():
                 delay = min(delay, 0.05)
             why = why.replace(self.key, "[redacted]")
             log(f"gradium: reconnect in {delay:.2f} s ({why})")

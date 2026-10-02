@@ -390,16 +390,16 @@ def test_retries_back_off_without_terminal_failure():
             t.close()
 
 
-def test_progress_keeps_flush_and_final_alive_beyond_idle_timeout():
+def test_progress_keeps_flush_alive_beyond_socket_idle_timeout_within_final_budget():
     with MockGradium(plans=[[("part", 0, 2)]], delay=.005) as mock:
-        t = track(mock, max_duration=2, realtime=False, timeout=.04, shutdown_timeout=.06)
+        t = track(mock, max_duration=2, realtime=False, timeout=.04, shutdown_timeout=2)
         t.start()
         began = time.monotonic()
         try:
             t.feed(speech(10))
             output = finish(t)
             assert len(output) == 5
-            assert time.monotonic() - began > 5 * t.shutdown_timeout
+            assert 5 * t.timeout < time.monotonic() - began < t.shutdown_timeout
             assert len(mock.connections) == 6  # startup plus five successful bursts, no retry
         finally:
             t.close()
