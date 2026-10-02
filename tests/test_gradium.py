@@ -69,6 +69,8 @@ def test_quiet_speech_is_gated_with_preroll_hangover_and_source_clock(tmp_path):
             messages = mock.connections[1]["messages"]
             assert [m["type"] for m in messages][-2:] == ["flush", "end_of_stream"]
             assert mock.connections[0]["key"] == "mock-key"
+            assert messages[0]["json_config"]["language"] == "fr"
+            assert np.all(np.frombuffer(mock.connections[1]["nonzero_head"], dtype="<i2") == 98)
         finally:
             t.close()
 
@@ -359,6 +361,31 @@ def test_many_short_bursts_survive_retryable_setup_delay():
             t.close()
 
 
+def test_audio_seconds_backlog_bound_is_explicit():
+    with MockGradium() as mock:
+        t = track(mock, backlog_seconds=1)
+        t.start()
+        try:
+            with pytest.raises(GradiumError, match="audio backlog full"):
+                t.feed(speech(20))
+            assert t.backlog_samples <= 16000
+        finally:
+            t.close()
+
+
+def test_retries_back_off_before_persistent_failure():
+    with MockGradium(http_status=503) as mock:
+        t = track(mock, backoff=.04)
+        began = time.monotonic()
+        try:
+            with pytest.raises(GradiumError, match="persistent failure"):
+                t.start()
+            assert .11 <= time.monotonic() - began < 2
+            assert mock.handshakes == 3
+        finally:
+            t.close()
+
+
 def test_progress_keeps_flush_and_final_alive_beyond_idle_timeout():
     with MockGradium(plans=[[("part", 0, 2)]], delay=.005) as mock:
         t = track(mock, max_duration=2, realtime=False, timeout=.04, shutdown_timeout=.06)
@@ -371,6 +398,38 @@ def test_progress_keeps_flush_and_final_alive_beyond_idle_timeout():
             assert time.monotonic() - began > 5 * t.shutdown_timeout
             assert len(mock.connections) == 6  # startup plus five successful bursts, no retry
         finally:
+            t.close()
+
+
+def test_track_warms_default_embedder_before_capture(monkeypatch):
+    calls = []
+    monkeypatch.setattr("hark.voice.Embedder", lambda: lambda samples: calls.append(len(samples)) or np.array([1., 0.]))
+    with MockGradium() as mock:
+        t = track(mock)
+        t.cluster = OnlineCluster()
+        t.start()
+        try:
+            assert calls == [16000]
+            assert t.audio_samples == 0
+            assert finish(t) == []
+        finally:
+            t.close()
+
+
+def test_startup_wait_observes_stop():
+    import threading
+    with MockGradium(ready=False) as mock:
+        t = track(mock)
+        stop = threading.Event()
+        timer = threading.Timer(.05, stop.set)
+        timer.start()
+        began = time.monotonic()
+        try:
+            t.start(stop=stop)
+            assert time.monotonic() - began < 1
+            assert not t.thread.is_alive()
+        finally:
+            timer.join()
             t.close()
 
 

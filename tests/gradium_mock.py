@@ -58,7 +58,8 @@ class MockGradium:
 
     async def _handle(self, ws):
         index = len(self.connections)
-        rec = {"messages": [], "samples": 0, "key": ws.request.headers.get("x-api-key")}
+        rec = {"messages": [], "samples": 0, "key": ws.request.headers.get("x-api-key"),
+               "nonzero_head": None}
         self.connections.append(rec)
         plan = None
         burst_index = None
@@ -92,6 +93,8 @@ class MockGradium:
                         plan = self.plans[min(burst_index, len(self.plans) - 1)]
                     pcm = base64.b64decode(msg["audio"], validate=True)
                     assert len(pcm) == 2560
+                    if rec["nonzero_head"] is None and any(pcm):
+                        rec["nonzero_head"] = pcm[:64]
                     rec["samples"] += len(pcm) // 2
                     duration = rec["samples"] / 16000
                     while sent < len(plan) and plan[sent][2] <= duration + 1e-9:

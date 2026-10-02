@@ -1,0 +1,136 @@
+"""Repeatable isolated mutation checks; real source and hosted Gradium are untouched."""
+
+import argparse
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+
+G = "hark/gradium.py"
+C = "hark/cli.py"
+V = "hark/voice.py"
+T = "tests/test_gradium.py::"
+CT = "tests/test_gradium_cli.py::"
+VT = "tests/test_cluster.py::"
+
+# Each fault has a specific observable check, rather than a whole-suite failure.
+CASES = [
+    ("default-ear", C, 'return "gradium"\n    return "local"', 'return "local"\n    return "local"', CT + "test_default_ear_follows_importability_and_explicit_choice_is_lazy"),
+    ("linux-devices", C, 'if sys.platform != "darwin" and not (args.phone or args.file):', 'if False and not (args.phone or args.file):', CT + "test_linux_device_modes_fail_fast"),
+    ("local-capability", C, 'if args.ear == "local" and _default_ear() != "local":', 'if False and _default_ear() != "local":', CT + "test_unavailable_explicit_local_fails_before_lifecycle"),
+    ("mlx-dependency-marker", "pyproject.toml", " ; sys_platform == 'darwin'\",\n    \"numpy", '\",\n    "numpy', VT + "test_dependencies_have_portable_platform_markers"),
+    ("device-dependency-marker", "pyproject.toml", '"sounddevice>=0.5.1 ; sys_platform == \'darwin\'"', '"sounddevice>=0.5.1"', VT + "test_dependencies_have_portable_platform_markers"),
+    ("portable-file-loader", "hark/capture.py", '        audio = load_audio(self.path)', '        from mlx_audio.stt.utils import load_audio\n        audio = load_audio(self.path)', CT + "test_linux_file_cli_and_enrollment_use_portable_audio_without_mlx"),
+    ("portable-enrollment", C, '        samples = load_audio(args.file)', '        from mlx_audio.stt.utils import load_audio\n        samples = load_audio(args.file)', CT + "test_linux_file_cli_and_enrollment_use_portable_audio_without_mlx"),
+    ("key-precedence", G, 'key = os.environ.get("GRADIUM_API_KEY")', 'key = None', T + "test_key_environment_precedence_permissions_and_lines"),
+    ("key-permissions", G, 'stat.S_IMODE(info.st_mode) != 0o600', 'False', T + "test_key_environment_precedence_permissions_and_lines"),
+    ("key-one-line", G, 'if not key or any(c.isspace() for c in key):', 'if not key:', T + "test_key_environment_precedence_permissions_and_lines"),
+    ("input-format", G, '"input_format": "pcm_16000"', '"input_format": "pcm_24000"', T + "test_quiet_speech_is_gated_with_preroll_hangover_and_source_clock"),
+    ("language", G, '"json_config": {"language": self.language}', '"json_config": {"language": "en"}', T + "test_quiet_speech_is_gated_with_preroll_hangover_and_source_clock"),
+    ("api-key-header", G, 'additional_headers={"x-api-key": self.key}', 'additional_headers={"x-wrong-key": self.key}', T + "test_quiet_speech_is_gated_with_preroll_hangover_and_source_clock"),
+    ("pcm-endianness", G, 'to_pcm16(frame).tobytes()', 'to_pcm16(frame).byteswap().tobytes()', T + "test_quiet_speech_is_gated_with_preroll_hangover_and_source_clock"),
+    ("frame-size", G, 'FRAME = 1280', 'FRAME = 640', T + "test_quiet_speech_is_gated_with_preroll_hangover_and_source_clock"),
+    ("ready-model-rate", G, 'or msg["sample_rate"] <= 0', 'or msg["sample_rate"] != SAMPLE_RATE', T + "test_startup_auth_checked_even_all_silent_and_no_audio_sent"),
+    ("quiet-speech", G, 'rms=0.001, preroll=0.32', 'rms=0.01, preroll=0.32', T + "test_quiet_speech_is_gated_with_preroll_hangover_and_source_clock"),
+    ("silence-gate", G, 'voiced = float(np.sqrt(np.mean(samples * samples))) >= self.rms', 'voiced = True', T + "test_startup_auth_checked_even_all_silent_and_no_audio_sent"),
+    ("preroll", G, 'self.burst.frames.extend(frame for _, frame in self.pre)', 'self.burst.frames.extend([])', T + "test_quiet_speech_is_gated_with_preroll_hangover_and_source_clock"),
+    ("hangover", G, 'hangover=0.8, max_duration=30', 'hangover=0.08, max_duration=30', T + "test_quiet_speech_is_gated_with_preroll_hangover_and_source_clock"),
+    ("source-clock", G, 'start += burst.start / SAMPLE_RATE', 'start += 0', T + "test_phone_socket_padding_through_track_and_sink"),
+    ("gap-and-reconnect-clock", G, 'end += burst.start / SAMPLE_RATE', 'end += 0', T + "test_reconnect_between_bursts_preserves_discarded_gap"),
+    ("live-phrases", G, '>= self.phrase_seconds:', '>= 9999:', T + "test_word_phrases_are_live_and_dangling_last_word_flushes_at_eos"),
+    ("word-spacing", G, '(" " if text and word[0] not in ".,;:!?" else "")', '("" if text and word[0] not in ".,;:!?" else "")', T + "test_word_phrases_are_live_and_dangling_last_word_flushes_at_eos"),
+    ("text-fragments", G, 'pending[stream] = (text + msg["text"], start)', 'pending[stream] = (text + " " + msg["text"], start)', T + "test_quiet_speech_is_gated_with_preroll_hangover_and_source_clock"),
+    ("dangling-eos", G, 'for stream, (text, start) in pending.items():', 'for stream, (text, start) in {}.items():', T + "test_word_phrases_are_live_and_dangling_last_word_flushes_at_eos"),
+    ("flush-id", G, 'await send({"type": "flush", "flush_id": 1})', 'await send({"type": "flush", "flush_id": 2})', T + "test_final_segment_is_visible_before_burst_end_or_eos"),
+    ("retry-duplicates", G, 'if start >= replay_horizons.get(stream, 0) - 1 / SAMPLE_RATE:', 'if True:', T + "test_drop_replays_only_uncommitted_burst_and_counts_retries"),
+    ("happy-path-overlap", G, 'replay_horizons.get(stream, 0)', 'burst.horizons.get(stream, 0)', T + "test_overlapping_happy_path_segments_are_not_suppressed"),
+    ("retry-boundary-warning", G, 'log(f"gradium: replay skips segment', 'str(f"gradium: replay skips segment', T + "test_replay_boundary_change_is_suppressed_and_logged"),
+    ("retry-seconds", G, '        flushed = asyncio.Event()', '        self.sent_seconds = 0.0\n        flushed = asyncio.Event()', T + "test_drop_replays_only_uncommitted_burst_and_counts_retries"),
+    ("retry-count", G, 'for attempt in range(self.retries + 1):', 'for attempt in range(1):', T + "test_handshake_auth_is_terminal_but_refusal_retries"),
+    ("auth-terminal", G, '{1002, 1008, 401, 403}', '{1002, 401, 403}', T + "test_failures_are_bounded_and_threads_stop"),
+    ("backoff", G, 'await asyncio.sleep(self.backoff * 2**attempt)', 'await asyncio.sleep(0)', T + "test_retries_back_off_before_persistent_failure"),
+    ("audio-seconds-bound", G, 'if self.backlog_samples + count <= self.backlog_limit:', 'if True:', T + "test_audio_seconds_backlog_bound_is_explicit"),
+    ("recoverable-turn-backlog", G, 'backlog_seconds=120', 'backlog_seconds=2', T + "test_many_short_bursts_survive_retryable_setup_delay"),
+    ("flush-progress", G, 'await flushed.wait()', 'await asyncio.wait_for(flushed.wait(), self.timeout)', T + "test_progress_keeps_flush_and_final_alive_beyond_idle_timeout"),
+    ("final-progress", G, 'if duration > processed:\n                        processed = duration\n                        self.last_progress = time.monotonic()', 'if duration > processed:\n                        processed = duration', T + "test_progress_keeps_flush_and_final_alive_beyond_idle_timeout"),
+    ("startup-socket-release", G, '        await ws.close()\n        ws = None\n        self.ready.set()', '        self.ready.set()', T + "test_duration_rotation_keeps_long_speech_bounded_and_contiguous"),
+    ("duration-rotation", G, 'len(self.burst.frames) >= self.max_frames', 'False', T + "test_duration_rotation_keeps_long_speech_bounded_and_contiguous"),
+    ("character-rotation", G, 'if characters >= 1200:', 'if characters >= 99999:', T + "test_character_rotation_at_completed_segment_boundary"),
+    ("cluster-threshold-direction", V, 'scores[index] < self.threshold', 'scores[index] > self.threshold', VT + "test_cluster_returns_to_centroid_and_short_inherits"),
+    ("cluster-centroid", V, '(n * self.centroids[index] + vector) / (n + 1)', 'vector', VT + "test_cluster_returns_to_centroid_and_short_inherits"),
+    ("short-inheritance", V, 'if len(samples) < self.minimum_duration * 16000:', 'if False:', VT + "test_cluster_returns_to_centroid_and_short_inherits"),
+    ("onnx-threads", V, 'min(4, os.cpu_count() or 1)', 'os.cpu_count() or 1', VT + "test_embedder_caps_cpu_threads"),
+    ("warm-before-capture", G, '            self.cluster.warm()', '            pass', T + "test_track_warms_default_embedder_before_capture"),
+    ("embedding-fallback", G, '                self.cluster_failed = True', '                raise', T + "test_cluster_failure_preserves_all_text_and_logs_once"),
+    ("old-raw-audio", V, '        self.file.seek(lo * 2)', '        self.file.seek(0, 2)', VT + "test_archive_keeps_old_audio_across_model_delay"),
+    ("voice-naming", C, '            matcher.finished(tracks_by_name[u.track], u)', '            pass', 'tests/test_cli.py::test_voice_matching_failure_logs_once_and_preserves_lines'),
+    ("fixed-call-mic", G, 'slot = self.fixed_speaker or self.last_speaker', 'slot = self.last_speaker', T + "test_fixed_call_mic_label_never_clusters"),
+    ("missing-key-ended", C, '                        sink.close(f"ended {datetime.now():%H:%M:%S}")', '                        sink.close("unfinished")', CT + "test_cli_startup_failure_writes_failed_lifecycle_comment_ended_and_mirrors"),
+    ("failure-comment", C, '                            sink.comment("gradium " + " ".join(str(capture_error).split()))', '                            pass', CT + "test_cli_startup_failure_writes_failed_lifecycle_comment_ended_and_mirrors"),
+    ("failed-lifecycle", C, 'lifecycle.update("failed", error=', 'lifecycle.update("ended", error=', CT + "test_cli_startup_failure_writes_failed_lifecycle_comment_ended_and_mirrors"),
+    ("mirror-startup-failure", C, 'if args.ear == "gradium" and mirror_target:', 'if False and mirror_target:', CT + "test_cli_startup_failure_writes_failed_lifecycle_comment_ended_and_mirrors"),
+    ("preserve-completed-on-failure", G, '    def flush(self, force=False):\n        self._collect()', '    def flush(self, force=False):\n        self.check()\n        self._collect()', CT + "test_cli_preserves_committed_text_on_later_persistent_failure"),
+    ("metering-default", C, 'dest="gradium_metering", action="store_false"', 'dest="gradium_metering", action="store_false", default=False', CT + "test_cli_startup_failure_writes_failed_lifecycle_comment_ended_and_mirrors"),
+    ("metering-schema", G, 'json.load(response)["remaining_credits"]', 'json.load(response)["credits_left"]', CT + "test_metering_uses_exact_documented_endpoint_schema_and_header"),
+    ("metering-endpoint", G, 'https://api.gradium.ai/api/usages/credits', 'https://api.gradium.ai/api/credits', CT + "test_metering_uses_exact_documented_endpoint_schema_and_header"),
+    ("linux-signal-threads", C, 'self.portable = sys.platform != "darwin"', 'self.portable = False', CT + "test_real_cli_subprocess_sigterm_after_blas_threads_writes_ended", "linux"),
+]
+
+
+def run_tests(root, targets, timeout=40):
+    env = dict(os.environ, PYTHONPATH=str(root), PYTHONDONTWRITEBYTECODE="1", GRADIUM_API_KEY="mutation-local-only")
+    start = time.monotonic()
+    try:
+        result = subprocess.run([sys.executable, "-m", "pytest", "-q", *targets], cwd=root, env=env,
+                                capture_output=True, text=True, timeout=timeout)
+        return {"returncode": result.returncode, "seconds": round(time.monotonic() - start, 2),
+                "output": (result.stdout + result.stderr)[-5000:]}
+    except subprocess.TimeoutExpired:
+        return {"returncode": None, "seconds": round(time.monotonic() - start, 2), "output": "test timed out"}
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--receipt", type=Path, default=Path("/tmp/hark-gradium-mutations.json"))
+    parser.add_argument("--only", help="comma-separated mutation names")
+    args = parser.parse_args()
+    root = Path(__file__).resolve().parents[1]
+    selected = args.only.split(",") if args.only else None
+    report = {"platform": sys.platform, "python": sys.version, "commit": subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=root, text=True).strip(), "baseline": run_tests(root, ["tests"]), "mutations": []}
+    if report["baseline"]["returncode"] == 0:
+        for case in CASES:
+            name, file, old, new, test, *platform = case
+            if selected and name not in selected:
+                continue
+            entry = {"name": name, "file": file, "test": test, "old": old, "new": new}
+            if platform and sys.platform != platform[0]:
+                entry.update(status="platform-skipped", required_platform=platform[0])
+            elif (root / file).read_text().count(old) != 1:
+                entry.update(status="invalid-mutation", occurrences=(root / file).read_text().count(old))
+            else:
+                with tempfile.TemporaryDirectory(prefix="hark-mutation-") as tmp:
+                    copy = Path(tmp)
+                    for directory in ["hark", "tests", "scripts"]:
+                        shutil.copytree(root / directory, copy / directory,
+                                        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+                    shutil.copy(root / "pyproject.toml", copy / "pyproject.toml")
+                    target = copy / file
+                    target.write_text(target.read_text().replace(old, new, 1))
+                    entry.update(run_tests(copy, [test]))
+                    entry["status"] = "killed" if entry["returncode"] == 1 else "survived" if entry["returncode"] == 0 else "inconclusive"
+            report["mutations"].append(entry)
+            print(f"{name}: {entry['status']}", flush=True)
+            args.receipt.write_text(json.dumps(report, indent=2) + "\n")
+    args.receipt.write_text(json.dumps(report, indent=2) + "\n")
+    print(f"receipts: {args.receipt}")
+    return 0 if report["baseline"]["returncode"] == 0 and all(
+        m["status"] in {"killed", "platform-skipped"} for m in report["mutations"]) else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

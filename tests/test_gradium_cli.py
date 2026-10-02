@@ -19,6 +19,15 @@ from hark.voice import OnlineCluster
 from test_gradium import speech, wait
 
 
+def prohibit_mlx(monkeypatch):
+    real_import = builtins.__import__
+    def no_mlx(name, *args, **kwargs):
+        if name == "mlx" or name.startswith("mlx.") or name.startswith("mlx_audio"):
+            raise AssertionError("Gradium imported MLX")
+        return real_import(name, *args, **kwargs)
+    monkeypatch.setattr(builtins, "__import__", no_mlx)
+
+
 def configure(monkeypatch, tmp_path, mock=None):
     monkeypatch.setattr(cli, "HOME", tmp_path)
     monkeypatch.setenv("GRADIUM_API_KEY", "mock-key")
@@ -76,12 +85,7 @@ def test_real_phone_cli_emits_live_and_handles_signal_without_mlx(tmp_path, monk
     failures = []
     with MockGradium(plans=[[("live phone", 0, 2)]]) as mock:
         metered = configure(monkeypatch, tmp_path, mock)
-        real_import = builtins.__import__
-        def no_mlx(name, *args, **kwargs):
-            if name == "mlx" or name.startswith("mlx.") or name.startswith("mlx_audio"):
-                raise AssertionError("Gradium imported MLX")
-            return real_import(name, *args, **kwargs)
-        monkeypatch.setattr(builtins, "__import__", no_mlx)
+        prohibit_mlx(monkeypatch)
         monkeypatch.setattr(cli.sys, "platform", "linux")
         out = tmp_path / "phone.txt"
         def phone():
@@ -114,9 +118,41 @@ def test_real_phone_cli_emits_live_and_handles_signal_without_mlx(tmp_path, monk
         assert not (tmp_path / "phone.sock").exists()
 
 
+def test_cli_preserves_committed_text_on_later_persistent_failure(tmp_path, monkeypatch):
+    import tempfile
+    home = Path(tempfile.mkdtemp(prefix="hkf"))
+    failures = []
+    with MockGradium(plans=[[("kept", 0, 2)]], error=("down", 1011), error_from=2) as mock:
+        configure(monkeypatch, home, mock)
+        monkeypatch.setattr(cli.sys, "platform", "linux")
+        def phone():
+            try:
+                wait(lambda: (home / "meeting.json").exists() and
+                     json.loads((home / "meeting.json").read_text())["phase"] == "live")
+                client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+                client.connect(str(home / "phone.sock"))
+                samples = np.concatenate([speech(2), np.zeros(16000, np.float32), speech(2)])
+                client.sendall(to_pcm16(samples).tobytes())
+                client.close()
+            except BaseException as error:
+                failures.append(error)
+        sender = threading.Thread(target=phone)
+        sender.start()
+        assert cli.main(["--ear", "gradium", "--phone", "-o", str(home / "meeting.txt")]) == 1
+        sender.join(3)
+        assert not failures and not sender.is_alive()
+        text = (home / "meeting.txt").read_text()
+        assert text.count("kept") == 1
+        lines = text.splitlines()
+        assert lines[-2].startswith("# gradium ") and lines[-1].startswith("# ended ")
+        state = json.loads((home / "meeting.json").read_text())
+        assert state["phase"] == "failed" and "persistent failure" in state["error"]
+
+
 def test_linux_file_cli_and_enrollment_use_portable_audio_without_mlx(tmp_path, monkeypatch):
     with MockGradium(plans=[[("file", 0, 2)]]) as mock:
         configure(monkeypatch, tmp_path, mock)
+        prohibit_mlx(monkeypatch)
         monkeypatch.setattr(cli.sys, "platform", "linux")
         audio = tmp_path / "audio.wav"
         recorder = WavRecorder(audio)
@@ -147,6 +183,8 @@ def test_default_ear_follows_importability_and_explicit_choice_is_lazy(monkeypat
 @pytest.mark.parametrize("arguments", [[], ["--room"], ["--ear", "local", "--room"]])
 def test_linux_device_modes_fail_fast(arguments, monkeypatch):
     monkeypatch.setattr(cli.sys, "platform", "linux")
+    monkeypatch.setattr(cli, "MicSource", lambda *a: pytest.fail("device opened"))
+    monkeypatch.setattr(cli, "SystemSource", lambda *a: pytest.fail("device opened"))
     with pytest.raises(SystemExit) as error:
         cli.main(["--ear", "gradium"] + arguments)
     assert error.value.code == 2
@@ -170,6 +208,7 @@ def test_metering_uses_exact_documented_endpoint_schema_and_header(monkeypatch):
 def test_unavailable_explicit_local_fails_before_lifecycle(tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(cli, "_default_ear", lambda: "gradium")
     monkeypatch.setattr(cli, "HOME", tmp_path)
+    monkeypatch.setattr(cli, "load_models", lambda *a: pytest.fail("models loaded"))
     with pytest.raises(SystemExit) as error:
         cli.main(["--ear", "local", "--phone"])
     assert error.value.code == 2

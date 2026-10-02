@@ -36,6 +36,46 @@ def test_archive_keeps_old_audio_across_model_delay():
     archive.close()
 
 
+def test_embedder_caps_cpu_threads(monkeypatch):
+    from types import SimpleNamespace
+    import sys
+    from hark import voice
+
+    options = []
+    def session(path, *, sess_options, providers):
+        options.append(sess_options)
+        assert providers == ["CPUExecutionProvider"]
+        return SimpleNamespace(get_inputs=lambda: [SimpleNamespace(name="features")])
+    monkeypatch.setitem(sys.modules, "onnxruntime", SimpleNamespace(SessionOptions=SimpleNamespace,
+                                                                  InferenceSession=session))
+    monkeypatch.setattr(voice, "_model_path", lambda: "local-model")
+    monkeypatch.setattr(voice.os, "cpu_count", lambda: 24)
+    voice.Embedder()
+    assert options[0].intra_op_num_threads == 4
+    assert options[0].inter_op_num_threads == 1
+
+
+def test_cluster_warms_model_without_changing_centroids(monkeypatch):
+    calls = []
+    monkeypatch.setattr("hark.voice.Embedder", lambda: lambda x: calls.append(len(x)) or np.array([1., 0.]))
+    c = OnlineCluster()
+    c.warm()
+    assert calls == [16000]
+    assert c.centroids == []
+    assert c.assign(np.ones(32000)) == "S1"
+
+
+def test_dependencies_have_portable_platform_markers():
+    import tomllib
+    from pathlib import Path
+
+    metadata = tomllib.loads(Path("pyproject.toml").read_text())
+    deps = metadata["project"]["dependencies"]
+    assert all("sys_platform == 'darwin'" in dep for dep in deps if dep.startswith(("mlx-audio", "sounddevice")))
+    assert any(dep.startswith("websockets") for dep in deps)
+    assert any(dep.startswith("huggingface-hub") for dep in deps)
+
+
 def test_portable_loader_replays_pcm_exactly(tmp_path):
     samples = np.arange(-16000, 16000, dtype=np.float32) / 32768
     recorder = WavRecorder(tmp_path / "track.wav")
