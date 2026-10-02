@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tests"))
 
 import numpy as np
 from gradium_mock import MockGradium
-from hark import cli
+from hark import cli, gradium
 from hark.gradium import GradiumTrack
 from hark.voice import OnlineCluster
 
@@ -31,7 +31,7 @@ def main():
     os.environ["HARK_DIR"] = str(home)
     cli.HOME = home
     os.environ["GRADIUM_API_KEY"] = "local-mock-only"
-    cli.credits_left = lambda key: 45000
+    gradium.credits_left = lambda key: 45000
     # Initialize numerical-library threads before installing the CLI signal watcher.
     np.dot(np.ones((256, 256)), np.ones((256, 256)))
     task_dir = Path("/proc/self/task")
@@ -42,7 +42,7 @@ def main():
             cluster = OnlineCluster(lambda _: np.array([1., 0.])) if args.synthetic_cluster else None
             options = {"phrase_seconds": 2} if args.synthetic_cluster else {}
             return GradiumTrack(name, **kwargs, url=mock.url, cluster=cluster, **options)
-        cli.GradiumTrack = make_track
+        gradium.GradiumTrack = make_track
         options = ["--file", str(args.file)] if args.file else ["--phone", "--launch", "smoke"]
         result = cli.main(["--ear", "gradium", "-o", str(home / "meeting.txt")] + options)
         print(json.dumps({"connections": len(mock.connections),

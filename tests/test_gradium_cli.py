@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 
 from gradium_mock import MockGradium
-from hark import cli
+from hark import cli, gradium
 from hark.capture import WavRecorder, to_pcm16
 from hark.gradium import GradiumError, GradiumTrack, credits_left
 from hark.voice import OnlineCluster
@@ -32,13 +32,13 @@ def configure(monkeypatch, tmp_path, mock=None):
     monkeypatch.setattr(cli, "HOME", tmp_path)
     monkeypatch.setenv("GRADIUM_API_KEY", "mock-key")
     metered = []
-    monkeypatch.setattr(cli, "credits_left", lambda key: metered.append(key) or (900 - len(metered)))
+    monkeypatch.setattr(gradium, "credits_left", lambda key: metered.append(key) or (900 - len(metered)))
     if mock:
         def make_track(name, **kwargs):
             return GradiumTrack(name, **kwargs, url=mock.url, timeout=.3, shutdown_timeout=3, phrase_seconds=2,
                                 backoff=.01, idle_seconds=.8,
                                 cluster=OnlineCluster(lambda _: np.array([1., 0.])))
-        monkeypatch.setattr(cli, "GradiumTrack", make_track)
+        monkeypatch.setattr(gradium, "GradiumTrack", make_track)
     return metered
 
 
@@ -65,7 +65,7 @@ def test_cli_startup_failure_writes_failed_lifecycle_comment_ended_and_mirrors(
         if failure == "missing-key":
             def missing():
                 raise GradiumError("missing API key")
-            monkeypatch.setattr(cli, "api_key", missing)
+            monkeypatch.setattr(gradium, "api_key", missing)
         out = tmp_path / "failure.txt"
         assert cli.main(["--ear", "gradium", "--launch", "test", "--phone", "-o", str(out), "--mirror", "h:notes"]) == 1
         lines = out.read_text().splitlines()

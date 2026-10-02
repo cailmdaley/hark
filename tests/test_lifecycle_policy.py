@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from hark import cli
+from hark import cli, gradium
 
 
 @pytest.fixture
@@ -20,8 +20,8 @@ def capture(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "HOME", tmp_path)
     monkeypatch.setenv("HARK_DIR", str(tmp_path))
     monkeypatch.setattr(cli, "_default_ear", lambda: "local")
-    monkeypatch.setattr(cli, "api_key", lambda: "local-only")
-    monkeypatch.setattr(cli, "credits_left", lambda key: 900)
+    monkeypatch.setattr(gradium, "api_key", lambda: "local-only")
+    monkeypatch.setattr(gradium, "credits_left", lambda key: 900)
     monkeypatch.setattr(cli, "load_models", lambda latency: (None, None))
     monkeypatch.setattr(cli, "flush_tracks", lambda tracks, force=False: [])
     state = SimpleNamespace(watchers=[], starts=0, signal=signal.SIGTERM)
@@ -91,7 +91,7 @@ def capture(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "PhoneSource", Source)
     monkeypatch.setattr(cli, "FileSource", File)
     monkeypatch.setattr(cli, "Track", Track)
-    monkeypatch.setattr(cli, "GradiumTrack", Track)
+    monkeypatch.setattr(gradium, "GradiumTrack", Track)
     return state
 
 

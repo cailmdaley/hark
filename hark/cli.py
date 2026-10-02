@@ -38,7 +38,6 @@ from pathlib import Path
 
 from .capture import (SAMPLE_RATE, FileSource, MicSource, PhoneSource, SystemSource, WavRecorder,
                       load_audio, log, log_to)
-from .gradium import GradiumError, GradiumTrack, api_key, credits_left
 from .health import QuietWatch
 from .masking import MaskPolicy
 from .mirror import TranscriptMirror
@@ -256,6 +255,8 @@ def main(argv=None):
                     help="don't keep the live tracks as <stem>.<track>.wav beside the transcript")
     args = ap.parse_args(argv)
     args.ear = args.ear or _default_ear()
+    if args.ear == "gradium":
+        from . import gradium
     if not _device_capture_available() and not (args.phone or args.file):
         ap.error("call/room capture requires macOS audio devices; on Linux use --phone or --file")
     if args.ear == "local" and _default_ear() != "local":
@@ -348,9 +349,9 @@ def main(argv=None):
         try:
             if args.ear == "gradium":
                 open_sink()
-                key = api_key()
+                key = gradium.api_key()
                 if args.gradium_metering:
-                    credits = credits_left(key)
+                    credits = gradium.credits_left(key)
                 log(f"gradium: sent 0.00 s, credits remaining: {credits}")
             if not stop.is_set():
                 if args.file:
@@ -376,7 +377,7 @@ def main(argv=None):
 
             if not stop.is_set():
                 mask = MaskPolicy.parse(args.speaker_mask) if args.speaker_mask != "shared" else None
-                tracks = [(src, GradiumTrack(src.name, key=key, language=args.lang,
+                tracks = [(src, gradium.GradiumTrack(src.name, key=key, language=args.lang,
                                              fixed_speaker="me" if src.name == "mic" and not args.room else None,
                                              realtime=live or args.realtime)
                            if args.ear == "gradium" else
@@ -507,7 +508,7 @@ def main(argv=None):
                         for track in all_tracks:
                             track.close()
                         if key and args.gradium_metering:
-                            credits = credits_left(key)
+                            credits = gradium.credits_left(key)
                         log(f"gradium: sent {ear_state()['seconds']:.2f} s, credits remaining: {credits}")
                         if lifecycle:
                             lifecycle.update(ear=ear_state())
