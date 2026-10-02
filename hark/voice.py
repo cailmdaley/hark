@@ -11,6 +11,18 @@ import numpy as np
 MODEL_REPO = "soniqo/WeSpeaker-ResNet34-LM-ONNX"
 MODEL_REVISION = "9df39b49edc6f896ebc928e9d14832936d60d9f6"
 MODEL_FILE = "wespeaker-resnet34.onnx"
+VOICE_THRESHOLD = 0.55
+VOICE_MARGIN = 0.21
+
+
+def _voice_claim(scores, threshold=VOICE_THRESHOLD, margin=VOICE_MARGIN):
+    """Claim a bank identity only above the floor and clear of the runner-up."""
+    ranked = sorted(((score, name) for name, score in scores.items()), reverse=True)
+    if not ranked:
+        return None
+    best, name = ranked[0]
+    second = ranked[1][0] if len(ranked) > 1 else 0.0
+    return name if best >= threshold and best - second >= margin else None
 
 
 def _model_path():
@@ -56,14 +68,19 @@ class OnlineCluster:
 
     Clips shorter than `minimum_duration` inherit the last slot without updating it.
     A cosine below `threshold` creates a new slot; embeddings are unit-normalized.
+    Confident enrolled identities reuse their anchored slot before centroid matching.
+    Conflicting confident identities cannot share a slot; weak claims use centroids.
+    Identity anchors affect slots only, not transcript names.
     """
 
-    def __init__(self, embedder=None, threshold=0.55, minimum_duration=1.8):
+    def __init__(self, embedder=None, threshold=0.55, minimum_duration=1.8, voices=None):
         self.embedder = embedder
         self.threshold = threshold
         self.minimum_duration = minimum_duration
         self.centroids = []
         self.counts = []
+        self.voices = voices or {}
+        self.identities = []  # Bank identity or None for each centroid; never a display name.
         self.previous = "S1"
 
     def warm(self):
@@ -81,16 +98,28 @@ class OnlineCluster:
         if not np.isfinite(vector).all() or norm < 1e-12:
             raise ValueError("invalid speaker embedding")
         vector = vector / norm
-        scores = [float(np.dot(vector, c / np.linalg.norm(c))) for c in self.centroids]
-        index = int(np.argmax(scores)) if scores else 0
-        if not scores or scores[index] < self.threshold:
+        identity = _voice_claim({name: float(np.dot(vector, voice))
+                                 for name, voice in self.voices.items()})
+        index = next((i for i, name in enumerate(self.identities)
+                      if identity is not None and name == identity), None)
+        if index is None:
+            scores = [float(np.dot(vector, c / np.linalg.norm(c))) for c in self.centroids]
+            candidates = [i for i, name in enumerate(self.identities)
+                          if identity is None or name in (None, identity)]
+            index = max(candidates, key=lambda i: scores[i], default=None)
+            if index is not None and scores[index] < self.threshold:
+                index = None
+        if index is None:
             index = len(self.centroids)
             self.centroids.append(vector.copy())
             self.counts.append(1)
+            self.identities.append(identity)
         else:
             n = self.counts[index]
             self.centroids[index] = (n * self.centroids[index] + vector) / (n + 1)
             self.counts[index] += 1
+            if identity is not None:
+                self.identities[index] = identity
         self.previous = f"S{index + 1}"
         return self.previous
 
@@ -163,7 +192,7 @@ class VoiceMatcher:
     changed are left alone, and their names are never handed to another slot.
     """
 
-    def __init__(self, voices, sink, embedder=None, threshold=0.55, margin=0.21):
+    def __init__(self, voices, sink, embedder=None, threshold=VOICE_THRESHOLD, margin=VOICE_MARGIN):
         self.voices, self.sink = voices, sink
         self.embedder = embedder or Embedder()
         self.threshold, self.margin = threshold, margin
@@ -178,10 +207,7 @@ class VoiceMatcher:
         return self.sink.names.get(slot) == self.given.get(slot)
 
     def _claim(self, scores):
-        ranked = sorted(((score, name) for name, score in scores.items()), reverse=True)
-        best, name = ranked[0]
-        second = ranked[1][0] if len(ranked) > 1 else 0.0
-        return name if best >= self.threshold and best - second >= self.margin else None
+        return _voice_claim(scores, self.threshold, self.margin)
 
     def finished(self, track, utterance):
         slot = utterance.speaker

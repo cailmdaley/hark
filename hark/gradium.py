@@ -166,13 +166,13 @@ class GradiumTrack:
     def __init__(self, name, *, key, language=None, cluster=None, fixed_speaker=None, url=URL,
                  rms=0.001, preroll=0.32, hangover=0.8, max_duration=58,
                  queue_size=None, backlog_seconds=120, retries=2, backoff=0.5, timeout=8,
-                 shutdown_timeout=30, realtime=True, phrase_seconds=4.0, quiet_timeout=60):
+                 shutdown_timeout=30, realtime=True, phrase_seconds=4.0, quiet_timeout=60, voices=None):
         self.name, self.key, self.url = name, key, url
         self.fixed_speaker = fixed_speaker
         self.language = (language or "any").lower().split("-")[0]
         if self.language not in {"en", "fr", "any"}:
             raise GradiumError("language must be en, fr or any")
-        self.cluster = cluster if cluster is not None else OnlineCluster(minimum_duration=4)
+        self.cluster = cluster if cluster is not None else OnlineCluster(minimum_duration=4, voices=voices)
         self.rms, self.hangover = rms, max(1, round(hangover * SAMPLE_RATE / FRAME))
         # Reserve decoder-tail headroom in approximately minute-long requests.
         self.max_frames = max(1, int(max_duration * SAMPLE_RATE / FRAME))

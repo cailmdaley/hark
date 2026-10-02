@@ -394,19 +394,19 @@ def main(argv=None):
                     return 130
 
             if not stop.is_set():
+                import numpy as np
+
+                voices = ({path.stem: np.load(path) for path in (HOME / "voices").glob("*.npy")}
+                          if (HOME / "voices").exists() else {})
                 mask = MaskPolicy.parse(args.speaker_mask) if args.speaker_mask != "shared" else None
                 tracks = [(src, gradium.GradiumTrack(src.name, key=key, language=args.lang,
                                              fixed_speaker="me" if src.name == "mic" and not args.room else None,
-                                             realtime=live or args.realtime)
+                                             realtime=live or args.realtime, voices=voices)
                            if args.ear == "gradium" else
                            Track(src.name, asr, diar, speaker_label=label,
                                  language=args.lang, gap=args.gap, mask=mask))
                           for src, label in sources]
                 all_tracks = [track for _, track in tracks]
-                import numpy as np
-
-                voices = ({path.stem: np.load(path) for path in (HOME / "voices").glob("*.npy")}
-                          if (HOME / "voices").exists() else {})
                 if not voices and args.ear == "local":
                     for track in all_tracks:
                         track.audio = None
