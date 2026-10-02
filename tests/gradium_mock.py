@@ -14,7 +14,8 @@ class MockGradium:
                  finish=True, delay=0, port=0, error_from=0, http_status=None,
                  stall_setup=None, dangling_last=False, stalled_flush=False,
                  dangling_words=(), flush_delay=0, finish_delay=0, stalled_eos=False,
-                 anomalies=(), late_end_after_flush=False):
+                 anomalies=(), late_end_after_flush=False, idle_timeout=None, steps=True):
+        self.idle_timeout, self.steps = idle_timeout, steps
         self.late_end_after_flush = late_end_after_flush
         self.anomalies = anomalies
         self.plans = plans or [[("Hello", 0.0, 2.0), ("world.", 2.0, 4.0)]]
@@ -91,7 +92,13 @@ class MockGradium:
                 return
             await ws.send(json.dumps({"type": "ready", "sample_rate": 24000, "frame_size": 1920,
                                       "delay_in_frames": 10}))
-            async for raw in ws:
+            while True:
+                try:
+                    raw = await asyncio.wait_for(ws.recv(), self.idle_timeout)
+                except TimeoutError:
+                    rec['idle_closed'] = True
+                    await ws.close(code=1011, reason='provider idle timeout')
+                    return
                 msg = json.loads(raw)
                 rec["messages"].append(msg)
                 if self.delay:
@@ -126,8 +133,9 @@ class MockGradium:
                             await ws.send(json.dumps({"type": "end_text", "stop_s": end,
                                                       "stream_id": stream[0] if stream else 0}))
                         sent += 1
-                    await ws.send(json.dumps({"type": "step", "total_duration_s": duration,
-                                              "vad": [{"horizon_s": 2, "inactivity_prob": 0.9}]}))
+                    if self.steps:
+                        await ws.send(json.dumps({"type": "step", "total_duration_s": duration,
+                                                  "vad": [{"horizon_s": 2, "inactivity_prob": 0.9}]}))
                     if burst_index == 0 and self.drop_first_at and duration >= self.drop_first_at:
                         await ws.close(code=1011, reason="injected drop")
                         return

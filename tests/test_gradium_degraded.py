@@ -77,17 +77,19 @@ def test_bounded_backlog_drops_only_stt_and_offline_final_cancels_30_second_back
             t.close()
 
 
-def test_pending_words_survive_abort_during_backoff():
+def test_pending_words_survive_acknowledged_drop_without_backoff():
     with MockGradium(plans=[[('pending words', 0, 2)]], dangling_last=True, drop_first_at=2.4) as mock:
         t = track(mock, backoff=30)
         t.start()
         try:
             t.feed(speech(2.4))
-            wait(lambda: t.degraded)
+            wait(lambda: t.results.qsize() >= 2)
             began = time.monotonic()
             t.abort()
             assert time.monotonic() - began < .5
             assert [u.text for u in t.flush(force=True)] == ['pending words']
+            assert t.take_notices() == []
+            assert len(mock.connections) == 2
         finally:
             t.close()
 

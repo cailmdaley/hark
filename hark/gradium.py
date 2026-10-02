@@ -101,9 +101,23 @@ class _Request:
     wire_samples: int = 0
     done: bool = False
     rotate: bool = False
-    horizons: dict = field(default_factory=dict)  # Committed cloud-clock ends by stream.
+    horizons: dict = field(default_factory=dict)  # Committed original cloud samples by stream.
+    acknowledged: int = 0  # Incremental processing, not necessarily finalized text.
+    committed: int = 0  # A flush commits all streams, including quiet decoder tails.
+    lock: object = field(default_factory=threading.RLock)
 
-    def append(self, source, frame, valid):
+    @property
+    def replay_start(self):
+        return max(self.committed, min(self.horizons.values(), default=0))
+
+    def retire_if_committed(self):
+        with self.lock:
+            if any(run.cloud + run.count > self.replay_start for run in self.runs):
+                return False
+            self.rotate = self.done = True
+            return True
+
+    def map(self, source, valid):
         cloud = self.wire_samples
         if (self.runs and self.runs[-1].cloud + self.runs[-1].count == cloud
                 and self.runs[-1].source + self.runs[-1].count == source):
@@ -112,8 +126,17 @@ class _Request:
             self.runs.append(_Mapping(cloud, source, valid))
         self.samples += valid
         self.wire_samples += FRAME
+
+    def append(self, source, frame, valid):
         # Publish mapping before making the frame available to the sender.
+        self.map(source, valid)
         self.frames.append(frame)
+
+    def frame_span(self, cloud):
+        for run in self.runs:
+            if run.cloud <= cloud < run.cloud + run.count:
+                return run.source + cloud - run.cloud, min(FRAME, run.cloud + run.count - cloud)
+        raise GradiumError('audio frame has no valid source mapping')
 
     def project(self, start, end):
         """Intersect a cloud interval with valid samples, excluding omitted source gaps."""
@@ -279,22 +302,30 @@ class GradiumTrack:
             self._end_request()
 
     def _append(self, position, samples, valid):
-        if self.request and self.request.wire_samples >= self.max_frames * FRAME:
+        if self.request and (self.request.done or self.request.rotate
+                             or self.request.wire_samples >= self.max_frames * FRAME):
             self._end_request()
         if not self._reserve(FRAME):
             self._end_request()
             self._miss(position, valid)
             return
-        if self.request is None:
-            request = _Request(position)
-            if not self._enqueue(request):
-                with self.backlog_lock:
-                    self.backlog_samples -= FRAME
-                self._miss(position, valid)
-                return
-            self.request = request
+        while self.request is not None:
+            request = self.request
+            with request.lock:
+                if not request.done and not request.rotate:
+                    request.append(position, samples, valid)
+                    self._report_missed()
+                    return
+            self._end_request()
+        request = _Request(position)
+        request.append(position, samples, valid)
+        if not self._enqueue(request):
+            with self.backlog_lock:
+                self.backlog_samples -= FRAME
+            self._miss(position, valid)
+            return
+        self.request = request
         self._report_missed()
-        self.request.append(position, samples, valid)
 
     def _speech_flush(self):
         if self.request and self.request.frames and self.request.frames[-1] is not None:
@@ -302,8 +333,9 @@ class GradiumTrack:
 
     def _end_request(self):
         if self.request:
-            self._speech_flush()
-            self.request.done = True
+            with self.request.lock:
+                self._speech_flush()
+                self.request.done = True
             self.request = None
 
     def _reserve(self, count):
@@ -536,6 +568,12 @@ class GradiumTrack:
                         ws = await self._open()
                     try:
                         return await self._session(ws, burst)
+                    except AuthenticationError:
+                        raise
+                    except Exception:
+                        # Retiring under the append lock keeps capture racing a drop intact.
+                        if not burst.retire_if_committed():
+                            raise
                     finally:
                         await ws.close()
                         ws = None
@@ -562,6 +600,11 @@ class GradiumTrack:
         limited = False
         characters = messages = 0
         replay_horizons = burst.horizons.copy()
+        replay_start = burst.replay_start
+        # Each connection has its own zero-based wire clock. Neither map trims
+        # the original request, which accepted results may still be projecting.
+        view = _Request(burst.start)
+        clock = _Request(0)  # Connection samples -> original request samples.
         processed = 0.0
         sent_wire = submitted = settled = 0
         flush_id = 0
@@ -581,14 +624,14 @@ class GradiumTrack:
         async def boundary():
             while not self.cancel.is_set():
                 try:
-                    self.results.put_nowait((burst, None))
+                    self.results.put_nowait((view, None))
                     return
                 except queue.Full:
                     await asyncio.sleep(0.01)
 
         async def sender():
             nonlocal sent_wire, submitted, flush_id, pending_flush
-            i = 0
+            i = original_wire = flushed_wire = 0
             while not self.cancel.is_set():
                 if i < len(burst.frames):
                     frame = burst.frames[i]
@@ -596,16 +639,26 @@ class GradiumTrack:
                         # A new input/flush gets a fresh budget after legitimate idle.
                         progress()
                     if frame is None:
-                        flush_id += 1
-                        pending_flush = flush_id
-                        flushed.clear()
-                        await send({"type": "flush", "flush_id": flush_id})
-                        await flushed.wait()
+                        if sent_wire > flushed_wire:
+                            flush_id += 1
+                            pending_flush = flush_id
+                            flushed.clear()
+                            await send({"type": "flush", "flush_id": flush_id})
+                            await flushed.wait()
+                            flushed_wire = sent_wire
                     else:
-                        sent_wire += FRAME
-                        submitted = min(sent_wire, burst.samples)
-                        await send({"type": "audio", "audio": base64.b64encode(to_pcm16(frame).tobytes()).decode()})
-                        self.sent_seconds += FRAME / SAMPLE_RATE
+                        source, valid = burst.frame_span(original_wire)
+                        trim = min(valid, max(0, replay_start - original_wire))
+                        if trim < valid:
+                            valid -= trim
+                            view.map(source + trim, valid)
+                            clock.map(original_wire + trim, valid)
+                            submitted = sent_wire + valid
+                            sent_wire += FRAME
+                            payload = np.pad(frame[trim:trim + valid], (0, FRAME - valid))
+                            await send({"type": "audio", "audio": base64.b64encode(to_pcm16(payload).tobytes()).decode()})
+                            self.sent_seconds += FRAME / SAMPLE_RATE
+                        original_wire += FRAME
                     i += 1
                     await asyncio.sleep(0)
                 elif burst.done:
@@ -626,11 +679,14 @@ class GradiumTrack:
             start = min(max(start if math.isfinite(start) else 0, 0), duration)
             end = min(max(end if math.isfinite(end) else duration, start), duration)
             progress()
-            if start >= replay_horizons.get(stream, 0) - 1 / SAMPLE_RATE:
+            original_start, original_end, _ = clock.project(start, end)
+            original_start = round(original_start * SAMPLE_RATE)
+            original_end = round(original_end * SAMPLE_RATE)
+            if original_start >= replay_horizons.get(stream, 0) - 1:
                 while True:
                     try:
-                        self.results.put_nowait((burst, [(text, start, end, stream)]))
-                        burst.horizons[stream] = max(end, burst.horizons.get(stream, 0))
+                        self.results.put_nowait((view, [(text, start, end, stream)]))
+                        burst.horizons[stream] = max(original_end, burst.horizons.get(stream, 0))
                         if healthy:
                             self._degrade(False)
                         return
@@ -640,7 +696,7 @@ class GradiumTrack:
                         await asyncio.sleep(0.01)
             else:
                 log(f"gradium: replay skips segment {start:.2f}–{end:.2f} before committed horizon "
-                    f"{replay_horizons[stream]:.2f}")
+                    f"{replay_horizons[stream] / SAMPLE_RATE:.2f}")
 
         async def receiver():
             nonlocal characters, messages, processed, settled, pending_flush, limited
@@ -652,6 +708,7 @@ class GradiumTrack:
                 if kind == "text":
                     if limited:
                         continue
+                    burst.horizons.setdefault(stream, 0)
                     characters += len(msg["text"])
                     messages += 1
                     if characters >= 1200:
@@ -693,6 +750,8 @@ class GradiumTrack:
                     if duration > processed:
                         processed = duration
                         settled = max(settled, min(sent_wire, round(duration * SAMPLE_RATE)))
+                        _, end, _ = clock.project(0, settled / SAMPLE_RATE)
+                        burst.acknowledged = max(burst.acknowledged, round(end * SAMPLE_RATE))
                         progress()
                 elif kind == "flushed" and pending_flush is not None and msg.get("flush_id") == pending_flush:
                     progress()
@@ -703,6 +762,9 @@ class GradiumTrack:
                         await publish(text, start, submitted / SAMPLE_RATE, slot)
                         inferred[slot] = start
                     pending.clear()
+                    _, end, _ = clock.project(0, sent_wire / SAMPLE_RATE)
+                    burst.committed = max(burst.committed, round(end * SAMPLE_RATE))
+                    burst.acknowledged = max(burst.acknowledged, burst.committed)
                     await boundary()
                     pending_flush = None
                     flushed.set()
@@ -740,3 +802,4 @@ class GradiumTrack:
             for stream, (text, start) in list(pending.items()):
                 log("gradium: pending text end inferred at request reset")
                 await publish(text, start, submitted / SAMPLE_RATE, stream, healthy=False)
+            await boundary()

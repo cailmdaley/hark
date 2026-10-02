@@ -106,8 +106,8 @@ def test_startup_auth_checked_even_all_silent_and_no_audio_sent():
             t.close()
 
 
-def test_drop_replays_only_uncommitted_burst_and_counts_retries():
-    plans = [[("one", .32, 2.32), ("two", 2.32, 4.32)]]
+def test_drop_replays_only_uncommitted_suffix_and_counts_retries():
+    plans = [[("one", .32, 2.32)], [("two", 0, 2)]]
     with MockGradium(plans=plans, drop_first_at=2.4) as mock:
         t = track(mock)
         t.start()
@@ -121,6 +121,8 @@ def test_drop_replays_only_uncommitted_burst_and_counts_retries():
             assert len(mock.connections) == 3
             sent = sum(c["samples"] / 16000 for c in mock.connections)
             assert sent <= t.sent_seconds <= 2 * 5.12 + 1e-9
+            assert mock.connections[2]['samples'] == round(2.88 * 16000)
+            assert output[1].speech == [(4.96, 6.96)]
             assert t.sent_seconds > 5.12
         finally:
             t.close()
@@ -334,14 +336,16 @@ def test_overlapping_happy_path_segments_are_not_suppressed():
             t.close()
 
 
-def test_replay_boundary_change_is_suppressed_and_logged(capsys):
-    with MockGradium(plans=[[("Hello", 0, 2)], [("Hello world", 0, 4)]], drop_first_at=2.4) as mock:
+def test_suffix_replay_starts_at_zero_without_suppressing_new_text():
+    with MockGradium(plans=[[("Hello", 0, 2)], [("world", 0, 2)]], drop_first_at=2.4) as mock:
         t = track(mock)
         t.start()
         try:
             t.feed(speech(4))
-            assert [u.text for u in finish(t)] == ["Hello"]
-            assert "replay skips segment 0.00–4.00 before committed horizon 2.00" in capsys.readouterr().err
+            output = finish(t)
+            assert [u.text for u in output] == ["Hello", "world"]
+            assert [u.speech for u in output] == [[(0, 2)], [(2, 4)]]
+            assert mock.connections[2]['samples'] == 2 * 16000
         finally:
             t.close()
 

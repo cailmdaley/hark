@@ -222,9 +222,9 @@ def test_quiet_source_clock_keeps_request_open_and_publishes_pending_tail():
             t.close()
 
 
-def test_midrequest_drop_replays_mapping_and_deduplicates_cloud_horizon_across_gap():
-    plan = [("one", .32, 2.32), ("two", 3.44, 5.44)]
-    with MockGradium(plans=[plan], drop_first_at=4) as mock:
+def test_midrequest_drop_replays_only_post_flush_mapping_across_gap():
+    plans = [[("one", .32, 2.32)], [("two", .32, 2.32)]]
+    with MockGradium(plans=plans, drop_first_at=4) as mock:
         t = default_track(mock)
         t.start()
         try:
@@ -240,7 +240,7 @@ def test_midrequest_drop_replays_mapping_and_deduplicates_cloud_horizon_across_g
             assert (one[0].start, one[0].end) == (2, 4)
             assert two[0].speech == [(8, 10)]
             assert len(mock.connections) == 3
-            assert mock.connections[2]["samples"] == 99840
+            assert mock.connections[2]["samples"] == 49920  # Only the second speech and its context.
             assert mock.connections[1]["samples"] == 4 * 16000
             # Writes accepted by the socket can race ahead of the server's observed drop.
             observed = sum(c["samples"] for c in mock.connections) / 16000
