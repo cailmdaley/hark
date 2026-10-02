@@ -492,6 +492,9 @@ def main(argv=None):
                         if src in recorders:
                             recorders[src].write(rest)
                         track.feed(rest, final=True)
+                        # drain returns admitted audio before a capture error; surface it only after writing.
+                        if getattr(src, "error", None):
+                            raise src.error
                     except Exception as error:
                         finish_error = finish_error or error
                 final_utterances = []

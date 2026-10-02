@@ -75,6 +75,9 @@ class Source:
     def __init__(self, name):
         self.name = name
         self.queue = queue.Queue()
+        self.queue_lock = threading.Lock()
+        self.queued_samples = 0
+        self.sample_limit = None
         self.anchor = None  # wall-clock time of sample 0
         self.delivered = 0  # samples handed to the caller, padding included
         self.last_audio = None  # wall-clock time the device last delivered
@@ -96,10 +99,16 @@ class Source:
             self.last_sound = now
         self.stats["device"] += samples.size
         self.stats["peak"] = max(self.stats["peak"], peak)
-        try:
-            self.queue.put_nowait((now, samples))
-        except queue.Full:
-            self.error = RuntimeError(f"{self.name}: capture backlog full; audio cannot be preserved")
+        with self.queue_lock:
+            if self.error:
+                return
+            try:
+                if self.sample_limit is not None and self.queued_samples + samples.size > self.sample_limit:
+                    raise queue.Full
+                self.queue.put_nowait((now, samples))
+                self.queued_samples += samples.size
+            except queue.Full:
+                self.error = RuntimeError(f"{self.name}: capture backlog full; audio cannot be preserved")
 
     def take_stats(self):
         """Samples delivered by the device and padded by `drain`, and peak, since the last call."""
@@ -108,19 +117,21 @@ class Source:
 
     def drain(self, limit=2 * SAMPLE_RATE):
         """Samples since the last call, up to about `limit`, padded to the wall clock."""
-        if self.error:
+        if self.error and self.queue.empty():
             raise self.error
         blocks, got = [], 0
         while got < limit:
             try:
-                arrived, block = self.queue.get_nowait()
+                with self.queue_lock:
+                    arrived, block = self.queue.get_nowait()
+                    self.queued_samples = max(0, self.queued_samples - block.size)
             except queue.Empty:
                 break
             blocks.append(block)
             got += block.size
             if arrived is not None:
                 self.heard = self.delivered + got, arrived
-        if self.live and self.anchor is not None:
+        if self.live and self.anchor is not None and not self.error:
             if self.queue.empty():
                 behind = (time.time() - self.anchor) * SAMPLE_RATE - self.delivered - got
             else:
@@ -288,7 +299,7 @@ class PhoneSource(Source):
     def __init__(self, path):
         super().__init__("phone")
         self.path = Path(path)
-        self.queue = queue.Queue(maxsize=320)  # at most 128 s in 400 ms socket reads
+        self.sample_limit = 600 * SAMPLE_RATE  # Ten minutes of samples, independent of packet size.
         self.server = None
         self.conn = None
         self.lock = threading.Lock()
