@@ -97,7 +97,8 @@ Replay suppresses segments starting before the preceding attempt's accepted hori
 If the service changes its segmentation across that boundary, an overlapping continuation can be skipped; hark logs the suppression.
 
 The backlog holds at most 120 seconds of audio, including the in-flight request.
-When full, it omits further recognition with source-interval notices rather than stopping capture or WAV recording.
+When full during realtime capture, it omits further recognition with source-interval notices rather than stopping capture or WAV recording.
+Non-realtime file input instead waits for capacity through recoverable outages; its final drain has a fixed 30-second budget.
 Phone capture has a separate ten-minute sample-count bound, independent of relay packet size; admitted audio is drained to the WAV before a capture-overflow error surfaces.
 The worker watches advancing ASR progress and cancellation while input, a flush or EOS is outstanding.
 A flushed, idle connection can wait for the next speech burst; heartbeats without progress do not keep outstanding work alive.

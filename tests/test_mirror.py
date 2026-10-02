@@ -159,6 +159,9 @@ CHILD = textwrap.dedent("""
                          size_command=[sys.executable, \"-c\", \"import os,sys; print(os.path.getsize(sys.argv[1]) if os.path.exists(sys.argv[1]) else 0)\", str(remote)],
                          backoff=0.01)
     m.start()
+    while m.process is None:
+        time.sleep(0.01)
+    local.with_suffix(".ready").write_text("ready")
     while not stop:
         time.sleep(0.02)
     with local.open(\"a\") as f:
@@ -174,9 +177,14 @@ def test_ctrl_c_does_not_kill_the_mirror_pipe(tmp_path):
     child = subprocess.Popen([sys.executable, "-c", CHILD, str(local), str(remote)],
                              start_new_session=True, stdout=subprocess.PIPE, text=True,
                              cwd=os.path.dirname(os.path.dirname(__file__)))
-    time.sleep(0.5)
-    os.killpg(child.pid, signal.SIGINT)
-    out, _ = child.communicate(timeout=10)
+    try:
+        wait_for(local.with_suffix(".ready").exists, timeout=10)
+        os.killpg(child.pid, signal.SIGINT)
+        out, _ = child.communicate(timeout=10)
+    finally:
+        if child.poll() is None:
+            child.kill()
+            child.wait()
     assert remote.read_bytes() == local.read_bytes()
     assert "launches=1 ok=True" in out, out.strip()
 
