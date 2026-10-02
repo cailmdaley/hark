@@ -55,7 +55,8 @@ class MockGradium:
     async def _serve(self):
         self.stop = asyncio.Event()
         self.loop = asyncio.get_running_loop()
-        async with serve(self._handle, "127.0.0.1", self.port, process_request=self._request) as server:
+        async with serve(self._handle, "127.0.0.1", self.port, process_request=self._request,
+                         close_timeout=1) as server:
             self.port = server.sockets[0].getsockname()[1]
             self.started.set()
             await self.stop.wait()

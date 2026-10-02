@@ -179,6 +179,7 @@ class GradiumTrack:
         self.pre = deque(maxlen=round(preroll * SAMPLE_RATE / FRAME))
         self.jobs = queue.Queue(maxsize=queue_size or math.ceil(backlog_seconds * SAMPLE_RATE / FRAME))
         self.results = queue.Queue(maxsize=64)
+        self.reset_tails = {}  # At most one bounded fallback hypothesis per retained stream.
         self.backlog_limit = round(backlog_seconds * SAMPLE_RATE)
         self.backlog_samples = 0
         self.backlog_lock = threading.Lock()
@@ -441,6 +442,13 @@ class GradiumTrack:
             try:
                 burst, segments = self.results.get_nowait()
             except queue.Empty:
+                if self.finished.is_set() and self.reset_tails:
+                    key = next(iter(self.reset_tails))
+                    view, text, start, submitted, stream = self.reset_tails.pop(key)
+                    log("gradium: pending text end inferred after recognition stops")
+                    self.results.put_nowait((view, [(text, start, submitted / SAMPLE_RATE, stream)]))
+                    self.results.put_nowait((view, None))
+                    continue
                 return
             if segments is None:
                 for key in list(self.phrases):
@@ -590,6 +598,15 @@ class GradiumTrack:
             await asyncio.sleep(delay)  # The supervisor cancels this wait promptly on stop.
         raise asyncio.CancelledError
 
+    async def _result(self, value):
+        while not self.cancel.is_set():
+            try:
+                self.results.put_nowait(value)
+                return True
+            except queue.Full:
+                await asyncio.sleep(0.01)
+        return False
+
     async def _worker(self):
         # Startup validates authentication even when the entire meeting is silent.
         ws = await self._retry(self._open)
@@ -623,12 +640,15 @@ class GradiumTrack:
                         await ws.close()
                         ws = None
                 await self._retry(transcribe)
-                while not self.cancel.is_set():
-                    try:
-                        self.results.put_nowait((burst, None))
-                        break
-                    except queue.Full:
-                        await asyncio.sleep(0.01)
+                # This request won't replay again. Preserve a reset hypothesis only
+                # if the successful retry never supplied a replacement for its stream.
+                for key in list(self.reset_tails):
+                    if key[0] == id(burst):
+                        view, text, start, submitted, stream = self.reset_tails[key]
+                        if await self._result((view, [(text, start, submitted / SAMPLE_RATE, stream)])):
+                            self.reset_tails.pop(key)
+                            await self._result((view, None))
+                await self._result((burst, None))
                 with self.backlog_lock:
                     self.backlog_samples -= burst.wire_samples
                 burst.frames.clear()
@@ -669,12 +689,7 @@ class GradiumTrack:
             await asyncio.wait_for(ws.send(json.dumps(message)), self.timeout)
 
         async def boundary():
-            while not self.cancel.is_set():
-                try:
-                    self.results.put_nowait((view, None))
-                    return
-                except queue.Full:
-                    await asyncio.sleep(0.01)
+            await self._result((view, None))
 
         async def sender():
             nonlocal sent_wire, submitted, flush_id, pending_flush
@@ -718,7 +733,7 @@ class GradiumTrack:
             sent_eos.set()
             await send({"type": "end_of_stream"})
 
-        async def publish(text, start, end, stream, healthy=True):
+        async def publish(text, start, end, stream):
             duration = submitted / SAMPLE_RATE
             if not (math.isfinite(start) and math.isfinite(end)
                     and 0 <= start <= end <= duration + 0.081):
@@ -730,17 +745,9 @@ class GradiumTrack:
             original_start = round(original_start * SAMPLE_RATE)
             original_end = round(original_end * SAMPLE_RATE)
             if original_start >= replay_horizons.get(stream, 0) - 1:
-                while True:
-                    try:
-                        self.results.put_nowait((view, [(text, start, end, stream)]))
-                        burst.horizons[stream] = max(original_end, burst.horizons.get(stream, 0))
-                        if healthy:
-                            self._acknowledge(burst, original_end)
-                        return
-                    except queue.Full:
-                        if self.cancel.is_set():
-                            return
-                        await asyncio.sleep(0.01)
+                if await self._result((view, [(text, start, end, stream)])):
+                    burst.horizons[stream] = max(original_end, burst.horizons.get(stream, 0))
+                    self._acknowledge(burst, original_end)
             else:
                 log(f"gradium: replay skips segment {start:.2f}–{end:.2f} before committed horizon "
                     f"{replay_horizons[stream] / SAMPLE_RATE:.2f}")
@@ -764,11 +771,11 @@ class GradiumTrack:
                         log("gradium: transcript bound reached; closing this request")
                         limited = True
                         burst.rotate = burst.done = True
-                        for slot, (text, start) in list(pending.items()):
-                            await publish(text, start, submitted / SAMPLE_RATE, slot)
-                        pending.clear()
                         continue
                     progress()
+                    # The new connection's hypothesis replaces its stream's old
+                    # unfinalized hypothesis; neither needs lexical reconciliation.
+                    self.reset_tails.pop((id(burst), stream), None)
                     next_start = float(msg["start_s"])
                     if stream in pending:
                         text, start = pending[stream]
@@ -816,9 +823,6 @@ class GradiumTrack:
                     flushed.set()
                 elif kind == "end_of_stream":
                     if not sent_eos.is_set():
-                        for slot, (text, start) in list(pending.items()):
-                            await publish(text, start, submitted / SAMPLE_RATE, slot)
-                        pending.clear()
                         raise GradiumError("unexpected EOS; restarting request")
                     duration = submitted / SAMPLE_RATE
                     for stream, (text, start) in list(pending.items()):
@@ -849,6 +853,16 @@ class GradiumTrack:
                 task.cancel()
             await asyncio.gather(producer, consumer, monitor, return_exceptions=True)
             for stream, (text, start) in list(pending.items()):
-                log("gradium: pending text end inferred at request reset")
-                await publish(text, start, submitted / SAMPLE_RATE, stream, healthy=False)
+                duration = submitted / SAMPLE_RATE
+                start = min(max(start if math.isfinite(start) else 0, 0), duration)
+                original_start, _, _ = clock.project(start, duration)
+                if round(original_start * SAMPLE_RATE) < replay_horizons.get(stream, 0) - 1:
+                    continue
+                key = id(burst), stream
+                self.reset_tails.pop(key, None)
+                # Retained hypotheses share the accepted-result queue's bound.
+                # Eviction never commits audio or removes its eligibility for replay.
+                if len(self.reset_tails) >= self.results.maxsize:
+                    self.reset_tails.pop(next(iter(self.reset_tails)))
+                self.reset_tails[key] = view, text, start, submitted, stream
             await boundary()
