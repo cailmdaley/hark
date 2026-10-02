@@ -399,7 +399,7 @@ def main(argv=None):
                 matcher = VoiceMatcher(voices, sink)
             if args.ear == "gradium":
                 for track in all_tracks:
-                    track.start()
+                    track.start(stop=stop)
             if live and args.save_audio:
                 recorders = {src: WavRecorder(out.with_suffix(f".{src.name}.wav")) for src, _ in tracks}
                 for recorder in recorders.values():
@@ -450,10 +450,6 @@ def main(argv=None):
                     if samples.size:
                         if src in recorders:
                             recorders[src].write(samples)
-                        if args.ear == "gradium":
-                            # Commit output before surfacing a later socket failure.
-                            for u in flush_tracks(all_tracks):
-                                _emit(u, sink, matcher, tracks_by_name, failed_slots)
                         track.feed(samples)
                 for u in flush_tracks(all_tracks):
                     _emit(u, sink, matcher, tracks_by_name, failed_slots)

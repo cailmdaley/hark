@@ -93,7 +93,7 @@ def test_real_phone_cli_emits_live_and_handles_signal_without_mlx(tmp_path, monk
                 client.connect(str(tmp_path / "phone.sock"))
                 client.sendall(to_pcm16(speech(2.4)).tobytes())
                 wait(lambda: out.with_suffix(".jsonl").exists() and "live phone" in out.with_suffix(".jsonl").read_text())
-                assert not any(m["type"] == "end_of_stream" for m in mock.connections[0]["messages"])
+                assert not any(m["type"] == "end_of_stream" for m in mock.connections[1]["messages"])
                 client.close()
             except BaseException as error:
                 failures.append(error)

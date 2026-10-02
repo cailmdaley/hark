@@ -11,11 +11,15 @@ from websockets.asyncio.server import serve
 
 class MockGradium:
     def __init__(self, *, plans=None, drop_first_at=None, error=None, ready=True,
-                 finish=True, delay=0, port=0, error_from=0, http_status=None):
+                 finish=True, delay=0, port=0, error_from=0, http_status=None,
+                 stall_setup=None, dangling_last=False):
         self.plans = plans or [[("Hello", 0.0, 2.0), ("world.", 2.0, 4.0)]]
         self.drop_first_at, self.error = drop_first_at, error
         self.error_from, self.http_status = error_from, http_status
         self.handshakes = 0
+        self.burst_count = 0
+        self.stall_setup = stall_setup or {}
+        self.dangling_last = dangling_last
         self.ready, self.finish, self.delay, self.port = ready, finish, delay, port
         self.connections = []
         self.errors = []
@@ -56,7 +60,8 @@ class MockGradium:
         index = len(self.connections)
         rec = {"messages": [], "samples": 0, "key": ws.request.headers.get("x-api-key")}
         self.connections.append(rec)
-        plan = self.plans[min(index, len(self.plans) - 1)]
+        plan = None
+        burst_index = None
         sent = 0
         try:
             setup = json.loads(await ws.recv())
@@ -68,10 +73,12 @@ class MockGradium:
             if self.error and index >= self.error_from:
                 await ws.send(json.dumps({"type": "error", "message": self.error[0], "code": self.error[1]}))
                 return
+            if index in self.stall_setup:
+                await asyncio.sleep(self.stall_setup[index])
             if not self.ready:
                 await self.stop.wait()
                 return
-            await ws.send(json.dumps({"type": "ready", "sample_rate": 16000, "frame_size": 1280,
+            await ws.send(json.dumps({"type": "ready", "sample_rate": 24000, "frame_size": 1920,
                                       "delay_in_frames": 10}))
             async for raw in ws:
                 msg = json.loads(raw)
@@ -79,21 +86,26 @@ class MockGradium:
                 if self.delay:
                     await asyncio.sleep(self.delay)
                 if msg["type"] == "audio":
+                    if plan is None:
+                        burst_index = self.burst_count
+                        self.burst_count += 1
+                        plan = self.plans[min(burst_index, len(self.plans) - 1)]
                     pcm = base64.b64decode(msg["audio"], validate=True)
                     assert len(pcm) == 2560
                     rec["samples"] += len(pcm) // 2
                     duration = rec["samples"] / 16000
-                    while sent < len(plan) and plan[sent][2] <= duration:
+                    while sent < len(plan) and plan[sent][2] <= duration + 1e-9:
                         text, start, end, *stream = plan[sent]
                         for fragment in (text if isinstance(text, list) else [text]):
                             await ws.send(json.dumps({"type": "text", "text": fragment,
                                                       "start_s": start, "stream_id": stream[0] if stream else 0}))
-                        await ws.send(json.dumps({"type": "end_text", "stop_s": end,
-                                                  "stream_id": stream[0] if stream else 0}))
+                        if not (self.dangling_last and sent == len(plan) - 1):
+                            await ws.send(json.dumps({"type": "end_text", "stop_s": end,
+                                                      "stream_id": stream[0] if stream else 0}))
                         sent += 1
                     await ws.send(json.dumps({"type": "step", "total_duration_s": duration,
                                               "vad": [{"horizon_s": 2, "inactivity_prob": 0.9}]}))
-                    if index == 0 and self.drop_first_at and duration >= self.drop_first_at:
+                    if burst_index == 0 and self.drop_first_at and duration >= self.drop_first_at:
                         await ws.close(code=1011, reason="injected drop")
                         return
                 elif msg["type"] == "flush":

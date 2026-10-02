@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict, deque
 import os
+from pathlib import Path
 import tempfile
 import numpy as np
 
@@ -65,6 +66,11 @@ class OnlineCluster:
         self.counts = []
         self.previous = "S1"
 
+    def warm(self):
+        if self.embedder is None:
+            self.embedder = Embedder()
+            self.embedder(np.zeros(16000, np.float32))
+
     def assign(self, samples):
         if len(samples) < self.minimum_duration * 16000:
             return self.previous
@@ -95,20 +101,24 @@ class AudioArchive:
     """Disk-backed raw track audio; delayed segments never lose their samples."""
 
     def __init__(self):
-        self.file = tempfile.TemporaryFile()
+        directory = Path.home() / ".cache/hark/audio"
+        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.file = tempfile.TemporaryFile(dir=directory)
         self.size = 0
 
     def append(self, start, samples):
         if round(start * 16000) != self.size:
             raise ValueError("non-contiguous track audio")
         self.file.seek(0, 2)
-        self.file.write(np.asarray(samples, dtype="<f4").tobytes())
+        from .capture import to_pcm16
+
+        self.file.write(to_pcm16(samples).tobytes())
         self.size += len(samples)
 
     def slice(self, start, end):
         lo, hi = max(0, round(start * 16000)), min(self.size, round(end * 16000))
-        self.file.seek(lo * 4)
-        return np.frombuffer(self.file.read(max(0, hi - lo) * 4), dtype="<f4").copy()
+        self.file.seek(lo * 2)
+        return np.frombuffer(self.file.read(max(0, hi - lo) * 2), dtype="<i2").astype(np.float32) / 32768
 
     def close(self):
         self.file.close()

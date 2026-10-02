@@ -30,9 +30,10 @@ def wait(predicate, timeout=3):
 
 
 def track(mock, **kwargs):
+    options = dict(timeout=0.5, backoff=0.01, shutdown_timeout=5)
+    options.update(kwargs)
     return GradiumTrack("phone", key="mock-key", url=mock.url,
-                        cluster=OnlineCluster(lambda _: np.array([1., 0.])),
-                        timeout=0.5, backoff=0.01, shutdown_timeout=5, **kwargs)
+                        cluster=OnlineCluster(lambda _: np.array([1., 0.])), **options)
 
 
 def finish(t):
@@ -65,7 +66,7 @@ def test_quiet_speech_is_gated_with_preroll_hangover_and_source_clock(tmp_path):
                 sink.write(u)
             sink.close("ended")
             assert "12:00:10-12:00:12 S1" in sink.path.read_text()
-            messages = mock.connections[0]["messages"]
+            messages = mock.connections[1]["messages"]
             assert [m["type"] for m in messages][-2:] == ["flush", "end_of_stream"]
             assert mock.connections[0]["key"] == "mock-key"
         finally:
@@ -82,7 +83,7 @@ def test_final_segment_is_visible_before_burst_end_or_eos():
             output = flush_tracks([t])
             assert [u.text for u in output] == ["live"]
             assert not t.burst.done
-            assert not any(m["type"] == "end_of_stream" for m in mock.connections[0]["messages"])
+            assert not any(m["type"] == "end_of_stream" for m in mock.connections[1]["messages"])
             t.feed(speech(2))
             assert [u.text for u in finish(t)] == ["later"]
         finally:
@@ -115,7 +116,7 @@ def test_drop_replays_only_uncommitted_burst_and_counts_retries():
             output = finish(t)
             assert [u.text for u in output] == ["one", "two"]
             assert output[0].start == pytest.approx(2.96)
-            assert len(mock.connections) == 2
+            assert len(mock.connections) == 3
             sent = sum(c["samples"] / 16000 for c in mock.connections)
             assert sent <= t.sent_seconds <= 2 * 5.12 + 1e-9
             assert t.sent_seconds > 5.12
@@ -137,7 +138,7 @@ def test_reconnect_between_bursts_preserves_discarded_gap():
             second = finish(t)
             assert [u.text for u in first + second] == ["first", "second"]
             assert [u.start for u in first + second] == pytest.approx([0.96, 10.96])
-            assert len(mock.connections) == 2
+            assert len(mock.connections) == 3
         finally:
             t.close()
 
@@ -239,14 +240,14 @@ def test_failures_are_bounded_and_threads_stop(error, ready, finish_, match):
                 t.feed(speech(2))
                 finish(t)
             assert time.monotonic() - began < 4
-            assert len(mock.connections) == (1 if error and error[1] == 1008 else 3)
+            assert len(mock.connections) == (1 if error and error[1] == 1008 else 4 if not finish_ else 3)
         finally:
             t.close()
         assert not t.thread.is_alive()
 
 
 def test_committed_segments_survive_later_failure_without_flush_first():
-    with MockGradium(plans=[[("kept", 0, 2)]], error=("down", 1011), error_from=1) as mock:
+    with MockGradium(plans=[[("kept", 0, 2)]], error=("down", 1011), error_from=2) as mock:
         t = track(mock)
         t.start()
         try:
@@ -296,8 +297,8 @@ def test_duration_rotation_keeps_long_speech_bounded_and_contiguous():
             t.feed(speech(10))
             output = finish(t)
             assert [u.start for u in output] == [0, 2, 4, 6, 8]
-            assert len(mock.connections) == 5
-            assert all(c["samples"] == 2 * 16000 for c in mock.connections)
+            assert len(mock.connections) == 6
+            assert all(c["samples"] == 2 * 16000 for c in mock.connections[1:])
             assert t.sent_seconds == pytest.approx(10)
         finally:
             t.close()
@@ -312,9 +313,101 @@ def test_character_rotation_at_completed_segment_boundary():
             wait(lambda: t.burst.rotate)
             t.feed(speech(2))
             output = finish(t)
-            assert len(mock.connections) == 2
+            assert len(mock.connections) == 3
             assert [u.start for u in output] == [0, 2]
             assert output[1].text == "tail"
+        finally:
+            t.close()
+
+
+def test_overlapping_happy_path_segments_are_not_suppressed():
+    with MockGradium(plans=[[("Hello", 0, 2), ("world", 1.92, 4)]]) as mock:
+        t = track(mock)
+        t.start()
+        try:
+            t.feed(speech(4))
+            assert [u.text for u in finish(t)] == ["Hello", "world"]
+        finally:
+            t.close()
+
+
+def test_replay_boundary_change_is_suppressed_and_logged(capsys):
+    with MockGradium(plans=[[("Hello", 0, 2)], [("Hello world", 0, 4)]], drop_first_at=2.4) as mock:
+        t = track(mock)
+        t.start()
+        try:
+            t.feed(speech(4))
+            assert [u.text for u in finish(t)] == ["Hello"]
+            assert "replay skips segment 0.00–4.00 before committed horizon 2.00" in capsys.readouterr().err
+        finally:
+            t.close()
+
+
+def test_many_short_bursts_survive_retryable_setup_delay():
+    with MockGradium(plans=[[("turn", 0, .32)]], stall_setup={1: .3}) as mock:
+        t = track(mock, timeout=.1)
+        t.start()
+        try:
+            for _ in range(20):
+                t.feed(speech(.4))
+                t.feed(np.zeros(round(.96 * 16000), np.float32))
+            assert t.jobs.qsize() > 4
+            output = finish(t)
+            assert len(output) == 20
+            assert t.backlog_samples == 0
+        finally:
+            t.close()
+
+
+def test_progress_keeps_flush_and_final_alive_beyond_idle_timeout():
+    with MockGradium(plans=[[("part", 0, 2)]], delay=.005) as mock:
+        t = track(mock, max_duration=2, realtime=False, timeout=.04, shutdown_timeout=.06)
+        t.start()
+        began = time.monotonic()
+        try:
+            t.feed(speech(10))
+            output = finish(t)
+            assert len(output) == 5
+            assert time.monotonic() - began > 5 * t.shutdown_timeout
+            assert len(mock.connections) == 6  # startup plus five successful bursts, no retry
+        finally:
+            t.close()
+
+
+def test_cluster_failure_preserves_all_text_and_logs_once(capsys):
+    with MockGradium(plans=[[("first", 0, 2), ("second", 2, 4)]]) as mock:
+        t = track(mock)
+        def broken(_):
+            raise ValueError("embedding exploded")
+        t.cluster = OnlineCluster(broken)
+        t.start()
+        try:
+            t.feed(speech(4))
+            output = finish(t)
+            assert [u.text for u in output] == ["first", "second"]
+            assert [u.speaker for u in output] == ["S1", "S1"]
+            assert capsys.readouterr().err.count("speaker clustering disabled") == 1
+        finally:
+            t.close()
+
+
+def test_word_phrases_are_live_and_dangling_last_word_flushes_at_eos():
+    words = [(w, i * .4, (i + 1) * .4) for i, w in enumerate(["One", "two", "three", "four", "five", "six."])]
+    with MockGradium(plans=[words], dangling_last=True) as mock:
+        t = track(mock)
+        t.start()
+        try:
+            t.feed(speech(2))
+            wait(lambda: t.results.qsize() >= 5)
+            live = flush_tracks([t])
+            assert [u.text for u in live] == ["One two three four five"]
+            assert live[0].speaker == "S1" and t.cluster.counts == [1]
+            assert not t.burst.done
+            t.feed(speech(.4))
+            rest = finish(t)
+            assert [u.text for u in rest] == ["six."]
+            assert rest[0].end == pytest.approx(2.4)
+            assert t.cluster.counts == [1]
         finally:
             t.close()
 
