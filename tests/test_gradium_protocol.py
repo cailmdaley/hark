@@ -1,7 +1,7 @@
 import pytest
 
 from gradium_mock import MockGradium
-from test_gradium import track, speech, finish
+from test_gradium import track, speech, finish, wait
 
 
 @pytest.mark.parametrize('anomalies,expected', [
@@ -26,14 +26,21 @@ def test_protocol_anomaly_recovers_next_valid_segment(anomalies, expected):
             t.close()
 
 
-def test_text_flood_rotates_request_with_bounded_results():
-    anomalies = [{'type': 'text', 'text': 'x' * 10001, 'start_s': 0}]
+@pytest.mark.parametrize('anomalies', [
+    [{'type': 'text', 'text': 'x' * 10001, 'start_s': 0}],
+    [{'type': 'text', 'text': 'x', 'start_s': 0}] * 2001,
+])
+def test_text_flood_rotates_request_with_bounded_results_and_recovers(anomalies):
     with MockGradium(plans=[[('next', 0, 1)]], anomalies=anomalies) as mock:
         t = track(mock)
         t.start()
         try:
             t.feed(speech(1.04))
-            finish(t)
+            wait(lambda: len(mock.connections) > 1 and any(
+                m['type'] == 'end_of_stream' for m in mock.connections[1]['messages']))
+            t.feed(speech(1.04))
+            output = finish(t)
+            assert output[-1].text == 'next'
             assert t.results.qsize() <= 64
             assert t.error is None
         finally:
