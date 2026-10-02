@@ -229,9 +229,6 @@ def test_fixed_call_mic_label_never_clusters():
 
 @pytest.mark.parametrize("error,ready,finish_,match", [
     (("invalid authentication", 1008), True, True, "invalid authentication"),
-    (("unavailable", 1011), True, True, "persistent failure"),
-    (None, False, True, "persistent failure"),
-    (None, True, False, "persistent failure"),
 ])
 def test_failures_are_bounded_and_threads_stop(error, ready, finish_, match):
     with MockGradium(error=error, ready=ready, finish=finish_) as mock:
@@ -258,16 +255,16 @@ def test_committed_segments_survive_later_failure_without_flush_first():
             t.feed(np.zeros(16000, np.float32))
             wait(lambda: not t.results.empty())
             t.feed(speech(2))
-            wait(lambda: t.error is not None)
+            wait(lambda: t.degraded)
             assert [u.text for u in flush_tracks([t])] == ["kept"]
-            with pytest.raises(GradiumError, match="persistent failure"):
-                t.check()
+            t.check()
             assert flush_tracks([t]) == []
+            finish(t)
         finally:
             t.close()
 
 
-@pytest.mark.parametrize("status,attempts", [(401, 1), (403, 1), (503, 3)])
+@pytest.mark.parametrize("status,attempts", [(401, 1), (403, 1)])
 def test_handshake_auth_is_terminal_but_refusal_retries(status, attempts):
     with MockGradium(http_status=status) as mock:
         t = track(mock)
@@ -279,15 +276,16 @@ def test_handshake_auth_is_terminal_but_refusal_retries(status, attempts):
             t.close()
 
 
-def test_queue_overload_is_explicit_not_dropped():
+def test_queue_overload_drops_recognition_not_capture():
     with MockGradium(finish=False) as mock:
         t = track(mock, queue_size=1, max_duration=1)
         t.start()
         try:
-            with pytest.raises(GradiumError, match="backlog full"):
-                t.feed(speech(10))
+            t.feed(speech(10))
+            assert t.audio_samples == 10 * 16000
+            assert t.missed is not None
             assert t.jobs.qsize() <= 1
-            assert t.request.wire_samples <= 12 * 1280
+            assert t.backlog_samples <= t.backlog_limit
         finally:
             t.close()
 
@@ -362,27 +360,29 @@ def test_many_short_bursts_survive_retryable_setup_delay():
             t.close()
 
 
-def test_audio_seconds_backlog_bound_is_explicit():
+def test_audio_seconds_backlog_bound_omits_only_recognition():
     with MockGradium() as mock:
         t = track(mock, backlog_seconds=1)
         t.start()
         try:
-            with pytest.raises(GradiumError, match="audio backlog full"):
-                t.feed(speech(20))
+            t.feed(speech(20))
+            assert t.audio_samples == 20 * 16000
+            assert t.missed is not None
             assert t.backlog_samples <= 16000
         finally:
             t.close()
 
 
-def test_retries_back_off_before_persistent_failure():
+def test_retries_back_off_without_terminal_failure():
     with MockGradium(http_status=503) as mock:
         t = track(mock, backoff=.04)
         began = time.monotonic()
         try:
-            with pytest.raises(GradiumError, match="persistent failure"):
-                t.start()
-            assert .11 <= time.monotonic() - began < 2
-            assert mock.handshakes == 3
+            t.start()
+            assert time.monotonic() - began < .2
+            wait(lambda: mock.handshakes >= 3)
+            assert time.monotonic() - began >= .11
+            assert t.degraded and t.error is None
         finally:
             t.close()
 
@@ -507,8 +507,8 @@ def test_unchanged_step_heartbeats_do_not_prevent_failure_or_leave_thread_alive(
         began = time.monotonic()
         try:
             t.feed(speech(2))
-            with pytest.raises(GradiumError, match="persistent failure"):
-                finish(t)
+            finish(t)
+            assert t.error is None
             assert time.monotonic() - began < 2
             assert t.finished.is_set() and not t.thread.is_alive()
             assert t.thread.daemon

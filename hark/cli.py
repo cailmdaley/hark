@@ -322,6 +322,22 @@ def main(argv=None):
     capture_started = time.monotonic()
     ear_beat = capture_started
     capture_error = None
+    lost_ears = set()
+
+    def ear_notices():
+        for track in all_tracks:
+            for text in track.take_notices() if hasattr(track, "take_notices") else []:
+                if text.startswith("gradium lost"):
+                    first = not lost_ears
+                    lost_ears.add(track.name)
+                    if first and sink:
+                        sink.comment(text)
+                elif text.startswith("gradium back"):
+                    lost_ears.discard(track.name)
+                    if not lost_ears and sink:
+                        sink.comment(text)
+                elif sink:
+                    sink.comment(text)
 
     def ear_state():
         return {"name": args.ear, "seconds": round(sum(t.sent_seconds for t in all_tracks), 2),
@@ -439,6 +455,7 @@ def main(argv=None):
             while not stop.is_set():
                 sink.poll_names()
                 if args.ear == "gradium":
+                    ear_notices()
                     if lifecycle and time.monotonic() >= ear_beat:
                         lifecycle.update(ear=ear_state())
                         ear_beat = time.monotonic() + 1
@@ -497,6 +514,7 @@ def main(argv=None):
                             raise src.error
                     except Exception as error:
                         finish_error = finish_error or error
+                ear_notices()
                 final_utterances = []
                 for track in all_tracks:
                     try:

@@ -177,6 +177,9 @@ class GradiumTrack:
         self.quiet = 0
         self.sent_seconds = 0.0
         self.error = None
+        self.degraded = False
+        self.notices = queue.Queue(maxsize=64)
+        self.missed = None
         self.ready = threading.Event()
         self.stopping = threading.Event()
         self.cancel = threading.Event()
@@ -190,7 +193,11 @@ class GradiumTrack:
 
     def start(self, stop=None):
         if not self.fixed_speaker and hasattr(self.cluster, "warm"):
-            self.cluster.warm()
+            try:
+                self.cluster.warm()
+            except Exception as error:
+                self.cluster_failed = True
+                log(f"gradium: speaker warmup unavailable; keeping S1 ({type(error).__name__})")
         if stop and stop.is_set():
             return
         self.thread = threading.Thread(target=self._run, name=f"gradium-{self.name}", daemon=True)
@@ -224,16 +231,22 @@ class GradiumTrack:
                 self.tail = self.tail[:0]
             self._end_request()
             self.stopping.set()
+            self._report_missed()
+            if self.degraded:
+                self.abort()
             self.last_progress = time.monotonic()
+            finish_started = self.last_progress
             while not self.finished.is_set():
                 self._collect()
-                if time.monotonic() - self.last_progress > self.shutdown_timeout:
+                if ((self.degraded and time.monotonic() - finish_started > 0.5)
+                        or time.monotonic() - self.last_progress > self.shutdown_timeout):
                     break
                 time.sleep(0.01)
             if not self.finished.is_set():
+                log("gradium: stop abandons uncommitted recognition; saved audio is retained")
                 self.abort()
-                raise GradiumError("EOS timed out; uncommitted audio remains in the saved track")
-            self.thread.join()
+            if self.thread:
+                self.thread.join()
             self._collect()
             self.check()
 
@@ -270,9 +283,16 @@ class GradiumTrack:
         if self.request and self.request.wire_samples >= self.max_frames * FRAME:
             self._end_request()
         if self.request is None:
-            self.request = _Request(position)
-            self._enqueue(self.request)
-        self._reserve(FRAME)
+            request = _Request(position)
+            if not self._enqueue(request):
+                self._miss(position, valid)
+                return
+            self.request = request
+        if not self._reserve(FRAME):
+            self._end_request()
+            self._miss(position, valid)
+            return
+        self._report_missed()
         self.request.append(position, samples, valid)
 
     def _speech_flush(self):
@@ -291,10 +311,10 @@ class GradiumTrack:
             with self.backlog_lock:
                 if self.backlog_samples + count <= self.backlog_limit:
                     self.backlog_samples += count
-                    return
+                    return True
             self._collect()
-            if self.realtime or time.monotonic() - self.last_progress > self.shutdown_timeout:
-                raise GradiumError("audio backlog full; stopping rather than dropping speech")
+            if self.degraded or self.realtime or self.cancel.is_set() or time.monotonic() - self.last_progress > self.shutdown_timeout:
+                return False
             time.sleep(0.01)
 
     def _enqueue(self, burst):
@@ -303,11 +323,45 @@ class GradiumTrack:
             self._collect()
             try:
                 self.jobs.put_nowait(burst)
-                return
+                return True
             except queue.Full:
-                if self.realtime or time.monotonic() - self.last_progress > self.shutdown_timeout:
-                    raise GradiumError("audio backlog full; stopping rather than dropping speech")
+                if self.degraded or self.realtime or self.cancel.is_set() or time.monotonic() - self.last_progress > self.shutdown_timeout:
+                    return False
                 time.sleep(0.01)
+
+    def _notice(self, text):
+        try:
+            self.notices.put_nowait(text)
+        except queue.Full:
+            pass  # Status history is bounded independently of audio and accepted text.
+
+    def take_notices(self):
+        out = []
+        while True:
+            try:
+                out.append(self.notices.get_nowait())
+            except queue.Empty:
+                return out
+
+    def _degrade(self, lost):
+        if self.degraded != lost:
+            self.degraded = lost
+            self._notice(f"gradium {'lost' if lost else 'back'} at {datetime.now():%H:%M:%S}")
+
+    def _miss(self, position, valid):
+        if self.missed is None:
+            log("gradium: STT backlog full; omitting recognition only, source audio is retained")
+            self.missed = [position, position + valid]
+        else:
+            self.missed[1] = position + valid
+
+    def _report_missed(self):
+        if self.missed is not None:
+            start, end = self.missed
+            text = f"gradium missed recognition {start / SAMPLE_RATE:.2f}–{end / SAMPLE_RATE:.2f} s on {self.name}"
+            log(text)
+            self._notice(text)
+            self.missed = None
 
     def _collect(self):
         while True:
@@ -368,9 +422,12 @@ class GradiumTrack:
         return out
 
     def abort(self):
+        # Make room for the receiver's pending word before cancelling its bounded collector.
+        self._collect()
         self.cancel.set()
         if self.thread:
             self.thread.join(timeout=self.timeout + 2)
+        self._collect()
 
     def close(self):
         self.abort()
@@ -378,12 +435,28 @@ class GradiumTrack:
 
     def _run(self):
         try:
-            asyncio.run(self._worker())
+            asyncio.run(self._supervise())
+        except asyncio.CancelledError:
+            pass
         except BaseException as error:
-            self.error = GradiumError(str(error).replace(self.key, "[redacted]"))
+            cls = AuthenticationError if isinstance(error, AuthenticationError) else GradiumError
+            self.error = cls(str(error).replace(self.key, "[redacted]"))
         finally:
             self.ready.set()
             self.finished.set()
+
+    async def _supervise(self):
+        worker = asyncio.create_task(self._worker())
+        try:
+            while not worker.done():
+                if self.cancel.is_set():
+                    worker.cancel()
+                    break
+                await asyncio.sleep(0.01)
+            await worker
+        finally:
+            worker.cancel()
+            await asyncio.gather(worker, return_exceptions=True)
 
     async def _open(self):
         ws = await connect(self.url, additional_headers={"x-api-key": self.key},
@@ -415,9 +488,8 @@ class GradiumTrack:
             raise cls(f"{msg.get('message', 'server error')} (code {msg.get('code')})")
 
     async def _retry(self, operation):
-        for attempt in range(self.retries + 1):
-            if self.cancel.is_set():
-                raise GradiumError("cancelled")
+        attempt = 0
+        while not self.cancel.is_set():
             try:
                 return await operation()
             except AuthenticationError:
@@ -428,15 +500,23 @@ class GradiumTrack:
                 why = f"HTTP {error.response.status_code}"
             except Exception as error:
                 why = str(error) or type(error).__name__
-            if attempt == self.retries:
-                raise GradiumError(f"persistent failure after {attempt + 1} attempts: {why}")
+            self._degrade(True)
+            self.ready.set()  # Capture starts after the first failure, not after service recovery.
+            if self.stopping.is_set() and attempt >= self.retries:
+                raise asyncio.CancelledError
+            delay = min(30.0, self.backoff * 2 ** min(attempt, 16))
+            if self.stopping.is_set():
+                delay = min(delay, 0.05)
             why = why.replace(self.key, "[redacted]")
-            log(f"gradium: reconnect in {self.backoff * 2**attempt:.2f} s ({why})")
-            await asyncio.sleep(self.backoff * 2**attempt)
+            log(f"gradium: reconnect in {delay:.2f} s ({why})")
+            attempt += 1
+            await asyncio.sleep(delay)  # The supervisor cancels this wait promptly on stop.
+        raise asyncio.CancelledError
 
     async def _worker(self):
         # Startup validates authentication even when the entire meeting is silent.
         ws = await self._retry(self._open)
+        self._degrade(False)
         await ws.close()
         ws = None
         self.ready.set()
@@ -536,7 +616,7 @@ class GradiumTrack:
             sent_eos.set()
             await send({"type": "end_of_stream"})
 
-        async def publish(text, start, end, stream):
+        async def publish(text, start, end, stream, healthy=True):
             duration = submitted / SAMPLE_RATE
             if not (math.isfinite(start) and math.isfinite(end)
                     and 0 <= start <= end <= duration + 0.081):
@@ -549,6 +629,8 @@ class GradiumTrack:
                     try:
                         self.results.put_nowait((burst, [(text, start, end, stream)]))
                         burst.horizons[stream] = max(end, burst.horizons.get(stream, 0))
+                        if healthy:
+                            self._degrade(False)
                         return
                     except queue.Full:
                         if self.cancel.is_set():
@@ -606,6 +688,7 @@ class GradiumTrack:
                 elif kind == "flushed" and pending_flush is not None and msg.get("flush_id") == pending_flush:
                     progress()
                     settled = sent_wire
+                    self._degrade(False)
                     await boundary()
                     pending_flush = None
                     flushed.set()
@@ -642,4 +725,4 @@ class GradiumTrack:
             await asyncio.gather(producer, consumer, monitor, return_exceptions=True)
             for stream, (text, start) in list(pending.items()):
                 log("gradium: pending text end inferred at request reset")
-                await publish(text, start, submitted / SAMPLE_RATE, stream)
+                await publish(text, start, submitted / SAMPLE_RATE, stream, healthy=False)

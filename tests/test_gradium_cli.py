@@ -42,7 +42,7 @@ def configure(monkeypatch, tmp_path, mock=None):
     return metered
 
 
-@pytest.mark.parametrize("failure", ["missing-key", "auth", "refusal", "http-auth", "no-ready"])
+@pytest.mark.parametrize("failure", ["missing-key", "auth", "http-auth"])
 def test_cli_startup_failure_writes_failed_lifecycle_comment_ended_and_mirrors(
         failure, tmp_path, monkeypatch):
     options = {"auth": {"error": ("authentication rejected", 1008)},
@@ -134,20 +134,23 @@ def test_cli_preserves_committed_text_on_later_persistent_failure(tmp_path, monk
                 client.connect(str(home / "phone.sock"))
                 samples = np.concatenate([speech(2), np.zeros(16000, np.float32), speech(2)])
                 client.sendall(to_pcm16(samples).tobytes())
+                wait(lambda: 'gradium lost at' in (home / 'meeting.txt').read_text())
                 client.close()
             except BaseException as error:
                 failures.append(error)
+            finally:
+                os.kill(os.getpid(), signal.SIGTERM)
         sender = threading.Thread(target=phone)
         sender.start()
-        assert cli.main(["--ear", "gradium", "--launch", "test", "--phone", "-o", str(home / "meeting.txt")]) == 1
+        assert cli.main(["--ear", "gradium", "--launch", "test", "--phone", "-o", str(home / "meeting.txt")]) is None
         sender.join(3)
         assert not failures and not sender.is_alive()
         text = (home / "meeting.txt").read_text()
         assert text.count("kept") == 1
         lines = text.splitlines()
-        assert lines[-2].startswith("# gradium ") and lines[-1].startswith("# ended ")
+        assert '# gradium lost at' in text and lines[-1].startswith("# ended ")
         state = json.loads((home / "meeting.json").read_text())
-        assert state["phase"] == "failed" and "persistent failure" in state["error"]
+        assert state["phase"] == "ended" and state["error"] is None
 
 
 def test_linux_file_cli_and_enrollment_use_portable_audio_without_mlx(tmp_path, monkeypatch):

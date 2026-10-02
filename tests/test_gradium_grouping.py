@@ -282,8 +282,8 @@ def test_unchanged_eos_heartbeats_after_idle_still_timeout():
             time.sleep(.25)
             assert t.error is None
             began = time.monotonic()
-            with pytest.raises(GradiumError, match="no ASR progress"):
-                finish(t)
+            finish(t)
+            assert t.error is None
             assert .08 <= time.monotonic() - began < 1
             assert not t.thread.is_alive()
         finally:
@@ -301,9 +301,11 @@ def test_unchanged_flush_heartbeats_do_not_buy_a_progress_budget():
             wait(lambda: len(mock.connections) == 2 and any(
                 m["type"] == "flush" for m in mock.connections[1]["messages"]))
             time.sleep(.35)
-            assert t.error is not None, "unchanged steps kept a pending flush alive"
-            assert "no ASR progress" in str(t.error)
-            assert t.finished.is_set() and not t.thread.is_alive()
+            assert t.degraded, "unchanged steps kept a pending flush alive"
+            assert t.error is None
+            assert not t.finished.is_set()
+            finish(t)
+            assert not t.thread.is_alive()
         finally:
             t.close()
 

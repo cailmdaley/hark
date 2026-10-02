@@ -1,6 +1,8 @@
 """Tests isolate HARK state and never read real keys or use hosted Gradium."""
 
 import os
+import shutil
+import tempfile
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -11,11 +13,12 @@ FORBIDDEN_DEFAULT = (Path.home() / ".hark").resolve()
 
 
 @pytest.fixture(autouse=True)
-def local_gradium_only(monkeypatch, tmp_path):
+def local_gradium_only(monkeypatch, request):
     from hark import cli
     import hark.gradium as gradium
 
-    home = tmp_path / "hark-home"
+    home = Path(tempfile.mkdtemp(prefix="hk-", dir="/tmp"))
+    request.addfinalizer(lambda: shutil.rmtree(home, ignore_errors=True))
     monkeypatch.setenv("HARK_DIR", str(home))
     monkeypatch.setattr(cli, "HOME", home)
     real_main = cli.main
