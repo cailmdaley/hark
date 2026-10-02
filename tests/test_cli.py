@@ -171,7 +171,7 @@ def record_lifecycle_phases(monkeypatch, cli, tmp_path):
     return phases
 
 
-def signal_when_live(tmp_path):
+def signal_when_live(tmp_path, *, ready=None):
     state_path = tmp_path / "meeting.json"
     observations = []
 
@@ -180,7 +180,8 @@ def signal_when_live(tmp_path):
                                {signal.SIGINT, signal.SIGTERM, signal.SIGHUP, signal.SIGUSR1})
         deadline = time.monotonic() + 3
         while time.monotonic() < deadline:
-            if state_path.exists() and json.loads(state_path.read_text())["phase"] == "live":
+            if (state_path.exists() and json.loads(state_path.read_text())["phase"] == "live"
+                    and (ready is None or ready.is_set())):
                 sent = time.monotonic()
                 if sys.platform == "darwin":
                     # Model-library threads may be unmasked; target the sigwait consumer.
@@ -273,6 +274,7 @@ def test_signal_during_capture_finishes_mirror_after_closing_transcript(tmp_path
     phases = record_lifecycle_phases(monkeypatch, cli, tmp_path)
     out = tmp_path / "meetings" / "capture.txt"
     finished = []
+    ready = threading.Event()
 
     class FakeMirror:
         def __init__(self, local, host, remote_path):
@@ -280,15 +282,20 @@ def test_signal_during_capture_finishes_mirror_after_closing_transcript(tmp_path
 
         def start(self):
             assert json.loads((tmp_path / "meeting.json").read_text())["phase"] == "live"
+            ready.set()
 
         def finish(self, timeout):
             assert "# ended " in self.local.read_text()
+            deadline = time.monotonic() + 1
+            while json.loads((tmp_path / "meeting.json").read_text())["phase"] == "live":
+                assert time.monotonic() < deadline, "stopping was not written promptly"
+                time.sleep(0.005)
             assert json.loads((tmp_path / "meeting.json").read_text())["phase"] == "stopping"
             finished.append((self.host, self.remote_path))
             return True
 
     monkeypatch.setattr(cli, "TranscriptMirror", FakeMirror)
-    signaller, latency = signal_when_live(tmp_path)
+    signaller, latency = signal_when_live(tmp_path, ready=ready)
     cli.main(["--ear", "local", "--room", "-o", str(out), "--mirror", "candide:~/.hark/meetings/capture.txt"])
     signaller.join(timeout=2)
 
