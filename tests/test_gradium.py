@@ -148,7 +148,7 @@ def test_reconnect_between_bursts_preserves_discarded_gap():
 
 
 def test_phone_socket_padding_through_track_and_sink(tmp_path):
-    path = Path(tempfile.mkdtemp(prefix="hk")) / "phone.sock"
+    path = Path(tempfile.mkdtemp(prefix="hk-", dir="/tmp")) / "phone.sock"
     with MockGradium(plans=[[("phone", .32, 2.32)]]) as mock:
         t = track(mock)
         src = PhoneSource(path)

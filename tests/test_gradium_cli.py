@@ -82,7 +82,7 @@ def test_cli_startup_failure_writes_failed_lifecycle_comment_ended_and_mirrors(
 def test_real_phone_cli_emits_live_and_handles_signal_without_mlx(tmp_path, monkeypatch):
     # macOS has a short AF_UNIX path limit, so this test uses a short source home.
     import tempfile
-    tmp_path = Path(tempfile.mkdtemp(prefix="hkc"))
+    tmp_path = Path(tempfile.mkdtemp(prefix="hk-", dir="/tmp"))
     failures = []
     with MockGradium(plans=[[("live phone", 0, 2)]]) as mock:
         metered = configure(monkeypatch, tmp_path, mock)
@@ -121,7 +121,7 @@ def test_real_phone_cli_emits_live_and_handles_signal_without_mlx(tmp_path, monk
 
 def test_cli_preserves_committed_text_on_later_persistent_failure(tmp_path, monkeypatch):
     import tempfile
-    home = Path(tempfile.mkdtemp(prefix="hkf"))
+    home = Path(tempfile.mkdtemp(prefix="hk-", dir="/tmp"))
     failures = []
     with MockGradium(plans=[[("kept", 0, 2)]], error=("down", 1011), error_from=2) as mock:
         configure(monkeypatch, home, mock, max_duration=2.8)
@@ -225,7 +225,7 @@ def test_real_cli_subprocess_sigterm_after_blas_threads_writes_ended(tmp_path):
     import sys
     import tempfile
 
-    home = Path(tempfile.mkdtemp(prefix="hks"))
+    home = Path(tempfile.mkdtemp(prefix="hk-", dir="/tmp"))
     command = [sys.executable, "scripts/gradium-smoke.py", "--synthetic-cluster", "--home", str(home)]
     env = dict(os.environ, HARK_DIR=str(home), OPENBLAS_NUM_THREADS="4")
     process = subprocess.Popen(command, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)

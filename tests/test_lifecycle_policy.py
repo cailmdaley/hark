@@ -18,7 +18,6 @@ from hark import cli, gradium
 @pytest.fixture
 def capture(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "HOME", tmp_path)
-    monkeypatch.setenv("HARK_DIR", str(tmp_path))
     monkeypatch.setattr(cli, "_default_ear", lambda: "local")
     monkeypatch.setattr(gradium, "api_key", lambda: "local-only")
     monkeypatch.setattr(gradium, "credits_left", lambda key: 900)

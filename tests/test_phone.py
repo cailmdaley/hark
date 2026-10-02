@@ -32,7 +32,7 @@ def send(path, samples):
 
 def test_phone_source_delivers_pcm_and_survives_a_reconnect():
     # A short directory: macOS caps a Unix socket path at 104 bytes.
-    path = Path(tempfile.mkdtemp(prefix="hk")) / "phone.sock"
+    path = Path(tempfile.mkdtemp(prefix="hk-", dir="/tmp")) / "phone.sock"
     src = PhoneSource(path)
     src.live = False  # no wall-clock padding, so the test sees exactly what was sent
     src.start()

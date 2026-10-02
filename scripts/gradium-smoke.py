@@ -24,7 +24,7 @@ def main():
     parser.add_argument("--synthetic-cluster", action="store_true")
     parser.add_argument("--drop-at", type=float)
     args = parser.parse_args()
-    home = (args.home or Path(tempfile.mkdtemp(prefix="hark-mock-"))).expanduser().resolve()
+    home = (args.home or Path(tempfile.mkdtemp(prefix="hk-", dir="/tmp"))).expanduser().resolve()
     if home == (Path.home() / ".hark").resolve():
         parser.error("smoke checks must not use the default HARK home")
     home.mkdir(parents=True, exist_ok=True)
