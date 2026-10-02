@@ -98,7 +98,7 @@ def test_default_phone_gaps_share_request_and_preserve_wav_jsonl_and_disjoint_sa
             assert len(embedded) == 1
             np.testing.assert_array_equal(embedded[0], expected_clip)
             assert embedded[0].size == 81920
-            wait(lambda: any(m["type"] == "end_of_stream" for m in mock.connections[1]["messages"]))
+            assert not any(m["type"] == "end_of_stream" for m in mock.connections[1]["messages"])
             assert mock.connections[1]["samples"] == 99840  # 6.24 s, not 10.8 source seconds.
             assert [m["flush_id"] for m in mock.connections[1]["messages"] if m["type"] == "flush"] == [1, 2]
 
@@ -113,6 +113,7 @@ def test_default_phone_gaps_share_request_and_preserve_wav_jsonl_and_disjoint_sa
             assert matched[0].size == 88320
             assert sink.names == {"S1": "me"}
 
+            t._end_request()
             device(1.00625)
             third = finish(t)
             assert [u.text for u in third] == ["third"]
@@ -177,7 +178,7 @@ def test_short_discarded_quiet_preroll_does_not_duplicate_sent_hangover():
             t.close()
 
 
-def test_pending_word_stays_pending_through_flush_then_next_word_and_eos_project_gap():
+def test_pending_words_publish_at_speech_flush_on_each_side_of_gap():
     plan = [("before", 1.6, 2), ("tail", 3.12, 5.12)]
     with MockGradium(plans=[plan], dangling_words={0}, dangling_last=True) as mock:
         t = default_track(mock)
@@ -185,18 +186,15 @@ def test_pending_word_stays_pending_through_flush_then_next_word_and_eos_project
         try:
             t.feed(speech(2))
             t.feed(np.zeros(4 * 16000, np.float32))
-            wait(lambda: t.results.qsize() >= 1)  # Flush boundary; no inferred pending word.
-            assert flush_tracks([t]) == []
+            before = collect(t)
+            assert [u.text for u in before] == ["before"]
+            assert before[0].speech == [(1.6, 2.8)]
             assert len(mock.connections) == 2
             t.feed(speech(2))
             t.feed(np.zeros(4 * 16000, np.float32))
-            before = collect(t)
-            assert [u.text for u in before] == ["before"]
-            assert before[0].speech == [(1.6, 2.8), (5.68, 6)]
-            assert (before[0].start, before[0].end) == (1.6, 6)
-            assert flush_tracks([t]) == []  # Last text lacks end_text, even after speech flush.
-            tail = finish(t)
+            tail = collect(t)
             assert [u.text for u in tail] == ["tail"]
+            assert finish(t) == []
             assert tail[0].speech == [(6, 8.8)]
             assert (tail[0].start, tail[0].end) == (6, 8.8)
             assert t.cluster.counts == []
@@ -204,7 +202,7 @@ def test_pending_word_stays_pending_through_flush_then_next_word_and_eos_project
             t.close()
 
 
-def test_quiet_source_clock_closes_pending_tail_without_wall_wait():
+def test_quiet_source_clock_keeps_request_open_and_publishes_pending_tail():
     with MockGradium(plans=[[("tail", 0, 1)]], dangling_last=True) as mock:
         t = default_track(mock)
         t.start()
@@ -212,10 +210,10 @@ def test_quiet_source_clock_closes_pending_tail_without_wall_wait():
             t.feed(speech(1.04))
             t.feed(np.zeros(9 * 16000, np.float32))
             assert t.request is not None
-            assert collect(t, timeout=.1) == []
-            t.feed(np.zeros(16000, np.float32))
-            assert t.request is None
             output = collect(t)
+            request = t.request
+            t.feed(np.zeros(600 * 16000, np.float32))
+            assert t.request is request and not request.done
             assert [u.text for u in output] == ["tail"]
             assert output[0].end == pytest.approx(1.84)
             assert t.sent_seconds == pytest.approx(1.84)
@@ -351,23 +349,23 @@ def test_padded_final_tail_after_gap_infers_only_valid_mapped_samples():
             t.close()
 
 
-def test_default_ten_submitted_second_rotation_bounds_continuous_replay():
+def test_default_58_submitted_second_rotation_bounds_continuous_replay():
     with MockGradium(plans=[[("part", 0, 1)]]) as mock:
         t = default_track(mock, realtime=False)
         t.start()
         try:
-            assert t.max_frames * 1280 == 10 * 16000
-            t.feed(speech(31))
+            assert t.max_frames * 1280 == 58 * 16000
+            t.feed(speech(117))
             output = finish(t)
-            assert [u.start for u in output] == [0, 10, 20, 30]
-            assert [c["samples"] for c in mock.connections[1:]] == [160000, 160000, 160000, 16640]
-            assert t.sent_seconds == pytest.approx(31.04)
+            assert [u.start for u in output] == [0, 58, 116]
+            assert [c["samples"] for c in mock.connections[1:]] == [928000, 928000, 16640]
+            assert t.sent_seconds == pytest.approx(117.04)
             assert t.backlog_samples == 0
         finally:
             t.close()
 
 
-def test_default_source_age_caps_sparse_grouped_request_at_120_seconds():
+def test_sparse_grouped_request_is_bounded_by_submitted_samples_not_source_age():
     with MockGradium(plans=[[("part", 0, .08)]]) as mock:
         t = default_track(mock, max_duration=30, realtime=False)
         t.start()
@@ -379,14 +377,15 @@ def test_default_source_age_caps_sparse_grouped_request_at_120_seconds():
                 t.feed(speech(.08))
                 t.feed(np.zeros(round(7.92 * 16000), np.float32))
             assert t.position == 120 * 16000
-            assert first.done and t.request is None
+            assert not first.done and t.request is first
             assert first.samples == round(17.68 * 16000)
             assert len(first.runs) == 15
             t.feed(speech(.08))
             t.feed(np.zeros(round(7.92 * 16000), np.float32))
             output = finish(t)
-            assert [u.start for u in output] == [0, 119.68]
-            assert len(mock.connections) == 3
+            assert [u.start for u in output] == [0]
+            assert len(mock.connections) == 2
+            assert len(first.runs) == 16
             assert t.sent_seconds == pytest.approx(18.88)
         finally:
             t.close()

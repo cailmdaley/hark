@@ -14,7 +14,8 @@ class MockGradium:
                  finish=True, delay=0, port=0, error_from=0, http_status=None,
                  stall_setup=None, dangling_last=False, stalled_flush=False,
                  dangling_words=(), flush_delay=0, finish_delay=0, stalled_eos=False,
-                 anomalies=()):
+                 anomalies=(), late_end_after_flush=False):
+        self.late_end_after_flush = late_end_after_flush
         self.anomalies = anomalies
         self.plans = plans or [[("Hello", 0.0, 2.0), ("world.", 2.0, 4.0)]]
         self.drop_first_at, self.error = drop_first_at, error
@@ -72,6 +73,7 @@ class MockGradium:
         burst_index = None
         sent = 0
         flush_id = 0
+        late_end = None
         try:
             setup = json.loads(await ws.recv())
             rec["messages"].append(setup)
@@ -113,7 +115,13 @@ class MockGradium:
                         for fragment in (text if isinstance(text, list) else [text]):
                             await ws.send(json.dumps({"type": "text", "text": fragment,
                                                       "start_s": start, "stream_id": stream[0] if stream else 0}))
-                        if not ((self.dangling_last and sent == len(plan) - 1)
+                        if late_end is not None:
+                            await ws.send(json.dumps(late_end))
+                            late_end = None
+                        if self.late_end_after_flush and sent == 0:
+                            late_end = {"type": "end_text", "stop_s": end,
+                                        "stream_id": stream[0] if stream else 0}
+                        elif not ((self.dangling_last and sent == len(plan) - 1)
                                 or sent in self.dangling_words):
                             await ws.send(json.dumps({"type": "end_text", "stop_s": end,
                                                       "stream_id": stream[0] if stream else 0}))

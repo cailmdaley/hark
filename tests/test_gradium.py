@@ -128,7 +128,7 @@ def test_drop_replays_only_uncommitted_burst_and_counts_retries():
 
 def test_reconnect_between_bursts_preserves_discarded_gap():
     with MockGradium(plans=[[("first", .32, 2.32)], [("second", .32, 2.32)]]) as mock:
-        t = track(mock, idle_seconds=.8)
+        t = track(mock)
         t.start()
         try:
             t.feed(np.zeros(16000, np.float32))
@@ -136,6 +136,7 @@ def test_reconnect_between_bursts_preserves_discarded_gap():
             t.feed(np.zeros(8 * 16000, np.float32))
             wait(lambda: not t.results.empty())
             first = flush_tracks([t])
+            t._end_request()
             t.feed(speech(2))
             second = finish(t)
             assert [u.text for u in first + second] == ["first", "second"]
@@ -248,12 +249,13 @@ def test_failures_are_bounded_and_threads_stop(error, ready, finish_, match):
 
 def test_committed_segments_survive_later_failure_without_flush_first():
     with MockGradium(plans=[[("kept", 0, 2)]], error=("down", 1011), error_from=2) as mock:
-        t = track(mock, idle_seconds=.8)
+        t = track(mock)
         t.start()
         try:
             t.feed(speech(2))
             t.feed(np.zeros(16000, np.float32))
             wait(lambda: not t.results.empty())
+            t._end_request()
             t.feed(speech(2))
             wait(lambda: t.degraded)
             assert [u.text for u in flush_tracks([t])] == ["kept"]
@@ -346,12 +348,13 @@ def test_replay_boundary_change_is_suppressed_and_logged(capsys):
 
 def test_many_short_bursts_survive_retryable_setup_delay():
     with MockGradium(plans=[[("turn", 0, .32)]], stall_setup={1: .3}) as mock:
-        t = track(mock, timeout=.1, idle_seconds=.8)
+        t = track(mock, timeout=.1)
         t.start()
         try:
             for _ in range(20):
                 t.feed(speech(.4))
                 t.feed(np.zeros(round(.96 * 16000), np.float32))
+                t._end_request()
             assert t.jobs.qsize() > 4
             output = finish(t)
             assert len(output) == 20

@@ -28,7 +28,7 @@ def prohibit_mlx(monkeypatch):
     monkeypatch.setattr(builtins, "__import__", no_mlx)
 
 
-def configure(monkeypatch, tmp_path, mock=None):
+def configure(monkeypatch, tmp_path, mock=None, **options):
     monkeypatch.setattr(cli, "HOME", tmp_path)
     monkeypatch.setenv("GRADIUM_API_KEY", "mock-key")
     metered = []
@@ -36,7 +36,7 @@ def configure(monkeypatch, tmp_path, mock=None):
     if mock:
         def make_track(name, **kwargs):
             return GradiumTrack(name, **kwargs, url=mock.url, timeout=.3, shutdown_timeout=3, phrase_seconds=2,
-                                backoff=.01, idle_seconds=.8,
+                                backoff=.01, **options,
                                 cluster=OnlineCluster(lambda _: np.array([1., 0.])))
         monkeypatch.setattr(gradium, "GradiumTrack", make_track)
     return metered
@@ -124,7 +124,7 @@ def test_cli_preserves_committed_text_on_later_persistent_failure(tmp_path, monk
     home = Path(tempfile.mkdtemp(prefix="hkf"))
     failures = []
     with MockGradium(plans=[[("kept", 0, 2)]], error=("down", 1011), error_from=2) as mock:
-        configure(monkeypatch, home, mock)
+        configure(monkeypatch, home, mock, max_duration=2.8)
         monkeypatch.setattr(cli.sys, "platform", "linux")
         def phone():
             try:

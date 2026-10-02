@@ -141,10 +141,9 @@ class GradiumTrack:
     """
 
     def __init__(self, name, *, key, language=None, cluster=None, fixed_speaker=None, url=URL,
-                 rms=0.001, preroll=0.32, hangover=0.8, max_duration=10,
+                 rms=0.001, preroll=0.32, hangover=0.8, max_duration=58,
                  queue_size=None, backlog_seconds=120, retries=2, backoff=0.5, timeout=8,
-                 shutdown_timeout=30, realtime=True, phrase_seconds=4.0,
-                 idle_seconds=10, source_span=120):
+                 shutdown_timeout=30, realtime=True, phrase_seconds=4.0):
         self.name, self.key, self.url = name, key, url
         self.fixed_speaker = fixed_speaker
         self.language = (language or "any").lower().split("-")[0]
@@ -152,9 +151,8 @@ class GradiumTrack:
             raise GradiumError("language must be en, fr or any")
         self.cluster = cluster if cluster is not None else OnlineCluster(minimum_duration=4)
         self.rms, self.hangover = rms, max(1, round(hangover * SAMPLE_RATE / FRAME))
+        # 58 submitted seconds leave room for the decoder tail below the 60-second billing boundary.
         self.max_frames = max(1, int(max_duration * SAMPLE_RATE / FRAME))
-        self.idle_samples = max(1, round(idle_seconds * SAMPLE_RATE))
-        self.source_limit = max(FRAME, round(source_span * SAMPLE_RATE))
         self.pre = deque(maxlen=round(preroll * SAMPLE_RATE / FRAME))
         self.jobs = queue.Queue(maxsize=queue_size or math.ceil(backlog_seconds * SAMPLE_RATE / FRAME))
         self.results = queue.Queue(maxsize=64)
@@ -274,9 +272,7 @@ class GradiumTrack:
             # Only discarded quiet is eligible for the next speech's preroll.
             self.pre.append((self.position, samples, valid))
         self.position += FRAME
-        if self.request and (self.request.wire_samples >= self.max_frames * FRAME
-                             or self.quiet >= self.idle_samples
-                             or self.position - self.request.start >= self.source_limit):
+        if self.request and self.request.wire_samples >= self.max_frames * FRAME:
             self._end_request()
 
     def _append(self, position, samples, valid):
@@ -557,6 +553,7 @@ class GradiumTrack:
         flushed = asyncio.Event()
         sent_eos = asyncio.Event()
         pending = {}
+        inferred = {}  # Published flush tails awaiting a possible late end_text, by stream.
         limited = False
         characters = messages = 0
         replay_horizons = burst.horizons.copy()
@@ -673,10 +670,17 @@ class GradiumTrack:
                     pending[stream] = (msg["text"], next_start)
                 elif kind == "end_text":
                     if stream not in pending:
+                        inferred.pop(stream, None)
                         log("gradium: end_text without pending text ignored")
                         continue
+                    stop = float(msg["stop_s"])
+                    if stream in inferred and stop <= pending[stream][1]:
+                        log("gradium: late end_text for an inferred flush tail ignored")
+                        inferred.pop(stream, None)
+                        continue
+                    inferred.pop(stream, None)
                     text, start = pending.pop(stream)
-                    await publish(text, start, float(msg["stop_s"]), stream)
+                    await publish(text, start, stop, stream)
                     if characters >= 1200:
                         burst.rotate = True
                 elif kind == "step":
@@ -689,6 +693,11 @@ class GradiumTrack:
                     progress()
                     settled = sent_wire
                     self._degrade(False)
+                    for slot, (text, start) in list(pending.items()):
+                        log("gradium: pending text end inferred at speech flush")
+                        await publish(text, start, submitted / SAMPLE_RATE, slot)
+                        inferred[slot] = start
+                    pending.clear()
                     await boundary()
                     pending_flush = None
                     flushed.set()
