@@ -32,7 +32,7 @@ class GradiumError(RuntimeError):
     pass
 
 
-class _Terminal(GradiumError):
+class AuthenticationError(GradiumError):
     pass
 
 
@@ -398,7 +398,7 @@ class GradiumTrack:
             if (msg.get("type") != "ready" or not isinstance(msg.get("sample_rate"), int)
                     or msg["sample_rate"] <= 0 or not isinstance(msg.get("frame_size"), int)
                     or msg["frame_size"] <= 0):
-                raise _Terminal("invalid ready sample_rate/frame_size")
+                raise GradiumError("invalid ready sample_rate/frame_size")
             self.last_progress = time.monotonic()
             log(f"gradium: ready (delay {msg.get('delay_in_frames')} frames)")
             return ws
@@ -408,7 +408,10 @@ class GradiumTrack:
 
     def _error(self, msg):
         if msg.get("type") == "error":
-            cls = _Terminal if msg.get("code") in {1002, 1008, 401, 403} else GradiumError
+            reason = str(msg.get("message", "")).lower()
+            auth = msg.get("code") in {401, 403} or (
+                msg.get("code") == 1008 and any(word in reason for word in ("authentication", "api key", "api_key", "unauthorized")))
+            cls = AuthenticationError if auth else GradiumError
             raise cls(f"{msg.get('message', 'server error')} (code {msg.get('code')})")
 
     async def _retry(self, operation):
@@ -417,11 +420,11 @@ class GradiumTrack:
                 raise GradiumError("cancelled")
             try:
                 return await operation()
-            except _Terminal:
+            except AuthenticationError:
                 raise
             except InvalidStatus as error:
                 if error.response.status_code in {401, 403}:
-                    raise _Terminal(f"authentication refused (HTTP {error.response.status_code})") from error
+                    raise AuthenticationError(f"authentication refused (HTTP {error.response.status_code})") from error
                 why = f"HTTP {error.response.status_code}"
             except Exception as error:
                 why = str(error) or type(error).__name__
@@ -474,6 +477,7 @@ class GradiumTrack:
         flushed = asyncio.Event()
         sent_eos = asyncio.Event()
         pending = {}
+        limited = False
         characters = messages = 0
         replay_horizons = burst.horizons.copy()
         processed = 0.0
@@ -536,33 +540,46 @@ class GradiumTrack:
             duration = submitted / SAMPLE_RATE
             if not (math.isfinite(start) and math.isfinite(end)
                     and 0 <= start <= end <= duration + 0.081):
-                raise _Terminal("segment timestamps outside submitted audio")
-            start, end = min(start, duration), min(end, duration)
+                log("gradium: segment timestamps clamped to submitted audio")
+            start = min(max(start if math.isfinite(start) else 0, 0), duration)
+            end = min(max(end if math.isfinite(end) else duration, start), duration)
             progress()
             if start >= replay_horizons.get(stream, 0) - 1 / SAMPLE_RATE:
-                while not self.cancel.is_set():
+                while True:
                     try:
                         self.results.put_nowait((burst, [(text, start, end, stream)]))
                         burst.horizons[stream] = max(end, burst.horizons.get(stream, 0))
                         return
                     except queue.Full:
+                        if self.cancel.is_set():
+                            return
                         await asyncio.sleep(0.01)
             else:
                 log(f"gradium: replay skips segment {start:.2f}–{end:.2f} before committed horizon "
                     f"{replay_horizons[stream]:.2f}")
 
         async def receiver():
-            nonlocal characters, messages, processed, settled, pending_flush
+            nonlocal characters, messages, processed, settled, pending_flush, limited
             while True:
                 # The semantic watchdog, not socket traffic, bounds outstanding work.
                 msg = json.loads(await ws.recv())
                 self._error(msg)
                 kind, stream = msg.get("type"), msg.get("stream_id", 0)
                 if kind == "text":
+                    if limited:
+                        continue
                     characters += len(msg["text"])
                     messages += 1
+                    if characters >= 1200:
+                        burst.rotate = True
                     if characters > 10000 or messages > 2000:
-                        raise _Terminal("unbounded transcript from server")
+                        log("gradium: transcript bound reached; closing this request")
+                        limited = True
+                        burst.rotate = burst.done = True
+                        for slot, (text, start) in list(pending.items()):
+                            await publish(text, start, submitted / SAMPLE_RATE, slot)
+                        pending.clear()
+                        continue
                     progress()
                     next_start = float(msg["start_s"])
                     if stream in pending:
@@ -574,7 +591,8 @@ class GradiumTrack:
                     pending[stream] = (msg["text"], next_start)
                 elif kind == "end_text":
                     if stream not in pending:
-                        raise _Terminal("end_text without text")
+                        log("gradium: end_text without pending text ignored")
+                        continue
                     text, start = pending.pop(stream)
                     await publish(text, start, float(msg["stop_s"]), stream)
                     if characters >= 1200:
@@ -593,11 +611,15 @@ class GradiumTrack:
                     flushed.set()
                 elif kind == "end_of_stream":
                     if not sent_eos.is_set():
-                        raise _Terminal("unexpected EOS")
+                        for slot, (text, start) in list(pending.items()):
+                            await publish(text, start, submitted / SAMPLE_RATE, slot)
+                        pending.clear()
+                        raise GradiumError("unexpected EOS; restarting request")
                     duration = submitted / SAMPLE_RATE
-                    for stream, (text, start) in pending.items():
+                    for stream, (text, start) in list(pending.items()):
                         log("gradium: final text end inferred from submitted duration")
                         await publish(text, start, duration, stream)
+                    pending.clear()
                     return
                 # step carries semantic VAD, not a phrase boundary or a source offset.
 
@@ -618,3 +640,6 @@ class GradiumTrack:
             for task in (producer, consumer, monitor):
                 task.cancel()
             await asyncio.gather(producer, consumer, monitor, return_exceptions=True)
+            for stream, (text, start) in list(pending.items()):
+                log("gradium: pending text end inferred at request reset")
+                await publish(text, start, submitted / SAMPLE_RATE, stream)

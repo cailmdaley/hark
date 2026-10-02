@@ -13,7 +13,9 @@ class MockGradium:
     def __init__(self, *, plans=None, drop_first_at=None, error=None, ready=True,
                  finish=True, delay=0, port=0, error_from=0, http_status=None,
                  stall_setup=None, dangling_last=False, stalled_flush=False,
-                 dangling_words=(), flush_delay=0, finish_delay=0, stalled_eos=False):
+                 dangling_words=(), flush_delay=0, finish_delay=0, stalled_eos=False,
+                 anomalies=()):
+        self.anomalies = anomalies
         self.plans = plans or [[("Hello", 0.0, 2.0), ("world.", 2.0, 4.0)]]
         self.drop_first_at, self.error = drop_first_at, error
         self.error_from, self.http_status = error_from, http_status
@@ -103,6 +105,9 @@ class MockGradium:
                         rec["nonzero_head"] = pcm[:64]
                     rec["samples"] += len(pcm) // 2
                     duration = rec["samples"] / 16000
+                    if index == 1 and rec["samples"] == 1280:
+                        for anomaly in self.anomalies:
+                            await ws.send(anomaly if isinstance(anomaly, str) else json.dumps(anomaly))
                     while sent < len(plan) and plan[sent][2] <= duration + 1e-9:
                         text, start, end, *stream = plan[sent]
                         for fragment in (text if isinstance(text, list) else [text]):
