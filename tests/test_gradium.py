@@ -389,7 +389,8 @@ def test_retries_back_off_without_terminal_failure():
             assert time.monotonic() - began < .2
             wait(lambda: mock.handshakes >= 3)
             assert time.monotonic() - began >= .11
-            assert t.degraded and t.error is None
+            assert not t.degraded and t.error is None
+            assert t.take_notices() == []
         finally:
             t.close()
 

@@ -200,6 +200,10 @@ class GradiumTrack:
         self.sent_seconds = 0.0
         self.error = None
         self.degraded = False
+        self.unavailable = False
+        self.recognizing = None
+        self.loss_anchor = None
+        self.state_lock = threading.RLock()
         self.notices = queue.Queue(maxsize=64)
         self.missed = None
         self.ready = threading.Event()
@@ -254,7 +258,7 @@ class GradiumTrack:
             self._end_request()
             self.stopping.set()
             self._report_missed()
-            if self.realtime and self.degraded:
+            if self.realtime and (self.degraded or self.unavailable):
                 self.abort()
             self.last_progress = time.monotonic()
             finish_started = self.last_progress
@@ -320,6 +324,7 @@ class GradiumTrack:
                 if not request.done and not request.rotate:
                     request.append(position, samples, valid)
                     self._report_missed()
+                    self._update_loss()
                     return
             self._end_request()
         request = _Request(position)
@@ -331,6 +336,7 @@ class GradiumTrack:
             return
         self.request = request
         self._report_missed()
+        self._update_loss()
 
     def _speech_flush(self):
         if self.request and self.request.frames and self.request.frames[-1] is not None:
@@ -381,10 +387,39 @@ class GradiumTrack:
             except queue.Empty:
                 return out
 
-    def _degrade(self, lost):
+    def _degrade(self, lost, position):
         if self.degraded != lost:
             self.degraded = lost
-            self._notice(f"gradium {'lost' if lost else 'back'} at {datetime.now():%H:%M:%S}")
+            wall = self.t0 + timedelta(seconds=position / SAMPLE_RATE)
+            self._notice(f"gradium {'lost' if lost else 'back'} at {wall:%H:%M:%S}")
+
+    def _update_loss(self):
+        with self.state_lock:
+            if not self.unavailable or self.degraded:
+                return
+            with self.jobs.mutex:
+                requests = ([self.recognizing] if self.recognizing else []) + list(self.jobs.queue)
+            outstanding = []
+            for request in requests:
+                frontier = max(request.acknowledged, request.replay_start)
+                for run in request.runs:
+                    if run.cloud + run.count > frontier:
+                        outstanding.append(run.source + max(0, frontier - run.cloud))
+                        break
+            if outstanding:
+                self.loss_anchor = min(outstanding)
+                self._degrade(True, self.loss_anchor)
+
+    def _acknowledge(self, request, frontier):
+        with self.state_lock:
+            previous = request.acknowledged
+            request.acknowledged = max(previous, frontier)
+            if request.acknowledged > previous and self.degraded:
+                _, end, _ = request.project(0, request.acknowledged / SAMPLE_RATE)
+                position = round(end * SAMPLE_RATE)
+                if position > self.loss_anchor:
+                    self._degrade(False, position)
+                    self.loss_anchor = None
 
     def _miss(self, position, valid):
         if self.missed is None:
@@ -511,6 +546,8 @@ class GradiumTrack:
                     or msg["frame_size"] <= 0):
                 raise GradiumError("invalid ready sample_rate/frame_size")
             self.last_progress = time.monotonic()
+            with self.state_lock:
+                self.unavailable = False
             log(f"gradium: ready (delay {msg.get('delay_in_frames')} frames)")
             return ws
         except BaseException:
@@ -538,7 +575,9 @@ class GradiumTrack:
                 why = f"HTTP {error.response.status_code}"
             except Exception as error:
                 why = str(error) or type(error).__name__
-            self._degrade(True)
+            with self.state_lock:
+                self.unavailable = True
+                self._update_loss()
             self.ready.set()  # Capture starts after the first failure, not after service recovery.
             if self.realtime and self.stopping.is_set() and attempt >= self.retries:
                 raise asyncio.CancelledError
@@ -554,14 +593,15 @@ class GradiumTrack:
     async def _worker(self):
         # Startup validates authentication even when the entire meeting is silent.
         ws = await self._retry(self._open)
-        self._degrade(False)
         await ws.close()
         ws = None
         self.ready.set()
         try:
             while not self.cancel.is_set():
                 try:
-                    burst = self.jobs.get_nowait()
+                    with self.state_lock:
+                        burst = self.jobs.get_nowait()
+                        self.recognizing = burst
                 except queue.Empty:
                     if self.stopping.is_set():
                         break
@@ -592,6 +632,8 @@ class GradiumTrack:
                 with self.backlog_lock:
                     self.backlog_samples -= burst.wire_samples
                 burst.frames.clear()
+                with self.state_lock:
+                    self.recognizing = None
                 self.last_progress = time.monotonic()
         finally:
             if ws:
@@ -693,7 +735,7 @@ class GradiumTrack:
                         self.results.put_nowait((view, [(text, start, end, stream)]))
                         burst.horizons[stream] = max(original_end, burst.horizons.get(stream, 0))
                         if healthy:
-                            self._degrade(False)
+                            self._acknowledge(burst, original_end)
                         return
                     except queue.Full:
                         if self.cancel.is_set():
@@ -756,12 +798,11 @@ class GradiumTrack:
                         processed = duration
                         settled = max(settled, min(sent_wire, round(duration * SAMPLE_RATE)))
                         _, end, _ = clock.project(0, settled / SAMPLE_RATE)
-                        burst.acknowledged = max(burst.acknowledged, round(end * SAMPLE_RATE))
+                        self._acknowledge(burst, round(end * SAMPLE_RATE))
                         progress()
                 elif kind == "flushed" and pending_flush is not None and msg.get("flush_id") == pending_flush:
                     progress()
                     settled = sent_wire
-                    self._degrade(False)
                     for slot, (text, start) in list(pending.items()):
                         log("gradium: pending text end inferred at speech flush")
                         await publish(text, start, submitted / SAMPLE_RATE, slot)
@@ -769,7 +810,7 @@ class GradiumTrack:
                     pending.clear()
                     _, end, _ = clock.project(0, sent_wire / SAMPLE_RATE)
                     burst.committed = max(burst.committed, round(end * SAMPLE_RATE))
-                    burst.acknowledged = max(burst.acknowledged, burst.committed)
+                    self._acknowledge(burst, burst.committed)
                     await boundary()
                     pending_flush = None
                     flushed.set()
@@ -784,6 +825,9 @@ class GradiumTrack:
                         log("gradium: final text end inferred from submitted duration")
                         await publish(text, start, duration, stream)
                     pending.clear()
+                    _, end, _ = clock.project(0, sent_wire / SAMPLE_RATE)
+                    burst.committed = max(burst.committed, round(end * SAMPLE_RATE))
+                    self._acknowledge(burst, burst.committed)
                     return
                 # step carries semantic VAD, not a phrase boundary or a source offset.
 

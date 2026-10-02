@@ -299,7 +299,9 @@ def test_unchanged_flush_heartbeats_do_not_buy_a_progress_budget():
             wait(lambda: len(mock.connections) == 2 and any(
                 m["type"] == "flush" for m in mock.connections[1]["messages"]))
             time.sleep(.35)
-            assert t.degraded, "unchanged steps kept a pending flush alive"
+            assert len(mock.connections) > 2, "unchanged steps kept a pending flush alive"
+            assert not t.degraded  # The step frontier already acknowledges all audio.
+            assert t.take_notices() == []
             assert t.error is None
             assert not t.finished.is_set()
             finish(t)
