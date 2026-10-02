@@ -202,7 +202,7 @@ def test_pending_words_publish_at_speech_flush_on_each_side_of_gap():
             t.close()
 
 
-def test_quiet_source_clock_keeps_request_open_and_publishes_pending_tail():
+def test_quiet_source_clock_retires_request_and_publishes_pending_tail():
     with MockGradium(plans=[[("tail", 0, 1)]], dangling_last=True) as mock:
         t = default_track(mock)
         t.start()
@@ -213,7 +213,7 @@ def test_quiet_source_clock_keeps_request_open_and_publishes_pending_tail():
             output = collect(t)
             request = t.request
             t.feed(np.zeros(600 * 16000, np.float32))
-            assert t.request is request and not request.done
+            assert t.request is None and request.done
             assert [u.text for u in output] == ["tail"]
             assert output[0].end == pytest.approx(1.84)
             assert t.sent_seconds == pytest.approx(1.84)

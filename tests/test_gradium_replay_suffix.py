@@ -20,7 +20,7 @@ def audio(connection):
 def test_idle_drop_after_acknowledged_flush_does_not_replay_or_report_outage():
     with MockGradium(plans=[[('first', 0, 2)], [('second', .32, 2.32)]],
                      idle_timeout=.15) as mock:
-        t = track(mock)
+        t = track(mock, quiet_timeout=None)
         t.start()
         try:
             t.feed(speech(2))

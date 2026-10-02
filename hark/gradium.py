@@ -166,7 +166,7 @@ class GradiumTrack:
     def __init__(self, name, *, key, language=None, cluster=None, fixed_speaker=None, url=URL,
                  rms=0.001, preroll=0.32, hangover=0.8, max_duration=58,
                  queue_size=None, backlog_seconds=120, retries=2, backoff=0.5, timeout=8,
-                 shutdown_timeout=30, realtime=True, phrase_seconds=4.0):
+                 shutdown_timeout=30, realtime=True, phrase_seconds=4.0, quiet_timeout=60):
         self.name, self.key, self.url = name, key, url
         self.fixed_speaker = fixed_speaker
         self.language = (language or "any").lower().split("-")[0]
@@ -196,6 +196,7 @@ class GradiumTrack:
         self.request = None
         self.active = False
         self.quiet = 0
+        self.quiet_timeout = None if quiet_timeout is None else max(0, round(quiet_timeout * SAMPLE_RATE))
         self.sent_seconds = 0.0
         self.error = None
         self.degraded = False
@@ -298,6 +299,10 @@ class GradiumTrack:
             # Only discarded quiet is eligible for the next speech's preroll.
             self.pre.append((self.position, samples, valid))
         self.position += FRAME
+        if (self.request and not voiced and self.quiet_timeout is not None
+                and self.quiet >= self.quiet_timeout):
+            self._end_request()
+            self.active = False
         if self.request and self.request.wire_samples >= self.max_frames * FRAME:
             self._end_request()
 
