@@ -84,7 +84,7 @@ def test_final_segment_is_visible_before_burst_end_or_eos():
             wait(lambda: not t.results.empty())
             output = flush_tracks([t])
             assert [u.text for u in output] == ["live"]
-            assert not t.burst.done
+            assert not t.request.done
             assert not any(m["type"] == "end_of_stream" for m in mock.connections[1]["messages"])
             t.feed(speech(2))
             assert [u.text for u in finish(t)] == ["later"]
@@ -128,7 +128,7 @@ def test_drop_replays_only_uncommitted_burst_and_counts_retries():
 
 def test_reconnect_between_bursts_preserves_discarded_gap():
     with MockGradium(plans=[[("first", .32, 2.32)], [("second", .32, 2.32)]]) as mock:
-        t = track(mock)
+        t = track(mock, idle_seconds=.8)
         t.start()
         try:
             t.feed(np.zeros(16000, np.float32))
@@ -251,7 +251,7 @@ def test_failures_are_bounded_and_threads_stop(error, ready, finish_, match):
 
 def test_committed_segments_survive_later_failure_without_flush_first():
     with MockGradium(plans=[[("kept", 0, 2)]], error=("down", 1011), error_from=2) as mock:
-        t = track(mock)
+        t = track(mock, idle_seconds=.8)
         t.start()
         try:
             t.feed(speech(2))
@@ -287,7 +287,7 @@ def test_queue_overload_is_explicit_not_dropped():
             with pytest.raises(GradiumError, match="backlog full"):
                 t.feed(speech(10))
             assert t.jobs.qsize() <= 1
-            assert len(t.burst.frames) <= 12
+            assert t.request.wire_samples <= 12 * 1280
         finally:
             t.close()
 
@@ -313,7 +313,7 @@ def test_character_rotation_at_completed_segment_boundary():
         t.start()
         try:
             t.feed(speech(2))
-            wait(lambda: t.burst.rotate)
+            wait(lambda: t.request.rotate)
             t.feed(speech(2))
             output = finish(t)
             assert len(mock.connections) == 3
@@ -348,7 +348,7 @@ def test_replay_boundary_change_is_suppressed_and_logged(capsys):
 
 def test_many_short_bursts_survive_retryable_setup_delay():
     with MockGradium(plans=[[("turn", 0, .32)]], stall_setup={1: .3}) as mock:
-        t = track(mock, timeout=.1)
+        t = track(mock, timeout=.1, idle_seconds=.8)
         t.start()
         try:
             for _ in range(20):
@@ -462,7 +462,7 @@ def test_word_phrases_are_live_and_dangling_last_word_flushes_at_eos():
             live = flush_tracks([t])
             assert [u.text for u in live] == ["One two three four five"]
             assert live[0].speaker == "S1" and t.cluster.counts == [1]
-            assert not t.burst.done
+            assert not t.request.done
             t.feed(speech(.4))
             rest = finish(t)
             assert [u.text for u in rest] == ["six."]
@@ -493,7 +493,7 @@ def test_sparse_phrase_has_eight_second_wall_ceiling():
             output = flush_tracks([t])
             assert len(output) == 1 and len(output[0].speech) == 14
             assert output[0].end == pytest.approx(8.4)
-            assert not t.burst.done
+            assert not t.request.done
             assert t.cluster.counts == []
             finish(t)
         finally:

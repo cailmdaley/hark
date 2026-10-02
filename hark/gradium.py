@@ -1,4 +1,4 @@
-"""Gated Gradium ASR on the source clock, with bounded burst replay."""
+"""Cost-aware gated Gradium ASR with bounded request replay on the source clock."""
 
 import asyncio
 import base64
@@ -72,29 +72,79 @@ def credits_left(key, url=CREDITS_URL):
         return None
 
 
+def _union(spans):
+    """Count each source sample once while keeping omitted gaps disjoint."""
+    merged = []
+    for a, b in sorted(spans):
+        if b <= a:
+            continue
+        if merged and a <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(b, merged[-1][1]))
+        else:
+            merged.append((a, b))
+    return merged
+
+
 @dataclass
-class _Burst:
+class _Mapping:
+    cloud: int
+    source: int
+    count: int
+
+
+@dataclass
+class _Request:
     start: int
-    frames: list = field(default_factory=list)
+    frames: list = field(default_factory=list)  # None marks a speech flush, not EOS.
+    runs: list = field(default_factory=list)
     samples: int = 0
+    wire_samples: int = 0
     done: bool = False
     rotate: bool = False
-    horizons: dict = field(default_factory=dict)
+    horizons: dict = field(default_factory=dict)  # Committed cloud-clock ends by stream.
+
+    def append(self, source, frame, valid):
+        cloud = self.wire_samples
+        if (self.runs and self.runs[-1].cloud + self.runs[-1].count == cloud
+                and self.runs[-1].source + self.runs[-1].count == source):
+            self.runs[-1].count += valid
+        else:
+            self.runs.append(_Mapping(cloud, source, valid))
+        self.samples += valid
+        self.wire_samples += FRAME
+        # Publish mapping before making the frame available to the sender.
+        self.frames.append(frame)
+
+    def project(self, start, end):
+        """Intersect a cloud interval with valid samples, excluding omitted source gaps."""
+        lo, hi = round(start * SAMPLE_RATE), round(end * SAMPLE_RATE)
+        spans = []
+        point = self.start
+        for run in self.runs:
+            if lo > run.cloud:
+                point = run.source + min(lo - run.cloud, run.count)
+            a, b = max(lo, run.cloud), min(hi, run.cloud + run.count)
+            if b > a:
+                spans.append(((run.source + a - run.cloud) / SAMPLE_RATE,
+                              (run.source + b - run.cloud) / SAMPLE_RATE))
+        if spans:
+            return spans[0][0], spans[-1][1], spans
+        return point / SAMPLE_RATE, point / SAMPLE_RATE, []
 
 
 class GradiumTrack:
     """One alternate track in hark's shared capture and sink lifecycle.
 
-    Each gated burst owns a fresh socket and a contiguous source-clock origin.
-    Finalized segments publish immediately. Reconnect replays the bounded burst
-    and suppresses segments starting before each stream's committed horizon.
-    Discarded silence never shifts timestamps.
+    Short dialogue gaps share one request without uploading the omitted quiet.
+    Piecewise integer-sample mappings project finalized cloud words onto the
+    full source clock. Replay suppresses each stream's committed cloud horizon.
     """
 
     def __init__(self, name, *, key, language=None, cluster=None, fixed_speaker=None, url=URL,
-                 rms=0.001, preroll=0.32, hangover=0.8, max_duration=30,
+                 rms=0.001, preroll=0.32, hangover=0.8, max_duration=10,
                  queue_size=None, backlog_seconds=120, retries=2, backoff=0.5, timeout=8,
-                 shutdown_timeout=30, realtime=True, phrase_seconds=4.0):
+                 shutdown_timeout=30, realtime=True, phrase_seconds=4.0,
+                 idle_seconds=10, source_span=120):
         self.name, self.key, self.url = name, key, url
         self.fixed_speaker = fixed_speaker
         self.language = (language or "any").lower().split("-")[0]
@@ -102,7 +152,9 @@ class GradiumTrack:
             raise GradiumError("language must be en, fr or any")
         self.cluster = cluster if cluster is not None else OnlineCluster(minimum_duration=4)
         self.rms, self.hangover = rms, max(1, round(hangover * SAMPLE_RATE / FRAME))
-        self.max_frames = max(1, round(max_duration * SAMPLE_RATE / FRAME))
+        self.max_frames = max(1, int(max_duration * SAMPLE_RATE / FRAME))
+        self.idle_samples = max(1, round(idle_seconds * SAMPLE_RATE))
+        self.source_limit = max(FRAME, round(source_span * SAMPLE_RATE))
         self.pre = deque(maxlen=round(preroll * SAMPLE_RATE / FRAME))
         self.jobs = queue.Queue(maxsize=queue_size or math.ceil(backlog_seconds * SAMPLE_RATE / FRAME))
         self.results = queue.Queue(maxsize=64)
@@ -120,7 +172,8 @@ class GradiumTrack:
         self.t0 = datetime.now()
         self.audio_samples = self.position = 0
         self.tail = np.zeros(0, np.float32)
-        self.burst = None
+        self.request = None
+        self.active = False
         self.quiet = 0
         self.sent_seconds = 0.0
         self.error = None
@@ -169,7 +222,7 @@ class GradiumTrack:
             if self.tail.size:
                 self._frame(np.pad(self.tail, (0, FRAME - self.tail.size)), valid=self.tail.size)
                 self.tail = self.tail[:0]
-            self._end_burst()
+            self._end_request()
             self.stopping.set()
             self.last_progress = time.monotonic()
             while not self.finished.is_set():
@@ -187,32 +240,50 @@ class GradiumTrack:
     def _frame(self, samples, valid=FRAME):
         self.check()
         voiced = float(np.sqrt(np.mean(samples * samples))) >= self.rms
-        if self.burst and (len(self.burst.frames) >= self.max_frames or self.burst.rotate):
-            self._end_burst()
-        if self.burst is None:
-            if not voiced:
-                self.pre.append((self.position, samples))
-                self.position += FRAME
-                return
-            self.burst = _Burst(self.pre[0][0] if self.pre else self.position)
-            self._reserve(len(self.pre) * FRAME)
-            self.burst.samples = len(self.pre) * FRAME
-            self.burst.frames.extend(frame for _, frame in self.pre)
+        if self.request and self.request.rotate:
+            self._end_request()
+        self.quiet = 0 if voiced else self.quiet + FRAME
+        self.active = self.active or voiced
+        if self.active:
+            if self.request is None:
+                # Reserve one frame for the current input even with a tiny request cap.
+                pre = list(self.pre)[-(self.max_frames - 1):] if self.max_frames > 1 else []
+            else:
+                pre = list(self.pre)
             self.pre.clear()
-            self._enqueue(self.burst)
-        self._reserve(FRAME)
-        self.burst.samples += valid
-        self.burst.frames.append(samples)
-        self.quiet = 0 if voiced else self.quiet + 1
-        if self.quiet >= self.hangover:
-            self._end_burst()
+            for position, frame, count in pre:
+                self._append(position, frame, count)
+            self._append(self.position, samples, valid)
+            if not voiced and self.quiet >= self.hangover * FRAME:
+                self._speech_flush()
+                self.active = False
+        else:
+            # Only discarded quiet is eligible for the next speech's preroll.
+            self.pre.append((self.position, samples, valid))
         self.position += FRAME
+        if self.request and (self.request.wire_samples >= self.max_frames * FRAME
+                             or self.quiet >= self.idle_samples
+                             or self.position - self.request.start >= self.source_limit):
+            self._end_request()
 
-    def _end_burst(self):
-        if self.burst:
-            self.burst.done = True
-            self.burst = None
-        self.quiet = 0
+    def _append(self, position, samples, valid):
+        if self.request and self.request.wire_samples >= self.max_frames * FRAME:
+            self._end_request()
+        if self.request is None:
+            self.request = _Request(position)
+            self._enqueue(self.request)
+        self._reserve(FRAME)
+        self.request.append(position, samples, valid)
+
+    def _speech_flush(self):
+        if self.request and self.request.frames and self.request.frames[-1] is not None:
+            self.request.frames.append(None)
+
+    def _end_request(self):
+        if self.request:
+            self._speech_flush()
+            self.request.done = True
+            self.request = None
 
     def _reserve(self, count):
         while True:
@@ -250,8 +321,7 @@ class GradiumTrack:
                         self._phrase(key)
                 continue
             for text, start, end, stream in segments:
-                start += burst.start / SAMPLE_RATE
-                end += burst.start / SAMPLE_RATE
+                start, end, spans = burst.project(start, end)
                 text = text.strip()
                 if not text:
                     continue
@@ -260,19 +330,21 @@ class GradiumTrack:
                 if words and start - words[-1][2] >= 0.8:
                     self._phrase(key)
                     words = self.phrases.setdefault(key, [])
-                words.append((text, start, end))
-                if (sum(b - a for _, a, b in words) >= self.phrase_seconds
-                        or words[-1][2] - words[0][1] >= 8):
+                words.append((text, start, end, spans))
+                intervals = _union(span for _, _, _, spans in words for span in spans)
+                if (sum(b - a for a, b in intervals) >= self.phrase_seconds
+                        or max(w[2] for w in words) - min(w[1] for w in words) >= 8):
                     self._phrase(key)
 
     def _phrase(self, key):
         words = self.phrases.pop(key, [])
         if not words:
             return
-        start, end = words[0][1], max(w[2] for w in words)
-        spans = [(a, b) for _, a, b in words]
+        spans = _union(span for _, _, _, intervals in words for span in intervals)
+        start = spans[0][0] if spans else min(w[1] for w in words)
+        end = spans[-1][1] if spans else max(w[2] for w in words)
         clips = [self.audio.slice(a, b) for a, b in spans]
-        samples = np.concatenate(clips)
+        samples = np.concatenate(clips) if clips else np.zeros(0, np.float32)
         slot = self.fixed_speaker or self.last_speaker
         if not self.fixed_speaker and not self.cluster_failed:
             try:
@@ -282,7 +354,7 @@ class GradiumTrack:
                 log(f"gradium: speaker clustering disabled; keeping {slot} ({type(error).__name__})")
         self.last_speaker = slot
         text = ""
-        for word, _, _ in words:
+        for word, _, _, _ in words:
             text += (" " if text and word[0] not in ".,;:!?" else "") + word
         self.completed.append(Utterance(self.name, slot, start, end,
                                         self.t0 + timedelta(seconds=start), text, speech=spans))
@@ -391,7 +463,7 @@ class GradiumTrack:
                     except queue.Full:
                         await asyncio.sleep(0.01)
                 with self.backlog_lock:
-                    self.backlog_samples -= len(burst.frames) * FRAME
+                    self.backlog_samples -= burst.wire_samples
                 burst.frames.clear()
                 self.last_progress = time.monotonic()
         finally:
@@ -405,18 +477,49 @@ class GradiumTrack:
         characters = messages = 0
         replay_horizons = burst.horizons.copy()
         processed = 0.0
+        sent_wire = submitted = settled = 0
+        flush_id = 0
+        pending_flush = None
         advanced = time.monotonic()
+
+        def waiting():
+            return pending_flush is not None or sent_eos.is_set() or sent_wire > settled
+
+        def progress():
+            nonlocal advanced
+            advanced = self.last_progress = time.monotonic()
 
         async def send(message):
             await asyncio.wait_for(ws.send(json.dumps(message)), self.timeout)
 
+        async def boundary():
+            while not self.cancel.is_set():
+                try:
+                    self.results.put_nowait((burst, None))
+                    return
+                except queue.Full:
+                    await asyncio.sleep(0.01)
+
         async def sender():
+            nonlocal sent_wire, submitted, flush_id, pending_flush
             i = 0
             while not self.cancel.is_set():
                 if i < len(burst.frames):
                     frame = burst.frames[i]
-                    await send({"type": "audio", "audio": base64.b64encode(to_pcm16(frame).tobytes()).decode()})
-                    self.sent_seconds += FRAME / SAMPLE_RATE
+                    if not waiting():
+                        # A new input/flush gets a fresh budget after legitimate idle.
+                        progress()
+                    if frame is None:
+                        flush_id += 1
+                        pending_flush = flush_id
+                        flushed.clear()
+                        await send({"type": "flush", "flush_id": flush_id})
+                        await flushed.wait()
+                    else:
+                        sent_wire += FRAME
+                        submitted = min(sent_wire, burst.samples)
+                        await send({"type": "audio", "audio": base64.b64encode(to_pcm16(frame).tobytes()).decode()})
+                        self.sent_seconds += FRAME / SAMPLE_RATE
                     i += 1
                     await asyncio.sleep(0)
                 elif burst.done:
@@ -425,14 +528,17 @@ class GradiumTrack:
                     await asyncio.sleep(0.01)
             if self.cancel.is_set():
                 raise GradiumError("cancelled")
-            await send({"type": "flush", "flush_id": 1})
-            await flushed.wait()
+            progress()
             sent_eos.set()
             await send({"type": "end_of_stream"})
 
         async def publish(text, start, end, stream):
-            nonlocal advanced
-            advanced = self.last_progress = time.monotonic()
+            duration = submitted / SAMPLE_RATE
+            if not (math.isfinite(start) and math.isfinite(end)
+                    and 0 <= start <= end <= duration + 0.081):
+                raise _Terminal("segment timestamps outside submitted audio")
+            start, end = min(start, duration), min(end, duration)
+            progress()
             if start >= replay_horizons.get(stream, 0) - 1 / SAMPLE_RATE:
                 while not self.cancel.is_set():
                     try:
@@ -446,9 +552,10 @@ class GradiumTrack:
                     f"{replay_horizons[stream]:.2f}")
 
         async def receiver():
-            nonlocal characters, messages, processed, advanced
+            nonlocal characters, messages, processed, settled, pending_flush
             while True:
-                msg = json.loads(await asyncio.wait_for(ws.recv(), self.timeout))
+                # The semantic watchdog, not socket traffic, bounds outstanding work.
+                msg = json.loads(await ws.recv())
                 self._error(msg)
                 kind, stream = msg.get("type"), msg.get("stream_id", 0)
                 if kind == "text":
@@ -456,45 +563,49 @@ class GradiumTrack:
                     messages += 1
                     if characters > 10000 or messages > 2000:
                         raise _Terminal("unbounded transcript from server")
+                    progress()
+                    next_start = float(msg["start_s"])
                     if stream in pending:
                         text, start = pending[stream]
-                        pending[stream] = (text + msg["text"], start)
-                    else:
-                        pending[stream] = (msg["text"], float(msg["start_s"]))
+                        if next_start == start:
+                            pending[stream] = (text + msg["text"], start)
+                            continue
+                        await publish(text, start, next_start, stream)
+                    pending[stream] = (msg["text"], next_start)
                 elif kind == "end_text":
                     if stream not in pending:
                         raise _Terminal("end_text without text")
                     text, start = pending.pop(stream)
-                    end = float(msg["stop_s"])
-                    duration = burst.samples / SAMPLE_RATE
-                    if not (0 <= start <= end <= duration + 0.081):
-                        raise _Terminal("segment timestamps outside submitted audio")
-                    await publish(text, start, min(end, duration), stream)
+                    await publish(text, start, float(msg["stop_s"]), stream)
                     if characters >= 1200:
                         burst.rotate = True
                 elif kind == "step":
                     duration = float(msg.get("total_duration_s", 0))
                     if duration > processed:
                         processed = duration
-                        advanced = self.last_progress = time.monotonic()
-                elif kind == "flushed" and msg.get("flush_id") == 1:
-                    advanced = self.last_progress = time.monotonic()
+                        settled = max(settled, min(sent_wire, round(duration * SAMPLE_RATE)))
+                        progress()
+                elif kind == "flushed" and pending_flush is not None and msg.get("flush_id") == pending_flush:
+                    progress()
+                    settled = sent_wire
+                    await boundary()
+                    pending_flush = None
                     flushed.set()
                 elif kind == "end_of_stream":
                     if not sent_eos.is_set():
                         raise _Terminal("unexpected EOS")
-                    duration = burst.samples / SAMPLE_RATE
+                    duration = submitted / SAMPLE_RATE
                     for stream, (text, start) in pending.items():
                         log("gradium: final text end inferred from submitted duration")
                         await publish(text, start, duration, stream)
                     return
-                # step carries semantic VAD, not a text boundary or a source-clock offset.
+                # step carries semantic VAD, not a phrase boundary or a source offset.
 
         async def watchdog():
             while not consumer.done():
                 if self.cancel.is_set():
                     raise GradiumError("cancelled")
-                if time.monotonic() - advanced > self.timeout:
+                if waiting() and time.monotonic() - advanced > self.timeout:
                     raise TimeoutError("no ASR progress")
                 await asyncio.sleep(0.01)
 
