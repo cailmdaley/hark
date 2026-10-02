@@ -74,12 +74,32 @@ def test_unacknowledged_suffix_loss_uses_source_anchor_and_back_is_once_on_step(
             assert t.take_notices() == ['gradium lost at 12:00:10']
             mock.steps = True
             wait(lambda: not t.degraded)
-            assert t.take_notices() == ['gradium back at 12:00:10']
+            assert t.take_notices() == ['gradium back at 12:00:11']  # Capture has reached 11.6 s.
             assert t.flush(force=True) == []
             t.feed(speech(.16))
             time.sleep(.08)
             assert t.take_notices() == []
             finish(t)
+        finally:
+            t.close()
+
+
+def test_old_prefix_ack_recovery_ends_loss_at_current_capture_horizon():
+    with MockGradium(error=('no workers', 1011), plans=[[('late text', 0, 1000)]]) as mock:
+        t = track(mock, preroll=0, backoff=.03)
+        t.t0 = ANCHOR
+        t.start()
+        try:
+            t.feed(speech(2))
+            t.feed(np.zeros(60 * 16000, np.float32))
+            assert t.audio_samples == 62 * 16000
+            assert t.take_notices() == ['gradium lost at 12:00:00']
+            mock.error = None
+            wait(lambda: not t.degraded)
+            # The first ACK covers old speech, but recognition resumes after 62 source seconds.
+            assert t.take_notices() == ['gradium back at 12:01:02']
+            finish(t)
+            assert t.take_notices() == []
         finally:
             t.close()
 

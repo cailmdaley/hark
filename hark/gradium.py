@@ -418,7 +418,7 @@ class GradiumTrack:
                 _, end, _ = request.project(0, request.acknowledged / SAMPLE_RATE)
                 position = round(end * SAMPLE_RATE)
                 if position > self.loss_anchor:
-                    self._degrade(False, position)
+                    self._degrade(False, self.audio_samples)
                     self.loss_anchor = None
 
     def _miss(self, position, valid):
