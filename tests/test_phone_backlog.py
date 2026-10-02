@@ -5,6 +5,7 @@ import signal
 import socket
 import tempfile
 import threading
+import time
 import wave
 
 import numpy as np
@@ -22,9 +23,14 @@ def test_actual_socket_accepts_more_than_32_seconds_of_worklet_frames():
         try:
             with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
                 conn.connect(str(src.path))
-                for _ in range(400):
+                for index in range(400):
                     conn.sendall(b'\1\0' * 1600)
-                assert wait_for(lambda: src.queued_samples == 40 * SAMPLE_RATE)
+                    deadline = time.monotonic() + 2
+                    while src.queued_samples < (index + 1) * 1600:
+                        assert time.monotonic() < deadline
+                        time.sleep(.0001)
+                assert src.queue.qsize() == 400  # Each worklet frame really reached the queue separately.
+                assert src.queued_samples == 40 * SAMPLE_RATE
             assert src.error is None
             assert src.drain(limit=float('inf')).size == 40 * SAMPLE_RATE
             assert src.queued_samples == 0
