@@ -86,8 +86,9 @@ Idle without audio had no advancing server clock; sending silence cost more.
 Earlier, 59.76 seconds across 16 short requests cost 720 credits.
 
 hark gates silence with a conservative energy check, a 320 ms pre-roll and an 800 ms tail.
-Speech bursts share a socket across quiet periods without uploading the intervening quiet or rotating for elapsed wall time.
-Requests rotate at **58 submitted seconds** or near **1,200 recognised characters**.
+Speech bursts share a socket across short quiet periods without uploading the intervening quiet.
+Requests rotate at **58 submitted seconds**, near **1,200 recognised characters**, or after **60 seconds of source-clock quiet**.
+Quiet closes with EOS and drains the decoder before the observed 120-second provider no-output limit; the next speech opens a fresh request.
 The duration leaves two seconds of headroom below a 60-second billing unit for the observed decoder tail; a 60-second input itself could spill into a 75-second bill.
 Retries, shorter requests and gate tails still cost credits.
 **3 × submitted seconds is not a reliable bill estimate**; the nominal 4 hours 10 minutes is an unrounded upper bound, not a guaranteed meeting allowance.
@@ -119,11 +120,14 @@ hark enroll Ada --file ada.wav # create a voiceprint from at least 5 s of speech
 
 Ctrl-C, SIGTERM and SIGHUP flush pending text and write `# ended`.
 A missing key or rejected authentication writes a clear `# gradium …` comment and closes the transcript; an owned meeting is marked failed in `meeting.json`.
-Other Gradium or network failures keep source capture and WAV recording running, with `# gradium lost at …` and `# gradium back at …` markers.
+Other Gradium or network failures keep source capture and WAV recording running.
+`# gradium lost at …` and `# gradium back at …` mark intervals when unacknowledged speech actually waits for unavailable recognition, not idle connection churn.
 Recovery retries for the meeting's duration with cancellable exponential backoff capped at 30 seconds.
 A 120-second recognition backlog includes replay audio; once full, further recognition is omitted with interval notices, while recording continues.
 Only a live invocation with `--launch`, or explicit `-o` under the HARK home's `meetings/` directory, owns that lifecycle record; standalone capture does not overwrite it.
-Reconnects preserve the source clock and suppress already accepted speech on replay.
+Reconnects preserve the source clock and upload only the uncommitted suffix, using a fresh connection's zero-based clock.
+A drop after all input is committed causes neither replay nor outage markers; the next speech opens a new request.
+Unended text on a reset stays uncommitted so it cannot conceal undecoded audio; a retained hypothesis can be finalized when recognition stops.
 If the service changes segment boundaries on replay, a segment starting before the accepted horizon is skipped; its overlapping continuation can be lost.
 
 On a Mac call, wear headphones: hark assumes the mic hears only you and system audio contains everyone else.
@@ -143,12 +147,15 @@ Gradium provides no diarization.
 Its word-sized text spans accumulate into roughly **four seconds of unique recognised audio** before hark computes a WeSpeaker embedding and compares it with online speaker centroids at cosine similarity `0.55`.
 Completed phrases appear while speech continues; hark does not wait for the request's end.
 An eight-second source span, an 800 ms gap, a speech-flush acknowledgement or the request's end also closes a phrase.
-A final word without `end_text` uses the next word's start, or an inferred end at a speech-flush acknowledgement or EOS; quiet does not close the socket.
+A final word without `end_text` uses the next word's start, or an inferred end at a speech-flush acknowledgement or EOS; a long quiet period closes the request after 60 source seconds.
 Phrases with less than four seconds of audio inherit the preceding speaker.
 There is **one speaker per phrase**, not overlapping-speaker separation.
 Brief replies can be mislabelled and speaker slots can fragment; this is weaker than the local ear's diarization.
 
 Both ears use the same enrolled-voice naming rules.
+Gradium also anchors clusters to confident enrolled identities: cosine at least `0.55`, leading the next bank candidate by `0.21`, reuses that identity's slot before centroid matching.
+Weak or ambiguous bank matches use ordinary clustering; confidently different enrolled identities cannot share a slot.
+This requires a voice bank and does not improve anonymous re-identification by lowering thresholds.
 To name yourself on another host, copy `~/.hark/voices/me.npy` there.
 Manual names take precedence.
 Speaker numbers are per meeting.

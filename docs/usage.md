@@ -41,7 +41,9 @@ The free plan has 45,000 credits per month (an unrounded upper bound of 4 hours 
 The [billing probes](../README.md#phone-meetings-on-linux) cost 495 credits: one 30-second clip cost 135; two 10-second clips separated by 20 seconds of no-audio idle cost 90; transmitting silence during that gap cost 135; three separate 5-second clips cost 135.
 Charges fit 15-second rounding of the service progress clock, including an observed 1.04-second decoder tail; this is not a published guarantee.
 Do not estimate the bill as simply 3 × submitted seconds.
-hark groups speech bursts across arbitrarily long quiet without sending the discarded audio and rotates after at most 58 submitted seconds or near 1,200 recognised characters.
+hark groups speech bursts across short quiet periods without sending discarded audio.
+Requests rotate after at most 58 submitted seconds, near 1,200 recognised characters, or 60 seconds of source-clock quiet.
+A quiet request ends cleanly before the observed 120-second provider no-output limit; resumed speech opens a fresh one.
 Logs record submitted seconds and observed credit balances; launcher-owned lifecycle files include the latest observation.
 Balances can lag settled charges.
 Background noise above the energy threshold still costs money.
@@ -49,14 +51,17 @@ Background noise above the energy threshold still costs money.
 
 Words accumulate into four seconds of unique recognised audio for CPU speaker embeddings, then appear while the request is still open.
 Phrases close at an eight-second source-wall span, an 800 ms gap, a speech-flush acknowledgement or the request's end too.
-A last word without `end_text` uses the next word's start, or an inferred end at a speech-flush acknowledgement or EOS; quiet does not close the request.
+A last word without `end_text` uses the next word's start, or an inferred end at a speech-flush acknowledgement or EOS; 60 source seconds of quiet closes the request.
 Less than four seconds inherits the preceding speaker.
 There is only one speaker per phrase; short replies and overlap can be mislabelled, and slots can fragment.
 The same enrolled-voice bank and manual names apply.
+Confident bank identities also anchor Gradium clusters across gaps, using the naming similarity/margin rules before generic centroid matching; anonymous behavior is unchanged.
 
 Missing keys and authentication failures close the transcript with `# ended`, write a `# gradium …` explanation and exit nonzero; an owned meeting is marked failed.
-Other provider/network failures keep capture and WAV recording running, with `# gradium lost at …` and `# gradium back at …` markers.
-Cancellable reconnects use exponential backoff capped at 30 seconds for the meeting's duration, replay audio on its original clock and suppress accepted segments.
+Other provider/network failures keep capture and WAV recording running.
+Lost/back markers appear only while unacknowledged speech waits for unavailable recognition: loss starts at the first waiting source sample and recovery ends at the current capture horizon.
+Cancellable reconnects use exponential backoff capped at 30 seconds for the meeting's duration, replay only uncommitted audio on its original source clock and suppress accepted segments.
+Idle drops with all input committed open no retry socket and produce no outage markers.
 A 120-second recognition backlog bounds retained upload/replay audio. Overflow omits further recognition with source-interval notices, not the saved recording.
 Changed replay boundaries can lose an overlapping continuation; the log records the skipped interval.
 See the [pipeline](how-it-works.md#gradium-recognition-and-speakers) for timing, recovery and resource bounds.
