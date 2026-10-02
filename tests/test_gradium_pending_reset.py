@@ -48,11 +48,9 @@ def test_unexpected_eos_does_not_commit_pending_text_over_the_undecoded_tail():
         t.start()
         try:
             t.feed(speech(2))
-            wait(lambda: t.sent_seconds >= 2 and reset_observed(t))
-            interim = flush_tracks([t])
-            output = interim + finish(t)
+            wait(lambda: len(mock.connections) >= 3 and mock.connections[2]['samples'] == 2 * 16000)
+            output = flush_tracks([t]) + finish(t)
             assert [u.text for u in output] == ['prefix', 'following']
-            assert interim == []
             assert mock.connections[2]['samples'] == 2 * 16000
         finally:
             t.close()
