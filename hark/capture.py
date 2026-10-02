@@ -392,6 +392,41 @@ class WavRecorder:
             self.wav = None
 
 
+def load_audio(path, sr=SAMPLE_RATE):
+    """Decode mono audio on the PCM grid without importing MLX."""
+    import math
+    import wave
+
+    try:
+        with wave.open(str(path), "rb") as wav:
+            rate, channels, width = wav.getframerate(), wav.getnchannels(), wav.getsampwidth()
+            raw = wav.readframes(wav.getnframes())
+        if width != 2:
+            raise wave.Error("use portable decoder for this sample width")
+        audio = np.frombuffer(raw, dtype="<i2").astype(np.float32).reshape(-1, channels).mean(axis=1) / 32768
+    except (wave.Error, EOFError):
+        import soundfile as sf
+
+        try:
+            audio, rate = sf.read(str(path), dtype="float32", always_2d=True)
+            audio = audio.mean(axis=1)
+        except sf.LibsndfileError:
+            # ffmpeg supplies formats libsndfile doesn't decode, e.g. m4a.
+            try:
+                decoded = subprocess.run(["ffmpeg", "-v", "error", "-i", str(path), "-f", "s16le",
+                                          "-ar", str(sr), "-ac", "1", "pipe:1"],
+                                         check=True, capture_output=True)
+            except FileNotFoundError as error:
+                raise ValueError("this audio format requires ffmpeg on PATH") from error
+            return np.frombuffer(decoded.stdout, dtype="<i2").astype(np.float32) / 32768
+    if rate != sr:
+        from scipy.signal import resample_poly
+
+        divisor = math.gcd(rate, sr)
+        audio = resample_poly(audio, sr // divisor, rate // divisor)
+    return on_pcm16_grid(np.asarray(audio, dtype=np.float32))
+
+
 class FileSource(Source):
     """Replays an audio file, as fast as possible or at real-time pace."""
 
@@ -403,17 +438,21 @@ class FileSource(Source):
         self.realtime = realtime
         self.done = threading.Event()
         self.stopping = threading.Event()
+        self.queue = queue.Queue(maxsize=20)
 
     def _open(self):
-        from mlx_audio.stt.utils import load_audio
-
-        audio = np.array(load_audio(str(self.path), sr=SAMPLE_RATE), dtype=np.float32)
+        audio = load_audio(self.path)
 
         def feed():
             for i in range(0, audio.size, BLOCK):
                 if self.stopping.is_set():
                     break
-                self.queue.put((None, audio[i : i + BLOCK]))
+                while not self.stopping.is_set():
+                    try:
+                        self.queue.put((None, audio[i : i + BLOCK]), timeout=0.1)
+                        break
+                    except queue.Full:
+                        pass
                 if self.realtime:
                     time.sleep(BLOCK / SAMPLE_RATE)
             self.done.set()

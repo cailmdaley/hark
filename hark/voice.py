@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from collections import defaultdict, deque
+import os
+import tempfile
 import numpy as np
 
 MODEL_REPO = "soniqo/WeSpeaker-ResNet34-LM-ONNX"
@@ -36,12 +38,80 @@ class Embedder:
     def __init__(self):
         import onnxruntime as ort
 
-        self.session = ort.InferenceSession(_model_path(), providers=["CPUExecutionProvider"])
+        options = ort.SessionOptions()
+        options.intra_op_num_threads = min(4, os.cpu_count() or 1)
+        options.inter_op_num_threads = 1
+        self.session = ort.InferenceSession(_model_path(), sess_options=options,
+                                            providers=["CPUExecutionProvider"])
         self.input = self.session.get_inputs()[0].name
 
     def __call__(self, samples):
         vector = self.session.run(None, {self.input: _fbank(samples)})[0][0]
         return (vector / max(float(np.linalg.norm(vector)), 1e-12)).astype(np.float32)
+
+
+class OnlineCluster:
+    """Assign mono 16 kHz speech to S1… by cosine running centroids.
+
+    Clips shorter than `minimum_duration` inherit the last slot without updating it.
+    A cosine below `threshold` creates a new slot; embeddings are unit-normalized.
+    """
+
+    def __init__(self, embedder=None, threshold=0.55, minimum_duration=1.8):
+        self.embedder = embedder
+        self.threshold = threshold
+        self.minimum_duration = minimum_duration
+        self.centroids = []
+        self.counts = []
+        self.previous = "S1"
+
+    def assign(self, samples):
+        if len(samples) < self.minimum_duration * 16000:
+            return self.previous
+        if self.embedder is None:
+            self.embedder = Embedder()
+        vector = np.asarray(self.embedder(samples), dtype=np.float32)
+        norm = float(np.linalg.norm(vector))
+        if not np.isfinite(vector).all() or norm < 1e-12:
+            raise ValueError("invalid speaker embedding")
+        vector = vector / norm
+        scores = [float(np.dot(vector, c / np.linalg.norm(c))) for c in self.centroids]
+        index = int(np.argmax(scores)) if scores else 0
+        if not scores or scores[index] < self.threshold:
+            index = len(self.centroids)
+            self.centroids.append(vector.copy())
+            self.counts.append(1)
+        else:
+            n = self.counts[index]
+            self.centroids[index] = (n * self.centroids[index] + vector) / (n + 1)
+            self.counts[index] += 1
+        self.previous = f"S{index + 1}"
+        return self.previous
+
+    __call__ = assign
+
+
+class AudioArchive:
+    """Disk-backed raw track audio; delayed segments never lose their samples."""
+
+    def __init__(self):
+        self.file = tempfile.TemporaryFile()
+        self.size = 0
+
+    def append(self, start, samples):
+        if round(start * 16000) != self.size:
+            raise ValueError("non-contiguous track audio")
+        self.file.seek(0, 2)
+        self.file.write(np.asarray(samples, dtype="<f4").tobytes())
+        self.size += len(samples)
+
+    def slice(self, start, end):
+        lo, hi = max(0, round(start * 16000)), min(self.size, round(end * 16000))
+        self.file.seek(lo * 4)
+        return np.frombuffer(self.file.read(max(0, hi - lo) * 4), dtype="<f4").copy()
+
+    def close(self):
+        self.file.close()
 
 
 class AudioBuffer:
