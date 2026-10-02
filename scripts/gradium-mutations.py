@@ -16,6 +16,8 @@ V = "hark/voice.py"
 T = "tests/test_gradium.py::"
 CT = "tests/test_gradium_cli.py::"
 VT = "tests/test_cluster.py::"
+DEFAULT_HARK_HOME = (Path.home() / ".hark").resolve()
+SANDBOX_EXEC = "/usr/bin/sandbox-exec"
 
 # Each fault has a specific observable check, rather than a whole-suite failure.
 CASES = [
@@ -92,18 +94,30 @@ CASES = [
     ("cli-frozen-home-guard", 'tests/conftest.py', 'if cli.HOME.resolve() == FORBIDDEN_DEFAULT:', 'if cli.HOME.resolve() == (Path.home() / ".hark").resolve():', 'tests/test_isolation.py::test_cli_guard_protects_original_default_after_home_mock'),
     ("cli-environment-guard", 'tests/conftest.py', 'if Path(os.environ["HARK_DIR"]).expanduser().resolve() == FORBIDDEN_DEFAULT:', 'if False:', 'tests/test_isolation.py::test_cli_guard_refuses_default_environment_in_fake_home'),
     ("smoke-home-guard", 'scripts/gradium-smoke.py', 'if home == (Path.home() / ".hark").resolve():', 'if False:', 'tests/test_isolation.py::test_smoke_refuses_default_home_in_sandbox'),
+    ("darwin-write-sandbox", 'scripts/gradium-mutations.py', '\n    return [SANDBOX_EXEC, "-p", profile, *command]', '\n    return list(command)', 'tests/test_mutation_sandbox.py::test_physical_sandbox_blocks_only_fake_home_writes', "darwin"),
 ]
+
+
+def sandbox_command(command, protected_root):
+    """Deny writes beneath an explicit root when the Darwin sandbox is available."""
+    if sys.platform != "darwin" or not os.access(SANDBOX_EXEC, os.X_OK):
+        return list(command)
+    path = json.dumps(str(Path(protected_root).expanduser().resolve()), ensure_ascii=False)
+    profile = f'(version 1)(allow default)(deny file-write* (subpath {path}))'
+    return [SANDBOX_EXEC, "-p", profile, *command]
 
 
 def run_tests(root, targets, timeout=40):
     with tempfile.TemporaryDirectory(prefix="hk-check-") as home:
-        if Path(home).resolve() == (Path.home() / ".hark").resolve():
+        if Path(home).resolve() == DEFAULT_HARK_HOME:
             raise RuntimeError("mutation checks must not use the default HARK home")
         env = dict(os.environ, HARK_DIR=home, PYTHONPATH=str(root), PYTHONDONTWRITEBYTECODE="1",
                    GRADIUM_API_KEY="mutation-local-only")
         start = time.monotonic()
         try:
-            result = subprocess.run([sys.executable, "-m", "pytest", "-q", *targets], cwd=root, env=env,
+            command = sandbox_command([sys.executable, "-m", "pytest", "-q", *targets],
+                                      DEFAULT_HARK_HOME)
+            result = subprocess.run(command, cwd=root, env=env,
                                     capture_output=True, text=True, timeout=timeout)
             return {"returncode": result.returncode, "seconds": round(time.monotonic() - start, 2),
                     "output": (result.stdout + result.stderr)[-5000:]}
