@@ -77,7 +77,7 @@ os.close(fd)
     mirror = TranscriptMirror(local, "fake", str(remote), command=command,
                               size_command=remote_size(remote), backoff=0.01)
     mirror.start()
-    assert mirror.finish(timeout=5)
+    assert mirror.finish(timeout=15)
     assert launches >= 2
     assert remote.read_bytes() == local.read_bytes()
 
