@@ -494,11 +494,17 @@ def main(argv=None):
                         track.feed(rest, final=True)
                     except Exception as error:
                         finish_error = finish_error or error
-                for u in flush_tracks(all_tracks, force=True):
+                final_utterances = []
+                for track in all_tracks:
+                    try:
+                        final_utterances.extend(flush_tracks([track], force=True))
+                    except Exception as error:
+                        finish_error = finish_error or error
+                for u in sorted(final_utterances, key=lambda u: u.wall_span[0]):
                     if sink:
                         _emit(u, sink, matcher, tracks_by_name, failed_slots)
-                if finish_error:
-                    capture_error = capture_error or finish_error
+                if finish_error and capture_error is None:
+                    capture_error = finish_error
                     raise finish_error
             finally:
                 try:

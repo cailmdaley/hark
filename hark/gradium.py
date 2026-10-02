@@ -371,10 +371,10 @@ class GradiumTrack:
         self.cancel.set()
         if self.thread:
             self.thread.join(timeout=self.timeout + 2)
-        self.audio.close()
 
     def close(self):
         self.abort()
+        self.audio.close()
 
     def _run(self):
         try:

@@ -98,12 +98,10 @@ class OnlineCluster:
 
 
 class AudioArchive:
-    """Disk-backed raw track audio; delayed segments never lose their samples."""
+    """Private temporary audio retains old samples for delayed replay and naming without WAVs."""
 
     def __init__(self):
-        directory = Path.home() / ".cache/hark/audio"
-        directory.mkdir(parents=True, exist_ok=True, mode=0o700)
-        self.file = tempfile.TemporaryFile(dir=directory)
+        self.file = tempfile.TemporaryFile()
         self.size = 0
 
     def append(self, start, samples):
