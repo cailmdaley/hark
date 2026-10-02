@@ -35,7 +35,7 @@ def configure(monkeypatch, tmp_path, mock=None):
     monkeypatch.setattr(cli, "credits_left", lambda key: metered.append(key) or (900 - len(metered)))
     if mock:
         def make_track(name, **kwargs):
-            return GradiumTrack(name, **kwargs, url=mock.url, timeout=.3, shutdown_timeout=3,
+            return GradiumTrack(name, **kwargs, url=mock.url, timeout=.3, shutdown_timeout=3, phrase_seconds=2,
                                 backoff=.01, cluster=OnlineCluster(lambda _: np.array([1., 0.])))
         monkeypatch.setattr(cli, "GradiumTrack", make_track)
     return metered

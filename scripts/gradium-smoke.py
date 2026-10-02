@@ -36,8 +36,9 @@ def main():
                       "threads": len(list(task_dir.iterdir())) if task_dir.exists() else None}), flush=True)
     with MockGradium(drop_first_at=args.drop_at) as mock:
         def make_track(name, **kwargs):
-            cluster = OnlineCluster(lambda _: np.array([1., 0.])) if args.synthetic_cluster else OnlineCluster()
-            return GradiumTrack(name, **kwargs, url=mock.url, cluster=cluster)
+            cluster = OnlineCluster(lambda _: np.array([1., 0.])) if args.synthetic_cluster else None
+            options = {"phrase_seconds": 2} if args.synthetic_cluster else {}
+            return GradiumTrack(name, **kwargs, url=mock.url, cluster=cluster, **options)
         cli.GradiumTrack = make_track
         options = ["--file", str(args.file)] if args.file else ["--phone"]
         result = cli.main(["--ear", "gradium", "-o", str(home / "meeting.txt")] + options)

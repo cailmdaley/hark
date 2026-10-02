@@ -30,7 +30,7 @@ def wait(predicate, timeout=3):
 
 
 def track(mock, **kwargs):
-    options = dict(timeout=0.5, backoff=0.01, shutdown_timeout=5)
+    options = dict(timeout=0.5, backoff=0.01, shutdown_timeout=5, phrase_seconds=2)
     options.update(kwargs)
     return GradiumTrack("phone", key="mock-key", url=mock.url,
                         cluster=OnlineCluster(lambda _: np.array([1., 0.])), **options)
@@ -140,6 +140,7 @@ def test_reconnect_between_bursts_preserves_discarded_gap():
             second = finish(t)
             assert [u.text for u in first + second] == ["first", "second"]
             assert [u.start for u in first + second] == pytest.approx([0.96, 10.96])
+            assert [u.end for u in first + second] == pytest.approx([2.96, 12.96])
             assert len(mock.connections) == 3
         finally:
             t.close()
@@ -467,6 +468,82 @@ def test_word_phrases_are_live_and_dangling_last_word_flushes_at_eos():
             assert [u.text for u in rest] == ["six."]
             assert rest[0].end == pytest.approx(2.4)
             assert t.cluster.counts == [1]
+        finally:
+            t.close()
+
+
+def test_calibrated_default_phrase_and_cluster_minimum():
+    t = GradiumTrack("phone", key="mock-key")
+    try:
+        assert t.phrase_seconds == 4
+        assert t.cluster.minimum_duration == 4
+        assert t.cluster.threshold == .55
+    finally:
+        t.close()
+
+
+def test_sparse_phrase_has_eight_second_wall_ceiling():
+    words = [("word", i * .64, i * .64 + .08) for i in range(14)]
+    with MockGradium(plans=[words]) as mock:
+        t = track(mock, phrase_seconds=4)
+        t.start()
+        try:
+            t.feed(speech(9))
+            wait(lambda: t.results.qsize() >= 14)
+            output = flush_tracks([t])
+            assert len(output) == 1 and len(output[0].speech) == 14
+            assert output[0].end == pytest.approx(8.4)
+            assert not t.burst.done
+            assert t.cluster.counts == []
+            finish(t)
+        finally:
+            t.close()
+
+
+def test_unchanged_step_heartbeats_do_not_prevent_failure_or_leave_thread_alive():
+    with MockGradium(stalled_flush=True) as mock:
+        t = track(mock, timeout=.1, shutdown_timeout=.5)
+        t.start()
+        began = time.monotonic()
+        try:
+            t.feed(speech(2))
+            with pytest.raises(GradiumError, match="persistent failure"):
+                finish(t)
+            assert time.monotonic() - began < 2
+            assert t.finished.is_set() and not t.thread.is_alive()
+            assert t.thread.daemon
+        finally:
+            t.close()
+
+
+def test_cancel_interrupts_a_sender_waiting_for_flush():
+    with MockGradium(stalled_flush=True) as mock:
+        t = track(mock, timeout=3)
+        t.start()
+        try:
+            t.feed(speech(2))
+            t.feed(np.zeros(16000, np.float32))
+            wait(lambda: len(mock.connections) > 1 and
+                 any(m["type"] == "flush" for m in mock.connections[1]["messages"]))
+            began = time.monotonic()
+            t.abort()
+            assert time.monotonic() - began < .5
+            assert not t.thread.is_alive()
+        finally:
+            t.close()
+
+
+def test_inferred_tail_end_never_exceeds_unpadded_track():
+    with MockGradium(plans=[[("in.", .4, 1.00625)]], dangling_last=True) as mock:
+        t = track(mock)
+        t.start()
+        try:
+            t.feed(speech(1.00625))
+            output = finish(t)
+            assert len(output) == 1
+            assert output[0].end == t.processed == pytest.approx(1.00625)
+            assert output[0].speech == [(.4, 1.00625)]
+            assert mock.connections[1]["samples"] / 16000 == 1.04
         finally:
             t.close()
 

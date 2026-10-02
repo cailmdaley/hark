@@ -12,7 +12,7 @@ from websockets.asyncio.server import serve
 class MockGradium:
     def __init__(self, *, plans=None, drop_first_at=None, error=None, ready=True,
                  finish=True, delay=0, port=0, error_from=0, http_status=None,
-                 stall_setup=None, dangling_last=False):
+                 stall_setup=None, dangling_last=False, stalled_flush=False):
         self.plans = plans or [[("Hello", 0.0, 2.0), ("world.", 2.0, 4.0)]]
         self.drop_first_at, self.error = drop_first_at, error
         self.error_from, self.http_status = error_from, http_status
@@ -20,6 +20,7 @@ class MockGradium:
         self.burst_count = 0
         self.stall_setup = stall_setup or {}
         self.dangling_last = dangling_last
+        self.stalled_flush = stalled_flush
         self.ready, self.finish, self.delay, self.port = ready, finish, delay, port
         self.connections = []
         self.errors = []
@@ -113,6 +114,11 @@ class MockGradium:
                         return
                 elif msg["type"] == "flush":
                     assert msg["flush_id"] == 1
+                    if self.stalled_flush:
+                        while not self.stop.is_set():
+                            await ws.send(json.dumps({"type": "step", "total_duration_s": rec["samples"] / 16000,
+                                                      "vad": [{"horizon_s": 2, "inactivity_prob": 0.9}]}))
+                            await asyncio.sleep(.01)
                     await ws.send(json.dumps({"type": "flushed", "flush_id": 1}))
                 elif msg["type"] == "end_of_stream":
                     if self.finish:
