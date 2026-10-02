@@ -278,16 +278,18 @@ class GradiumTrack:
     def _append(self, position, samples, valid):
         if self.request and self.request.wire_samples >= self.max_frames * FRAME:
             self._end_request()
-        if self.request is None:
-            request = _Request(position)
-            if not self._enqueue(request):
-                self._miss(position, valid)
-                return
-            self.request = request
         if not self._reserve(FRAME):
             self._end_request()
             self._miss(position, valid)
             return
+        if self.request is None:
+            request = _Request(position)
+            if not self._enqueue(request):
+                with self.backlog_lock:
+                    self.backlog_samples -= FRAME
+                self._miss(position, valid)
+                return
+            self.request = request
         self._report_missed()
         self.request.append(position, samples, valid)
 

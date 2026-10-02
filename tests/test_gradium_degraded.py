@@ -91,6 +91,28 @@ def test_pending_words_survive_abort_during_backoff():
             t.close()
 
 
+def test_sustained_outage_full_backlog_admits_no_empty_jobs_and_recovers():
+    with MockGradium(error=('no workers', 1011), plans=[[('word', 0, .08)]]) as mock:
+        t = track(mock, backlog_seconds=.16, max_duration=.08)
+        t.start()
+        try:
+            t.feed(speech(20))
+            assert t.backlog_samples == 2560
+            assert t.jobs.qsize() == 2
+            assert all(job.wire_samples == 1280 and job.frames for job in t.jobs.queue)
+            mock.error = None
+            wait(lambda: t.backlog_samples == 0)
+            assert t.jobs.empty()
+            assert len([c for c in mock.connections if c['samples']]) == 2
+            t.feed(speech(.08))
+            output = finish(t)
+            assert [u.text for u in output] == ['word', 'word', 'word']
+            assert [u.start for u in output] == [0, .08, 20]
+            assert len([c for c in mock.connections if c['samples']]) == 3
+        finally:
+            t.close()
+
+
 def test_speaker_warm_failure_falls_back_without_stopping_capture():
     with MockGradium(plans=[[('words', 0, 2)]]) as mock:
         t = track(mock)
