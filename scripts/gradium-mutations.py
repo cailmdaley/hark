@@ -20,7 +20,7 @@ VT = "tests/test_cluster.py::"
 # Each fault has a specific observable check, rather than a whole-suite failure.
 CASES = [
     ("default-ear", C, 'return "gradium"\n    return "local"', 'return "local"\n    return "local"', CT + "test_default_ear_follows_importability_and_explicit_choice_is_lazy"),
-    ("linux-devices", C, 'if sys.platform != "darwin" and not (args.phone or args.file):', 'if False and not (args.phone or args.file):', CT + "test_linux_device_modes_fail_fast"),
+    ("linux-devices", C, 'if not _device_capture_available() and not (args.phone or args.file):', 'if False and not (args.phone or args.file):', CT + "test_linux_device_modes_fail_fast"),
     ("local-capability", C, 'if args.ear == "local" and _default_ear() != "local":', 'if False and _default_ear() != "local":', CT + "test_unavailable_explicit_local_fails_before_lifecycle"),
     ("mlx-dependency-marker", "pyproject.toml", " ; sys_platform == 'darwin'\",\n    \"numpy", '\",\n    "numpy', VT + "test_dependencies_have_portable_platform_markers"),
     ("device-dependency-marker", "pyproject.toml", '"sounddevice>=0.5.1 ; sys_platform == \'darwin\'"', '"sounddevice>=0.5.1"', VT + "test_dependencies_have_portable_platform_markers"),
@@ -84,19 +84,31 @@ CASES = [
     ("cancel-flush-wait", G, 'if self.cancel.is_set():\n                    raise GradiumError("cancelled")', 'if False:\n                    raise GradiumError("cancelled")', T + "test_cancel_interrupts_a_sender_waiting_for_flush"),
     ("real-tail-clock", G, 'duration = burst.samples / SAMPLE_RATE\n                    for stream', 'duration = len(burst.frames) * FRAME / SAMPLE_RATE\n                    for stream', T + "test_inferred_tail_end_never_exceeds_unpadded_track"),
     ("linux-signal-threads", C, 'self.portable = sys.platform != "darwin"', 'self.portable = False', CT + "test_real_cli_subprocess_sigterm_after_blas_threads_writes_ended", "linux"),
+    ("meeting-ownership", C, ') if _owns_meeting(args, out) else None)', ') if live else None)', 'tests/test_lifecycle_policy.py::test_unowned_live_capture_preserves_existing_record'),
+    ("meeting-owner-claim", C, ') if _owns_meeting(args, out) else None)', ') if False else None)', 'tests/test_lifecycle_policy.py::test_owned_live_capture_records_phases'),
+    ("file-meeting-ownership", C, 'return not args.file and (args.launch is not None or (', 'return (args.launch is not None or (', 'tests/test_lifecycle_policy.py::test_file_never_owns_record_even_with_launch_and_meetings_output'),
+    ("suite-home-isolation", 'tests/conftest.py', 'monkeypatch.setattr(cli, "HOME", home)', 'monkeypatch.setattr(cli, "HOME", Path.home() / ".hark")', 'tests/test_isolation.py::test_suite_home_and_environment_are_isolated'),
+    ("cli-home-guard", 'tests/conftest.py', 'if cli.HOME.resolve() == FORBIDDEN_DEFAULT:', 'if False:', 'tests/test_isolation.py::test_cli_guard_refuses_overridden_default_home'),
+    ("cli-frozen-home-guard", 'tests/conftest.py', 'if cli.HOME.resolve() == FORBIDDEN_DEFAULT:', 'if cli.HOME.resolve() == (Path.home() / ".hark").resolve():', 'tests/test_isolation.py::test_cli_guard_protects_original_default_after_home_mock'),
+    ("cli-environment-guard", 'tests/conftest.py', 'if Path(os.environ["HARK_DIR"]).expanduser().resolve() == FORBIDDEN_DEFAULT:', 'if False:', 'tests/test_isolation.py::test_cli_guard_refuses_default_environment_in_fake_home'),
+    ("smoke-home-guard", 'scripts/gradium-smoke.py', 'if home == (Path.home() / ".hark").resolve():', 'if False:', 'tests/test_isolation.py::test_smoke_refuses_default_home_in_sandbox'),
 ]
 
 
 def run_tests(root, targets, timeout=40):
-    env = dict(os.environ, PYTHONPATH=str(root), PYTHONDONTWRITEBYTECODE="1", GRADIUM_API_KEY="mutation-local-only")
-    start = time.monotonic()
-    try:
-        result = subprocess.run([sys.executable, "-m", "pytest", "-q", *targets], cwd=root, env=env,
-                                capture_output=True, text=True, timeout=timeout)
-        return {"returncode": result.returncode, "seconds": round(time.monotonic() - start, 2),
-                "output": (result.stdout + result.stderr)[-5000:]}
-    except subprocess.TimeoutExpired:
-        return {"returncode": None, "seconds": round(time.monotonic() - start, 2), "output": "test timed out"}
+    with tempfile.TemporaryDirectory(prefix="hk-check-") as home:
+        if Path(home).resolve() == (Path.home() / ".hark").resolve():
+            raise RuntimeError("mutation checks must not use the default HARK home")
+        env = dict(os.environ, HARK_DIR=home, PYTHONPATH=str(root), PYTHONDONTWRITEBYTECODE="1",
+                   GRADIUM_API_KEY="mutation-local-only")
+        start = time.monotonic()
+        try:
+            result = subprocess.run([sys.executable, "-m", "pytest", "-q", *targets], cwd=root, env=env,
+                                    capture_output=True, text=True, timeout=timeout)
+            return {"returncode": result.returncode, "seconds": round(time.monotonic() - start, 2),
+                    "output": (result.stdout + result.stderr)[-5000:]}
+        except subprocess.TimeoutExpired:
+            return {"returncode": None, "seconds": round(time.monotonic() - start, 2), "output": "test timed out"}
 
 
 def main():

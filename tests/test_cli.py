@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import signal
+import sys
 import threading
 import time
 from types import SimpleNamespace
@@ -147,7 +148,7 @@ def fake_live_capture(monkeypatch, tmp_path, *, load_models=None):
             pass
 
     monkeypatch.setattr(cli, "HOME", tmp_path)
-    monkeypatch.setattr(cli.sys, "platform", "darwin")
+    monkeypatch.setattr(cli, "_device_capture_available", lambda: True)
     monkeypatch.setattr(cli, "_default_ear", lambda: "local")
     monkeypatch.setattr(cli, "MicSource", Source)
     monkeypatch.setattr("hark.pause.CoreAudioProcesses", lambda: SimpleNamespace(read=lambda: []))
@@ -181,7 +182,12 @@ def signal_when_live(tmp_path):
         while time.monotonic() < deadline:
             if state_path.exists() and json.loads(state_path.read_text())["phase"] == "live":
                 sent = time.monotonic()
-                os.kill(os.getpid(), signal.SIGINT)
+                if sys.platform == "darwin":
+                    # Model-library threads may be unmasked; target the sigwait consumer.
+                    watcher = next(t for t in threading.enumerate() if t.name == "hark-signals")
+                    signal.pthread_kill(watcher.ident, signal.SIGINT)
+                else:
+                    os.kill(os.getpid(), signal.SIGINT)
                 deadline = time.monotonic() + 1
                 while time.monotonic() < deadline:
                     if json.loads(state_path.read_text())["phase"] in {"stopping", "ended"}:
@@ -204,14 +210,14 @@ def test_live_capture_ends_cleanly_and_records_lifecycle(tmp_path, monkeypatch):
     signaller, latency = signal_when_live(tmp_path)
     out = tmp_path / "sessions" / "normal.txt"
 
-    cli.main(["--ear", "local", "--room", "-o", str(out), "--title", "Planning"])
+    cli.main(["--ear", "local", "--launch", "test", "--room", "-o", str(out), "--title", "Planning"])
     signaller.join(timeout=2)
 
     state = json.loads((tmp_path / "meeting.json").read_text())
     assert [snapshot["phase"] for snapshot in phases] == ["loading", "live", "stopping", "ended"]
     assert set(state) == {"pid", "phase", "title", "started", "transcript", "mirror", "launch", "phone", "error", "ear"}
     assert state["ear"] == {"name": "local", "seconds": 0.0, "credits_left": None}
-    assert state["launch"] is None and state["phone"] is None
+    assert state["launch"] == "test" and state["phone"] is None
     assert state["pid"] == os.getpid()
     assert state["title"] == "Planning"
     assert datetime.fromisoformat(state["started"]).tzinfo is not None
@@ -248,7 +254,7 @@ def test_signal_during_model_loading_stops_without_starting_audio(tmp_path, monk
     monkeypatch.setattr(Source, "start", record_start)
     phases = record_lifecycle_phases(monkeypatch, cli, tmp_path)
 
-    cli.main(["--ear", "local", "--room", "--title", "Loading stop"])
+    cli.main(["--ear", "local", "--launch", "test", "--room", "--title", "Loading stop"])
 
     state = json.loads((tmp_path / "meeting.json").read_text())
     assert [snapshot["phase"] for snapshot in phases] == ["loading", "stopping", "ended"]
@@ -306,12 +312,12 @@ def test_live_capture_exception_records_one_line_failure(tmp_path, monkeypatch):
     phases = record_lifecycle_phases(monkeypatch, cli, tmp_path)
 
     with pytest.raises(RuntimeError, match="model loading failed"):
-        cli.main(["--ear", "local", "--room", "--title", "Broken"])
+        cli.main(["--ear", "local", "--launch", "test", "--room", "--title", "Broken"])
 
     state = json.loads((tmp_path / "meeting.json").read_text())
     assert [snapshot["phase"] for snapshot in phases] == ["loading", "failed"]
     assert set(state) == {"pid", "phase", "title", "started", "transcript", "mirror", "launch", "phone", "error", "ear"}
-    assert state["launch"] is None
+    assert state["launch"] == "test"
     assert state["phase"] == "failed"
     assert state["error"] == "model loading failed with details"
     assert "\n" not in state["error"]
@@ -439,7 +445,7 @@ def test_room_saves_the_mic_track_by_default_sample_for_sample(tmp_path, monkeyp
     signaller, _ = signal_when_live(tmp_path)
     out = tmp_path / "sessions" / "phrase.txt"
 
-    cli.main(["--ear", "local", "--room", "-o", str(out)])
+    cli.main(["--ear", "local", "--launch", "test", "--room", "-o", str(out)])
     signaller.join(timeout=2)
 
     assert sorted(p.name for p in out.parent.glob("*.wav")) == ["phrase.mic.wav"]
@@ -462,7 +468,7 @@ def test_phone_listens_on_the_hark_dir_socket_and_saves_a_phone_track(tmp_path, 
     signaller, _ = signal_when_live(tmp_path)
     out = tmp_path / "sessions" / "walk.txt"
 
-    cli.main(["--ear", "local", "--phone", "-o", str(out)])
+    cli.main(["--ear", "local", "--launch", "test", "--phone", "-o", str(out)])
     signaller.join(timeout=2)
 
     state = json.loads((tmp_path / "meeting.json").read_text())
@@ -493,7 +499,7 @@ def test_no_save_audio_opts_out_and_a_file_is_never_rerecorded(tmp_path, monkeyp
     cli, _ = fake_live_capture(monkeypatch, tmp_path)
     signaller, _ = signal_when_live(tmp_path)
     out = tmp_path / "sessions" / "quiet.txt"
-    cli.main(["--ear", "local", "--room", "--no-save-audio", "-o", str(out)])
+    cli.main(["--ear", "local", "--launch", "test", "--room", "--no-save-audio", "-o", str(out)])
     signaller.join(timeout=2)
     assert not list(out.parent.glob("*.wav"))
     with pytest.raises(SystemExit):
@@ -545,7 +551,7 @@ def test_live_start_expires_old_audio_under_meetings_and_sessions(tmp_path, monk
     roots = []
     monkeypatch.setattr(cli, "expire_audio", lambda r: roots.append(r))
     signaller, _ = signal_when_live(tmp_path)
-    cli.main(["--ear", "local", "--room", "-o", str(tmp_path / "sessions" / "x.txt")])
+    cli.main(["--ear", "local", "--launch", "test", "--room", "-o", str(tmp_path / "sessions" / "x.txt")])
     signaller.join(timeout=2)
     assert roots == [[tmp_path / "meetings", tmp_path / "sessions"]]
 

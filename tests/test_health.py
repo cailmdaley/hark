@@ -103,7 +103,7 @@ def test_live_capture_marks_a_dead_source_and_logs_to_the_session_log(tmp_path, 
     monkeypatch.setattr(cli, "MicSource", Dead)
     signaller, _ = signal_when_live(tmp_path)
     out = tmp_path / "sessions" / "dead.txt"
-    cli.main(["--ear", "local", "--room", "-o", str(out)])
+    cli.main(["--ear", "local", "--launch", "test", "--room", "-o", str(out)])
     signaller.join(timeout=2)
 
     lost = [line for line in out.read_text().splitlines() if " lost at " in line]

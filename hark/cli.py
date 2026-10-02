@@ -141,7 +141,8 @@ class SignalWatcher:
         while not self.closed.wait(0.01):
             if self.stop.is_set():
                 try:
-                    self.lifecycle.stopping()
+                    if self.lifecycle:
+                        self.lifecycle.stopping()
                 finally:
                     self.signal_written.set()
                 return
@@ -165,7 +166,8 @@ class SignalWatcher:
             if not self.stop.is_set():
                 self.stop.set()
                 try:
-                    self.lifecycle.stopping()
+                    if self.lifecycle:
+                        self.lifecycle.stopping()
                 finally:
                     self.signal_written.set()
 
@@ -254,7 +256,7 @@ def main(argv=None):
                     help="don't keep the live tracks as <stem>.<track>.wav beside the transcript")
     args = ap.parse_args(argv)
     args.ear = args.ear or _default_ear()
-    if sys.platform != "darwin" and not (args.phone or args.file):
+    if not _device_capture_available() and not (args.phone or args.file):
         ap.error("call/room capture requires macOS audio devices; on Linux use --phone or --file")
     if args.ear == "local" and _default_ear() != "local":
         ap.error("the local ear requires MLX on Apple Silicon; use --ear gradium")
@@ -284,7 +286,7 @@ def main(argv=None):
         transcript=str(out),
         mirror=f"{mirror_target[0]}:{mirror_target[1]}" if mirror_target else None,
         launch=args.launch, phone=str(phone_socket) if phone_socket else None, ear=args.ear,
-    ) if live else None)
+    ) if _owns_meeting(args, out) else None)
     stop = threading.Event()
     watcher = None
 
@@ -341,7 +343,7 @@ def main(argv=None):
             mirror.start()
 
     try:
-        if lifecycle:
+        if live:
             watcher = SignalWatcher(lifecycle, stop)
         try:
             if args.ear == "gradium":
@@ -368,7 +370,7 @@ def main(argv=None):
                 try:
                     asr, diar = load_models(args.latency)
                 except KeyboardInterrupt:
-                    if lifecycle:
+                    if live:
                         raise
                     return 130
 
@@ -404,7 +406,7 @@ def main(argv=None):
                 recorders = {src: WavRecorder(out.with_suffix(f".{src.name}.wav")) for src, _ in tracks}
                 for recorder in recorders.values():
                     log(f"audio → {recorder.path}")
-            if not lifecycle:
+            if not live:
                 install_signal_handlers()
 
             if live and not stop.is_set() and any(src.name == "mic" for src, _ in tracks):
@@ -622,7 +624,7 @@ def _enroll(argv):
     if args.file:
         samples = load_audio(args.file)
     else:
-        if sys.platform != "darwin":
+        if not _device_capture_available():
             ap.error("microphone enrollment requires macOS; on Linux use --file")
         import sounddevice as sd
 
@@ -660,6 +662,16 @@ def _name_current(speaker, name, session=None):
         record = {"wall": datetime.now().isoformat(timespec="seconds"),
                   "name": {"speaker": speaker, "as": None if name == speaker else name}}
         records.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def _device_capture_available():
+    return sys.platform == "darwin"
+
+
+def _owns_meeting(args, out):
+    """Only explicit live meeting invocations own the daemon's lifecycle record."""
+    return not args.file and (args.launch is not None or (
+        args.out is not None and out.is_relative_to(HOME / "meetings")))
 
 
 def _default_ear():

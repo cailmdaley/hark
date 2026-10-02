@@ -24,9 +24,12 @@ def main():
     parser.add_argument("--synthetic-cluster", action="store_true")
     parser.add_argument("--drop-at", type=float)
     args = parser.parse_args()
-    home = args.home or Path(tempfile.mkdtemp(prefix="hark-mock-"))
+    home = (args.home or Path(tempfile.mkdtemp(prefix="hark-mock-"))).expanduser().resolve()
+    if home == (Path.home() / ".hark").resolve():
+        parser.error("smoke checks must not use the default HARK home")
     home.mkdir(parents=True, exist_ok=True)
-    cli.HOME = home.resolve()
+    os.environ["HARK_DIR"] = str(home)
+    cli.HOME = home
     os.environ["GRADIUM_API_KEY"] = "local-mock-only"
     cli.credits_left = lambda key: 45000
     # Initialize numerical-library threads before installing the CLI signal watcher.
@@ -40,7 +43,7 @@ def main():
             options = {"phrase_seconds": 2} if args.synthetic_cluster else {}
             return GradiumTrack(name, **kwargs, url=mock.url, cluster=cluster, **options)
         cli.GradiumTrack = make_track
-        options = ["--file", str(args.file)] if args.file else ["--phone"]
+        options = ["--file", str(args.file)] if args.file else ["--phone", "--launch", "smoke"]
         result = cli.main(["--ear", "gradium", "-o", str(home / "meeting.txt")] + options)
         print(json.dumps({"connections": len(mock.connections),
                           "received_seconds": sum(c["samples"] for c in mock.connections) / 16000}), flush=True)

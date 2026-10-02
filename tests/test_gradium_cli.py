@@ -66,7 +66,7 @@ def test_cli_startup_failure_writes_failed_lifecycle_comment_ended_and_mirrors(
                 raise GradiumError("missing API key")
             monkeypatch.setattr(cli, "api_key", missing)
         out = tmp_path / "failure.txt"
-        assert cli.main(["--ear", "gradium", "--phone", "-o", str(out), "--mirror", "h:notes"]) == 1
+        assert cli.main(["--ear", "gradium", "--launch", "test", "--phone", "-o", str(out), "--mirror", "h:notes"]) == 1
         lines = out.read_text().splitlines()
         assert lines[-2].startswith("# gradium ") and lines[-1].startswith("# ended ")
         state = json.loads((tmp_path / "meeting.json").read_text())
@@ -105,7 +105,7 @@ def test_real_phone_cli_emits_live_and_handles_signal_without_mlx(tmp_path, monk
                 os.kill(os.getpid(), signal.SIGTERM)
         sender = threading.Thread(target=phone)
         sender.start()
-        assert cli.main(["--ear", "gradium", "--phone", "-o", str(out)]) is None
+        assert cli.main(["--ear", "gradium", "--launch", "test", "--phone", "-o", str(out)]) is None
         sender.join(timeout=3)
         assert not failures and not sender.is_alive()
         state = json.loads((tmp_path / "meeting.json").read_text())
@@ -138,7 +138,7 @@ def test_cli_preserves_committed_text_on_later_persistent_failure(tmp_path, monk
                 failures.append(error)
         sender = threading.Thread(target=phone)
         sender.start()
-        assert cli.main(["--ear", "gradium", "--phone", "-o", str(home / "meeting.txt")]) == 1
+        assert cli.main(["--ear", "gradium", "--launch", "test", "--phone", "-o", str(home / "meeting.txt")]) == 1
         sender.join(3)
         assert not failures and not sender.is_alive()
         text = (home / "meeting.txt").read_text()
@@ -223,7 +223,7 @@ def test_real_cli_subprocess_sigterm_after_blas_threads_writes_ended(tmp_path):
 
     home = Path(tempfile.mkdtemp(prefix="hks"))
     command = [sys.executable, "scripts/gradium-smoke.py", "--synthetic-cluster", "--home", str(home)]
-    env = dict(os.environ, OPENBLAS_NUM_THREADS="4")
+    env = dict(os.environ, HARK_DIR=str(home), OPENBLAS_NUM_THREADS="4")
     process = subprocess.Popen(command, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
     try:
         wait(lambda: (home / "meeting.json").exists() and
