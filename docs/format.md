@@ -45,7 +45,10 @@ Every other line starts with `# `:
 | `# system audio back at 16:52:10 after 14m15s lost` | The source recovered |
 | `# paused` | Manual microphone pause; the user stepped away |
 | `# resumed at 16:39:58 after 2m03s` | Manual microphone pause ended |
-| `# gradium authentication rejected (code 1008)` | The ear cannot continue; the meeting fails and closes with `# ended` |
+| `# gradium lost at 16:37:55` | Cloud recognition is degraded; source capture and WAV recording continue |
+| `# gradium back at 16:52:10` | Cloud recognition recovered |
+| `# gradium missed recognition 120.00–124.00 s on phone` | Recognition backlog overflow omitted this source-relative interval; recording continues |
+| `# gradium authentication rejected (code 1008)` | The ear cannot continue; an owned meeting fails and the transcript closes with `# ended` |
 | `# ended 19:35:19` | The session is over; nothing follows |
 
 ## The JSONL file
