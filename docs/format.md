@@ -23,8 +23,14 @@ A short interjection can therefore appear before a longer turn that started earl
 Speaker labels:
 
 - `me`: the microphone in call mode (it isn't diarized)
-- `S1` … `S8`: diarized speakers, numbered in order of first appearance, per session
+- `S1` … `S8`: local diarizer slots, numbered in order of first appearance, per session
+- `S<n>`: Gradium CPU speaker clusters, numbered in order of first appearance, without an eight-slot cap
 - a name, once a slot has been named (see below)
+
+The local ear writes conversational turns.
+Gradium writes short phrases assembled from word-sized spans, with one speaker per phrase.
+Its final word can lack a supplied end time; hark infers it from submitted audio duration and records that inference in the log.
+Both ears use the same timestamp ranges and JSONL records.
 
 Every other line starts with `# `:
 
@@ -39,6 +45,7 @@ Every other line starts with `# `:
 | `# system audio back at 16:52:10 after 14m15s lost` | The source recovered |
 | `# paused` | Manual microphone pause; the user stepped away |
 | `# resumed at 16:39:58 after 2m03s` | Manual microphone pause ended |
+| `# gradium authentication rejected (code 1008)` | The ear cannot continue; the meeting fails and closes with `# ended` |
 | `# ended 19:35:19` | The session is over; nothing follows |
 
 ## The JSONL file

@@ -10,11 +10,52 @@ hark --file x.m4a     # a recording through the same streaming path (about 0.15�
 hark --file x.wav --realtime   # replay at real-time pace, e.g. to test an agent against it
 ```
 
-Call mode assumes headphones: the mic hears only you, and everything the Mac plays (Zoom, Meet, a video) is the other side. On speakers the call leaks into the mic.
+`--ear local|gradium` selects the recognition backend.
+The default is local when MLX is importable, otherwise Gradium.
+Linux supports phone and file input; call/room devices and microphone enrollment require macOS.
+Explicit `--ear local` requires MLX.
+Gradium can use Mac audio devices too; the call-mode mic keeps its fixed `me` label.
+
+Call mode assumes headphones: the mic hears only you, and everything the Mac plays (Zoom, Meet, a video) is the other side.
+On speakers the call leaks into the mic.
 
 Phone mode suits a room where the laptop's mic is in the wrong place. hark listens on `~/.hark/phone.sock` (named in `meeting.json` as `phone`) for raw 16 kHz mono s16le PCM; a relay writes it there, such as the Shuttle board's phone page, which streams the phone's mic over the tailnet. Anything that produces that PCM works too, for example `ffmpeg -i talk.m4a -f s16le -ac 1 -ar 16000 - | nc -U ~/.hark/phone.sock`. One sender at a time: a new connection replaces the old one. While nothing is connected hark records silence, and after 90 s the transcript says `# phone lost at …`. The track is saved as `<stem>.phone.wav`.
 
 Ctrl-C ends a session cleanly: hark flushes open turns, finishes writing the audio, and writes `# ended`. SIGTERM and SIGHUP do the same, so closing the terminal doesn't lose the end. A second signal quits at once without flushing.
+
+## Gradium
+
+```bash
+hark --phone --ear gradium --lang en
+hark --file recording.wav --ear gradium --lang fr
+```
+
+The key comes from `GRADIUM_API_KEY`, otherwise `~/.config/hark/gradium.key`.
+The file must belong to you, have mode `600` and contain one non-empty key line.
+Never put it in the checkout or a transcript.
+
+Gradium receives gated audio over the internet and charges 3 credits per submitted second.
+The free plan has 45,000 credits per month (an unrounded upper bound of 4 hours 10 minutes of STT audio), 3 concurrent streams, and a documented 1,500-character session limit whose STT applicability is ambiguous.
+Live charges indicate a 15-second minimum or rounding per request; 59.76 seconds across 16 short requests cost 720 credits.
+Do not estimate the bill as simply 3 × submitted seconds.
+hark groups speech bursts, discards intervening long quiet, and rotates after at most 10 submitted seconds, 10 source-clock quiet seconds or 120 source seconds.
+Logs record submitted seconds and observed credit balances; launcher-owned lifecycle files include the latest observation.
+Balances can lag settled charges.
+Background noise above the energy threshold still costs money.
+`--no-gradium-metering` skips balance requests; hark does not enforce a monthly budget.
+
+Words accumulate into four seconds of unique recognised audio for CPU speaker embeddings, then appear while the request is still open.
+Phrases close at an eight-second source-wall span, an 800 ms gap, a speech-flush acknowledgement or the request's end too.
+A last word without `end_text` waits for the next word or EOS; quiet closes the request after 10 source-clock seconds.
+Less than four seconds inherits the preceding speaker.
+There is only one speaker per phrase; short replies and overlap can be mislabelled, and slots can fragment.
+The same enrolled-voice bank and manual names apply.
+
+A Gradium error closes the shared transcript with `# ended`, writes a `# gradium …` explanation and exits nonzero.
+It also marks a launcher-owned meeting failed.
+Bounded reconnects replay audio on its original clock and suppress accepted segments.
+Changed replay boundaries can lose an overlapping continuation; the log records the skipped interval.
+See the [pipeline](how-it-works.md#gradium-recognition-and-speakers) for timing, recovery and resource bounds.
 
 ## Transcript timing
 
@@ -33,13 +74,15 @@ The [format contract](format.md) defines the text and JSONL records.
 
 | Option | Default | |
 |---|---|---|
+| `--ear local\|gradium` | local if MLX imports, otherwise Gradium | recognition and speaker attribution backend |
+| `--no-gradium-metering` | | skip credit-balance requests |
 | `--title TEXT` | | appended to the session filename |
 | `-o PATH` | `~/.hark/sessions/…` | write the transcript here instead |
 | `--mic DEVICE` | system default | input device, by name or index |
 | `--lang CODE` | auto | pin the ASR language, e.g. `en-US`, `fr-FR` |
-| `--latency` | `low` | diarizer lookahead: `low` 1.04 s, `very_low` 0.64 s, `ultra_low` 0.32 s. Shorter means faster lines and worse speaker separation |
-| `--gap SECONDS` | `3` | silence that ends a turn when nobody else takes over |
-| `--speaker-mask` | `exclusive` | who hears a frame two speakers share; see [how it works](how-it-works.md#speaker-masks) |
+| `--latency` | `low` | local-ear diarizer lookahead: `low` 1.04 s, `very_low` 0.64 s, `ultra_low` 0.32 s. Shorter means faster lines and worse speaker separation |
+| `--gap SECONDS` | `3` | local-ear silence that ends a turn when nobody else takes over |
+| `--speaker-mask` | `exclusive` | local-ear speakers that hear a frame two speakers share; see [how it works](how-it-works.md#speaker-masks) |
 | `--no-save-audio` | | don't keep the audio |
 | `--pause-for PATTERNS` | `aquavoice,aqua-voice` | pause the mic while a matching CoreAudio process captures input; give comma-separated bundle-ID substrings or `none` |
 | `--mirror HOST:PATH` | | also append the transcript to a file on another machine over SSH |
@@ -78,7 +121,8 @@ The ASR and the saved mic WAV receive the same samples, with zeros for every pau
 
 ## Saved audio
 
-Live sessions keep each track beside the transcript as 16 kHz mono 16-bit WAV: `<stem>.mic.wav`, and in call mode `<stem>.system.wav`. Each file holds exactly the samples the models heard, starting from the track's first sample. JSONL `start`/`end` times are seconds into these files. Live input is padded to hold the wall clock, so the files stay aligned with real time even when a device stalls.
+Live sessions keep each track beside the transcript as 16 kHz mono 16-bit WAV: `<stem>.mic.wav`, and in call mode `<stem>.system.wav`. Each file holds the full source track from its first sample.
+The local models receive those samples directly; Gradium receives gated spans of them, while its utterance offsets still index the complete WAV. JSONL `start`/`end` times are seconds into these files. Live input is padded to hold the wall clock, so the files stay aligned with real time even when a device stalls.
 
 The mic is rounded to 16-bit before the models see it, so `hark --file <stem>.mic.wav` replays a track through the same pipeline with identical samples.
 Paused mic spans contain digital silence in the WAV; system audio remains untouched.
@@ -106,7 +150,16 @@ hark --mirror server:~/.hark/meetings/telecon.txt -o ~/.hark/meetings/telecon.tx
 
 Mirroring is best-effort: if the connection drops, local capture continues, and `hark mirror --resume` finishes the copy afterwards. The remote needs GNU `dd` (Linux; macOS's `dd` lacks `oflag=seek_bytes`), and hark refuses to mirror onto a remote file that already has content, except with `--resume`.
 
-A program that starts hark (such as [Shuttle](https://github.com/cailmdaley/felt), which launches hark from its board and assigns an agent as scribe) can watch `$HARK_DIR/meeting.json`. It holds the process id, phase (`loading`, `live`, `stopping`, `ended` or `failed`), title, start time, transcript path, mirror target, the `--launch` id, and any error. An `ended` recording whose mirror didn't finish carries the `hark mirror --resume …` command in `error`. To stop the recording cleanly, send one SIGINT to `pid`.
+Launcher-owned live recordings publish `$HARK_DIR/meeting.json` (`~/.hark/meeting.json` when `HARK_DIR` is unset).
+Ownership requires `--launch` or explicit `-o` physically beneath that home's `meetings/` directory.
+Standalone capture without such a claim, arbitrary output paths and file transcription leave an existing record untouched.
+A launcher such as [Shuttle](https://github.com/cailmdaley/felt) can watch its record rather than scraping output.
+It holds the process id, phase (`loading`, `live`, `stopping`, `ended` or `failed`), title, start time, transcript path, mirror target, the `--launch` id, and any error.
+A Gradium recording also includes `ear: {"name": "gradium", "seconds": 48.32, "credits_left": 44854}`.
+`seconds` counts submitted audio, including reconnect replay; `credits_left` is the latest observed balance, or `null` when unavailable.
+The initial and final balance are logged.
+An `ended` recording whose mirror didn't finish carries the `hark mirror --resume …` command in `error`.
+To stop the recording cleanly, send one SIGINT, SIGTERM or SIGHUP to `pid`.
 
 ## Environment
 
@@ -114,3 +167,4 @@ A program that starts hark (such as [Shuttle](https://github.com/cailmdaley/felt
 |---|---|
 | `HARK_DIR` | moves `~/.hark` (sessions, voices, manual mic-pause state, `current.txt`, `meeting.json`) |
 | `HARK_AUDIOTEE` | path to the audiotee binary, if not `bin/audiotee` in the checkout |
+| `GRADIUM_API_KEY` | Gradium API key; takes precedence over `~/.config/hark/gradium.key` |

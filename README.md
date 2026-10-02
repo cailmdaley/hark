@@ -4,125 +4,166 @@
 
 # hark
 
-**A live meeting transcript with speaker labels, written on your Mac to a plain text file that any agent can follow.**
+**A live meeting transcript with speaker labels, written to a plain text file that any agent can follow.**
 
 ```
 # hark 2026-09-24 19:34 — call: me = mic, S1… = system audio
 19:34:12-19:34:18 me   Sure, I reran the pipeline last night with the new masks
-19:34:00-19:34:30 S1   Okay, let's get started. I want to go over the cosmic shear covariance
+19:34:00-19:34:30 S1   Okay, let's get started.
 19:34:29-19:34:38 S2   Did anyone check whether the redshift distributions changed?
 # ended 19:35:19
 ```
 
-Run `hark` and talk.
-Each time someone finishes a turn, hark appends one line with the turn's start and end time, labelled with who said it.
-Lines arrive in end-time order, so start times can move backward across speakers.
-Your coding agent (Claude Code, Codex, pi, or a shell loop) reads the file as it grows, so it can take notes, answer when you address it, or pick up a task mid-meeting.
-There is no UI and no server, and nothing is uploaded: speech recognition and speaker diarization run locally on Apple Silicon via [MLX](https://github.com/ml-explore/mlx).
+hark captures audio, recognises speech, and appends speaker-labelled time ranges to a transcript and JSONL sidecar.
+Your coding agent reads the file as it grows to take notes, answer questions, or pick up tasks mid-meeting.
+There are two ears:
 
-hark exists because dictation tools don't work well in meetings. They transcribe one voice at a time, don't separate speakers, and aren't built to run for an hour. hark does one job: turning a conversation into a file.
+- **Local:** NVIDIA ASR and diarization through MLX on Apple Silicon; no audio leaves the machine.
+- **Gradium:** streaming cloud STT with local WeSpeaker speaker embeddings on CPU; works on Linux, including phone meetings with the Mac closed.
 
-## Requirements
-
-- A Mac with Apple Silicon, running macOS 14.2 or later (the system-audio tap needs it)
-- [uv](https://docs.astral.sh/uv/) (it fetches Python 3.11–3.13 if needed) and the Swift toolchain (Xcode or the Command Line Tools)
-- About 3 GB of disk for the models, which download from Hugging Face on first run
+`--ear local|gradium` chooses the backend.
+The default is `local` when MLX is importable, otherwise `gradium`.
+Both use the same transcript, source-health markers, mirroring, signals and meeting lifecycle.
+Gradium receives speech audio over its API; it is not an offline or private-to-the-machine mode.
 
 ## Install
 
+Python 3.11–3.13 and [uv](https://docs.astral.sh/uv/) are required.
+For Linux / Gradium, from a checkout:
+
 ```bash
-git clone https://github.com/cailmdaley/hark && cd hark
-scripts/build-audiotee.sh   # builds the system-audio tap → bin/audiotee
-uv sync
+uv tool install .
+hark --help
 ```
 
-`scripts/build-audiotee.sh` builds [audiotee](https://github.com/makeusabrew/audiotee) at a pinned commit. It's a small Swift program that captures everything the Mac plays through a Core Audio process tap. Run hark with `uv run hark`, or link `.venv/bin/hark` somewhere on your `PATH`.
+Linux supports `--phone` and `--file`, without MLX or audio devices.
+The CPU speaker model downloads from Hugging Face on first use.
+WAV decoding needs no external executable; formats such as M4A may need `ffmpeg` on `PATH`.
 
-Grant two macOS permissions to the terminal that runs hark: **Microphone**, and **Screen & System Audio Recording → System Audio Recording Only**. Restart the terminal afterwards. If system audio stays silent for the first 20 s of a call, hark prints a reminder pointing at the second setting.
+Local capture needs Apple Silicon and macOS 14.2 or later, plus the Swift toolchain:
+
+```bash
+scripts/build-audiotee.sh   # system-audio tap → bin/audiotee
+uv sync
+uv run hark
+```
+
+The MLX models need about 3 GB of disk and download on first run.
+Grant the terminal **Microphone** and **Screen & System Audio Recording → System Audio Recording Only** permissions, then restart it.
+
+## Phone meetings on Linux
+
+Put a Gradium API key in the `GRADIUM_API_KEY` environment variable or in `~/.config/hark/gradium.key`, one line, owned by you with mode `600`.
+Keep it outside the checkout and never commit it.
+
+```bash
+mkdir -p ~/.config/hark
+chmod 700 ~/.config/hark
+# Write your key with your editor, then:
+chmod 600 ~/.config/hark/gradium.key
+hark --phone --ear gradium --lang en
+```
+
+hark listens on `~/.hark/phone.sock` for mono s16le PCM at 16 kHz.
+The [Shuttle](https://github.com/cailmdaley/felt) board relays the phone browser's microphone to that socket and launches ordinary `hark --phone` on the selected host.
+On a Linux host, the default ear is Gradium; no daemon configuration change is needed.
+The phone must stay connected and keep microphone access; an always-on ear host does not make mobile browser screen-lock capture reliable.
+
+Gradium charges **3 credits per submitted audio second**.
+The free plan has **45,000 credits/month**, about **4 hours 10 minutes of submitted STT audio**, and **3 concurrent STT streams**.
+hark gates silence with a conservative energy check, a 320 ms pre-roll and an 800 ms tail.
+Short speech bursts share a request without uploading the intervening quiet; a request ends after at most 10 seconds of submitted audio or 10 seconds of source-clock quiet.
+Meeting length and submitted audio length therefore differ.
+Live receipts indicate a 15-second minimum or rounding per request, so **3 credits × submitted seconds is not a reliable bill estimate**.
+For example, 16 short requests containing 59.76 seconds cost 720 credits.
+Grouping reduces these tiny requests, but the 10-second replay bound still incurs rounding overhead.
+Treat 4 hours 10 minutes as an unrounded upper bound, not a guaranteed meeting allowance.
+The log and `meeting.json` record submitted seconds, including retries, and the credit balance at startup and shutdown when metering succeeds.
+`--no-gradium-metering` disables balance requests.
+There is no automatic monthly spending cap in hark.
+
+The [Gradium FAQ](https://docs.gradium.ai/guides/faq) also states a free-tier limit of **1,500 characters per session**, without distinguishing STT from TTS.
+hark rotates requests after at most 10 seconds of input and near 1,200 recognised characters, below that character threshold in ordinary speech.
+The developer [request limit](https://docs.gradium.ai/guides/limits) is 3,000 seconds; the [pricing FAQ](https://gradium.ai/pricing) says 300 seconds.
+Both exceed hark's request limits.
+The STT character ceiling remains unverified.
 
 ## Use
 
 ```bash
-uv run hark                    # a call: your mic is "me", the call's audio is diarized S1…S8
-uv run hark --room             # in person: the mic alone, diarized
-uv run hark --phone            # in person, a phone streaming its mic in as PCM (docs/usage.md)
-uv run hark --file talk.m4a    # a recording, through the same streaming pipeline
-uv run hark --title "telecon"  # names the session file
-uv run hark --pause-for aquavoice,superwhisper  # pause for either dictation app
-uv run hark pause                # manually mute the mic
-uv run hark resume               # resume the mic
-uv run hark pause --status       # show the manual pause state
+hark                          # local call: mic = me, system audio = S1…
+hark --room                   # local room: microphone diarized
+hark --phone                  # phone audio on the host's default ear
+hark --file talk.wav           # recording, with file-relative timestamps
+hark --ear gradium --file talk.wav --lang fr
+hark --phone --title telecon
+hark --phone --mirror host:~/notes.txt
+hark pause                    # manually mute the Mac microphone
+hark resume
+hark name S2 Ada               # name a speaker during the session
+hark enroll Ada --file ada.wav # create a voiceprint from at least 5 s of speech
 ```
 
-Press Ctrl-C to end the session. hark flushes the last turn and writes `# ended`.
+Ctrl-C, SIGTERM and SIGHUP flush pending text and write `# ended`.
+A missing key, rejected authentication or persistent Gradium failure writes a clear `# gradium …` comment and closes the transcript.
+A launcher-owned meeting is also marked failed in `meeting.json`.
+Only a live invocation with `--launch`, or explicit `-o` under the HARK home's `meetings/` directory, owns that lifecycle record; standalone capture does not overwrite it.
+Reconnects preserve the source clock and suppress already accepted speech on replay.
+If the service changes segment boundaries on replay, a segment starting before the accepted horizon is skipped; its overlapping continuation can be lost.
 
-By default, hark watches CoreAudio for an input-capturing process whose bundle ID contains `aquavoice` or `aqua-voice` (Aqua Voice).
-It mutes only the mic while that app records; system audio keeps flowing.
-Pass comma-separated bundle-ID matches to `--pause-for`, or use `--pause-for none` to disable automatic detection.
-The mic audio saved to WAV contains silence during pauses.
-Manual pauses add `# paused` and `# resumed` markers so an agent knows you stepped away.
+On a Mac call, wear headphones: hark assumes the mic hears only you and system audio contains everyone else.
+The mic pauses while Aqua Voice captures input; `--pause-for` selects other apps or `none` disables detection.
+Manual pauses add `# paused` and `# resumed` markers.
+Pausing does not mute the phone or system tracks.
 
-**On a call, wear headphones.** In call mode hark assumes the mic hears only you and system audio holds everyone else. On speakers, the call leaks into the mic and gets attributed to you.
+Files go to `~/.hark/sessions/`; Shuttle uses `~/.hark/meetings/` through `-o`.
+`~/.hark/current.txt` points at the live transcript.
+Audio is saved beside it by default and expires after 14 days; transcripts are kept.
+`--no-save-audio` opts out of the saved WAV, not cloud submission.
 
-Transcripts go to `~/.hark/sessions/<date>_<time>[_title].txt`, and `~/.hark/current.txt` always points at the live one. A `.jsonl` file beside each transcript has utterances, source-health records, and mic-pause events.
+## Speakers and latency
 
-## Plugging into an agent
+The local ear uses NVIDIA's streaming diarizer, with one ASR decoder per speaker and up to eight speakers.
+Gradium provides no diarization.
+Its word-sized text spans accumulate into roughly **four seconds of unique recognised audio** before hark computes a WeSpeaker embedding and compares it with online speaker centroids at cosine similarity `0.55`.
+Completed phrases appear while speech continues; hark does not wait for the request's end.
+An eight-second source span, an 800 ms gap, a speech-flush acknowledgement or the request's end also closes a phrase.
+A final word without `end_text` stays pending until the next word or EOS; a silent request closes after 10 seconds of source-clock quiet.
+Phrases with less than four seconds of audio inherit the preceding speaker.
+There is **one speaker per phrase**, not overlapping-speaker separation.
+Brief replies can be mislabelled and speaker slots can fragment; this is weaker than the local ear's diarization.
 
-The transcript file is the whole interface, so any agent that can read a file can follow a meeting.
+Both ears use the same enrolled-voice naming rules.
+To name yourself on another host, copy `~/.hark/voices/me.npy` there.
+Manual names take precedence.
+Speaker numbers are per meeting.
 
-**Claude Code.** Ask it to watch the transcript with the `Monitor` tool:
-
-```
-Monitor `tail -n +1 -F ~/.hark/current.txt` and follow the meeting. Take notes
-in notes.md; if someone says your name, answer in the terminal.
-```
-
-Each new line arrives as an event. When a line starting with `# ended` arrives, the meeting is over.
-
-**Harnesses without a monitor tool.** Poll by line count: remember how many lines you've read, and on each pass read from there with `tail -n +$((n+1)) ~/.hark/current.txt`. hark only ever appends, so line numbers are stable.
-
-**Names.** Speakers start out anonymous (`S1`, `S2`, … in order of arrival). You or your agent can name one mid-meeting:
+## Following a meeting
 
 ```bash
-uv run hark name S2 "Ada"    # appends "# S2 = Ada"; later lines say Ada
+tail -n +1 -F ~/.hark/current.txt
 ```
 
-Enroll voices ahead of time and hark names diarized speakers itself when it's confident:
+An agent can follow that stream, or poll by line count and remember its position.
+The files are append-only; apply the latest `# S2 = Ada` mapping to earlier lines too, and stop at `# ended`.
 
-```bash
-uv run hark enroll Ada --seconds 30       # record Ada speaking into the mic for 30 s
-uv run hark enroll Ada --file ada.wav     # or enroll from audio
-```
-
-An agent reading the transcript should apply the latest `# Sx = name` line for each slot, including to lines written before it.
-
-## How it works
-
-Two models from NVIDIA, both running in MLX through [mlx-audio](https://github.com/Blaizzy/mlx-audio):
-
-- **Nemotron 3.5 streaming ASR** (`mlx-community/nemotron-3.5-asr-streaming-0.6b`) turns speech into words
-- **Nemotron-3-Diarization** (`mlx-community/Nemotron-3-Diarization`) decides who is speaking in each 80 ms frame, for up to 8 speakers, with about a second of lookahead
-
-The diarizer masks the audio features for each speaker, and each speaker gets their own ASR decoder, so words arrive already attributed. hark adds turn-taking on top: a line ends when someone else speaks for more than a moment (0.8 s), or after 3 s of silence. Brief backchannels ("mm-hm") don't cut someone off. It also watches its own inputs. If the system-audio tap dies mid-call, the transcript says so (`# system audio lost at 16:37:55 …`) rather than looking like a quiet meeting.
-
-The docs go deeper:
-
-- [docs/usage.md](docs/usage.md): every option, saved audio, logs, mirroring over SSH, and the lifecycle file for launchers
-- [docs/format.md](docs/format.md): the text and JSONL formats, which are the contract for agents
-- [docs/how-it-works.md](docs/how-it-works.md): the pipeline, turn segmentation, speaker masks, voice matching, and how to evaluate diarization
-
-## Limitations
-
-- macOS on Apple Silicon only.
-- Diarization is good but not perfect. Expect the occasional mislabelled turn, and more of them when people talk over each other.
-- Speaker numbers are per session; the same person can be `S1` today and `S3` tomorrow unless their voice is enrolled.
+- [Usage](docs/usage.md): options, phone input, saved audio, logs, mirroring and launchers.
+- [Format](docs/format.md): text and JSONL contracts.
+- [Pipeline](docs/how-it-works.md): local diarization, Gradium timing and recovery, voice matching and evaluation.
 
 ## Development
 
 ```bash
-uv run pytest
+HARK_DIR="$(mktemp -d /tmp/hk-test.XXXXXX)" uv run pytest
+HARK_DIR="$(mktemp -d /tmp/hk-test.XXXXXX)" uv run scripts/gradium-mutations.py
 ```
+
+Test fixtures isolate HARK state and reject the real default home.
+Gradium tests use a local websocket protocol server and cannot contact the hosted API or read a real key.
+The mutation runner breaks individual behaviours in temporary copies and verifies their targeted tests fail.
+On macOS, it also denies subprocess filesystem writes beneath the real `~/.hark`.
 
 ## License
 
-MIT; see [LICENSE](LICENSE). The model weights and audiotee have their own licenses.
+MIT; see [LICENSE](LICENSE).
+Model weights and audiotee have their own licenses.
