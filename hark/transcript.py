@@ -175,13 +175,14 @@ class Track:
 
 
 def flush_tracks(tracks, force=False):
+    out = [u for track in tracks if hasattr(track, "flush") for u in track.flush(force=force)]
+    tracks = [track for track in tracks if not hasattr(track, "flush")]
     wall_times = {}
     for track in tracks:
         origin = track.t0.timestamp()
         wall_times.update({(id(track), id(token)): (origin + token.start, origin + token.end)
                            for pending in track.pending.values() for token in pending.tokens})
     plans = [track._flush_plan(tracks, False, wall_times) for track in tracks]
-    out = []
     while force and any(plans):
         out.extend(utterance for track, cuts in zip(tracks, plans)
                    for utterance in track._apply_flush(cuts))
@@ -295,8 +296,12 @@ class Sink:
         self.jsonl.write(json.dumps({"wall": at.isoformat(timespec="seconds"),
                                      "pause": record}, ensure_ascii=False) + "\n")
 
+    def comment(self, text):
+        self.txt.seek(0, 2)
+        self.txt.write(f"# {text}\n")
+
     def close(self, footer):
-        self.txt.write(f"# {footer}\n")
+        self.comment(footer)
         self.txt.close()
         self.jsonl.close()
 

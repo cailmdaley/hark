@@ -6,10 +6,8 @@ license = "MIT"
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
 dependencies = [
-    # Pinned to the v0.5.6 commit: first release with Nemotron-3-Diarization and
-    # SpeakerStreamingSession. Swap to `mlx-audio[stt]>=0.5.6` from PyPI once the
-    # release clears the 7-day index cooldown.
-    "mlx-audio[stt] @ git+https://github.com/Blaizzy/mlx-audio@4ab7e6f7dedd69a136cfaa318c5dc8aed5119446 ; sys_platform == 'darwin'", 
+    # SpeakerStreamingSession and Nemotron diarization use this pinned MLX build.
+    "mlx-audio[stt] @ git+https://github.com/Blaizzy/mlx-audio@4ab7e6f7dedd69a136cfaa318c5dc8aed5119446 ; sys_platform == 'darwin'",
     "numpy>=1.26",
     "sounddevice>=0.5.1 ; sys_platform == 'darwin'",
     "websockets>=15,<17",

@@ -103,6 +103,8 @@ def test_live_modes_feed_and_save_identical_gated_pcm_and_leave_system_untouched
                     now, 12 <= step < 14, ("aquavoice",) if 5 <= step < 8 else ()))
             return super().feed(gate, samples, now, final=final)
 
+    monkeypatch.setattr(cli, "_default_ear", lambda: "local")
+    monkeypatch.setattr(cli.sys, "platform", "darwin")
     monkeypatch.setattr(cli, "HOME", tmp_path)
     monkeypatch.setattr(cli, "SignalWatcher", Signals)
     monkeypatch.setattr(cli, "MicSource", Mic)
@@ -112,7 +114,7 @@ def test_live_modes_feed_and_save_identical_gated_pcm_and_leave_system_untouched
     monkeypatch.setattr(cli, "load_models", lambda *_: (None, None))
     monkeypatch.setattr(cli, "flush_tracks", lambda *_, **__: [])
     out = tmp_path / "session.txt"
-    cli.main((["--room"] if room else []) + ["-o", str(out)])
+    cli.main((["--room"] if room else []) + ["--ear", "local", "-o", str(out)])
 
     original = np.concatenate(blocks)
     expected = original.copy()

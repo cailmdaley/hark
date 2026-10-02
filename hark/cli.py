@@ -37,7 +37,8 @@ from datetime import datetime
 from pathlib import Path
 
 from .capture import (SAMPLE_RATE, FileSource, MicSource, PhoneSource, SystemSource, WavRecorder,
-                      log, log_to)
+                      load_audio, log, log_to)
+from .gradium import GradiumError, GradiumTrack, api_key, credits_left
 from .health import QuietWatch
 from .masking import MaskPolicy
 from .mirror import TranscriptMirror
@@ -58,13 +59,14 @@ class MeetingLifecycle:
         "failed": set(),
     }
 
-    def __init__(self, *, title, started, transcript, mirror, launch=None, phone=None):
+    def __init__(self, *, title, started, transcript, mirror, launch=None, phone=None, ear="local"):
         self.path = HOME / "meeting.json"
         self.lock = threading.Lock()
         self.data = {
             "pid": os.getpid(), "phase": "loading", "title": title,
             "started": started, "transcript": transcript, "mirror": mirror,
             "launch": launch, "phone": phone, "error": None,
+            "ear": {"name": ear, "seconds": 0.0, "credits_left": None},
         }
         self._write()
 
@@ -76,7 +78,7 @@ class MeetingLifecycle:
                 self.data["phase"] = phase
                 changed = True
             for key, value in values.items():
-                if self.data[key] != value:
+                if self.data.get(key) != value:
                     self.data[key] = value
                     changed = True
             if changed:
@@ -112,13 +114,44 @@ class SignalWatcher:
         self.closed = threading.Event()
         self.signal_written = threading.Event()
         self.interrupts = 0
-        self.previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, self.wait_signals)
-        self.thread = threading.Thread(target=self._watch, name="hark-signals", daemon=True)
+        self.portable = sys.platform != "darwin"
+        if self.portable:
+            self.previous_handlers = {sig: signal.getsignal(sig) for sig in self.signals}
+            for sig in self.signals:
+                signal.signal(sig, self._receive)
+            self.previous_mask = None
+        else:
+            self.previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, self.wait_signals)
+        self.thread = threading.Thread(target=self._watch_portable if self.portable else self._watch,
+                                       name="hark-signals", daemon=True)
         try:
             self.thread.start()
         except BaseException:
-            signal.pthread_sigmask(signal.SIG_SETMASK, self.previous_mask)
+            self._restore()
             raise
+
+    def _receive(self, number, _frame):
+        if number == signal.SIGINT:
+            self.interrupts += 1
+            if self.interrupts > 1:
+                os._exit(128 + number)
+        self.stop.set()
+
+    def _watch_portable(self):
+        while not self.closed.wait(0.01):
+            if self.stop.is_set():
+                try:
+                    self.lifecycle.stopping()
+                finally:
+                    self.signal_written.set()
+                return
+
+    def _restore(self):
+        if self.portable:
+            for sig, handler in self.previous_handlers.items():
+                signal.signal(sig, handler)
+        else:
+            signal.pthread_sigmask(signal.SIG_SETMASK, self.previous_mask)
 
     def _watch(self):
         while not self.closed.is_set():
@@ -138,9 +171,10 @@ class SignalWatcher:
 
     def close(self):
         self.closed.set()
-        signal.pthread_kill(self.thread.ident, self.wake_signal)
+        if not self.portable:
+            signal.pthread_kill(self.thread.ident, self.wake_signal)
         self.thread.join()
-        signal.pthread_sigmask(signal.SIG_SETMASK, self.previous_mask)
+        self._restore()
 
 
 def _emit(u, sink, matcher, tracks_by_name, failed_slots):
@@ -195,6 +229,10 @@ def main(argv=None):
     mode.add_argument("--phone", action="store_true",
                       help="a phone as the mic: listen for s16le 16 kHz PCM on ~/.hark/phone.sock, diarized")
     mode.add_argument("--file", help="transcribe an audio file instead of live input")
+    ap.add_argument("--ear", choices=["local", "gradium"],
+                    help="ASR backend (default: local when MLX is importable, otherwise gradium)")
+    ap.add_argument("--no-gradium-metering", dest="gradium_metering", action="store_false",
+                    help="don't fetch Gradium credits at startup and shutdown")
     ap.add_argument("--realtime", action="store_true", help="with --file: replay at real-time pace")
     ap.add_argument("--mic", help="input device name or index (default: system default)")
     ap.add_argument("--pause-for", default=DEFAULT_PAUSE_FOR,
@@ -215,6 +253,11 @@ def main(argv=None):
     ap.add_argument("--no-save-audio", dest="save_audio", action="store_false",
                     help="don't keep the live tracks as <stem>.<track>.wav beside the transcript")
     args = ap.parse_args(argv)
+    args.ear = args.ear or _default_ear()
+    if sys.platform != "darwin" and not (args.phone or args.file):
+        ap.error("call/room capture requires macOS audio devices; on Linux use --phone or --file")
+    if args.ear == "local" and _default_ear() != "local":
+        ap.error("the local ear requires MLX on Apple Silicon; use --ear gradium")
     if args.realtime and not args.file:
         ap.error("--realtime only applies to --file")
     try:
@@ -240,7 +283,7 @@ def main(argv=None):
         title=args.title, started=now.astimezone().isoformat(timespec="seconds"),
         transcript=str(out),
         mirror=f"{mirror_target[0]}:{mirror_target[1]}" if mirror_target else None,
-        launch=args.launch, phone=str(phone_socket) if phone_socket else None,
+        launch=args.launch, phone=str(phone_socket) if phone_socket else None, ear=args.ear,
     ) if live else None)
     stop = threading.Event()
     watcher = None
@@ -271,9 +314,18 @@ def main(argv=None):
     tracks_by_name = {}
     failed_slots = set()
     voices = {}
+    key = None
+    credits = None
+    capture_started = time.monotonic()
+    ear_beat = capture_started
+    capture_error = None
+
+    def ear_state():
+        return {"name": args.ear, "seconds": round(sum(t.sent_seconds for t in all_tracks), 2),
+                "credits_left": credits}
 
     def open_sink():
-        nonlocal sink, matcher
+        nonlocal sink, matcher, mirror
         out.parent.mkdir(parents=True, exist_ok=True)
         log_to(out.with_suffix(".log"))
         if live:
@@ -284,11 +336,20 @@ def main(argv=None):
 
             matcher = VoiceMatcher(voices, sink)
         log(f"transcript → {out}")
+        if args.ear == "gradium" and mirror_target:
+            mirror = TranscriptMirror(out, *mirror_target)
+            mirror.start()
 
     try:
         if lifecycle:
             watcher = SignalWatcher(lifecycle, stop)
         try:
+            if args.ear == "gradium":
+                open_sink()
+                key = api_key()
+                if args.gradium_metering:
+                    credits = credits_left(key)
+                log(f"gradium: sent 0.00 s, credits remaining: {credits}")
             if not stop.is_set():
                 if args.file:
                     sources = [(FileSource(args.file, realtime=args.realtime), numbered)]
@@ -300,8 +361,8 @@ def main(argv=None):
                     sources = [(MicSource(_device(args.mic)), lambda _: "me"),
                                (SystemSource(), numbered)]
 
-            log("loading models…")
-            if stop.is_set():
+            log("connecting Gradium…" if args.ear == "gradium" else "loading models…")
+            if stop.is_set() or args.ear == "gradium":
                 asr, diar = None, None
             else:
                 try:
@@ -313,20 +374,32 @@ def main(argv=None):
 
             if not stop.is_set():
                 mask = MaskPolicy.parse(args.speaker_mask) if args.speaker_mask != "shared" else None
-                tracks = [(src, Track(src.name, asr, diar, speaker_label=label,
-                                      language=args.lang, gap=args.gap, mask=mask))
+                tracks = [(src, GradiumTrack(src.name, key=key, language=args.lang,
+                                             fixed_speaker="me" if src.name == "mic" and not args.room else None,
+                                             realtime=live or args.realtime)
+                           if args.ear == "gradium" else
+                           Track(src.name, asr, diar, speaker_label=label,
+                                 language=args.lang, gap=args.gap, mask=mask))
                           for src, label in sources]
                 all_tracks = [track for _, track in tracks]
                 import numpy as np
 
                 voices = ({path.stem: np.load(path) for path in (HOME / "voices").glob("*.npy")}
                           if (HOME / "voices").exists() else {})
-                if not voices:
+                if not voices and args.ear == "local":
                     for track in all_tracks:
                         track.audio = None
                 tracks_by_name = {track.name: track for _, track in tracks}
 
-            open_sink()
+            if sink is None:
+                open_sink()
+            elif voices:
+                from .voice import VoiceMatcher
+
+                matcher = VoiceMatcher(voices, sink)
+            if args.ear == "gradium":
+                for track in all_tracks:
+                    track.start()
             if live and args.save_audio:
                 recorders = {src: WavRecorder(out.with_suffix(f".{src.name}.wav")) for src, _ in tracks}
                 for recorder in recorders.values():
@@ -352,7 +425,7 @@ def main(argv=None):
             if lifecycle and len(started_sources) == len(sources) and not stop.is_set():
                 lifecycle.update("live")
 
-            if mirror_target:
+            if mirror_target and mirror is None:
                 mirror = TranscriptMirror(out, *mirror_target)
                 mirror.start()
             if not stop.is_set():
@@ -362,6 +435,10 @@ def main(argv=None):
             beat = time.monotonic() + 60
             while not stop.is_set():
                 sink.poll_names()
+                if args.ear == "gradium":
+                    if lifecycle and time.monotonic() >= ear_beat:
+                        lifecycle.update(ear=ear_state())
+                        ear_beat = time.monotonic() + 1
                 if pause_monitor:
                     _pause_events(pause_monitor, sink)
                 busy = False
@@ -373,11 +450,18 @@ def main(argv=None):
                     if samples.size:
                         if src in recorders:
                             recorders[src].write(samples)
+                        if args.ear == "gradium":
+                            # Commit output before surfacing a later socket failure.
+                            for u in flush_tracks(all_tracks):
+                                _emit(u, sink, matcher, tracks_by_name, failed_slots)
                         track.feed(samples)
                 for u in flush_tracks(all_tracks):
                     _emit(u, sink, matcher, tracks_by_name, failed_slots)
                     spoken[u.track] = max(spoken.get(u.track, 0.0), u.wall_span[1])
                     said[u.track] = said.get(u.track, 0) + 1
+                if args.ear == "gradium":
+                    for track in all_tracks:
+                        track.check()
                 if watch:
                     for event in watch.check(time.time(), {src.name: (src.last_audio, src.last_sound)
                                                            for src in started_sources}, spoken):
@@ -390,6 +474,9 @@ def main(argv=None):
                     break
                 if not busy:
                     time.sleep(0.05)
+        except BaseException as error:
+            capture_error = error
+            raise
         finally:
             try:
                 for src in started_sources:
@@ -397,21 +484,38 @@ def main(argv=None):
                 if pause_monitor:
                     pause_monitor.stop()
                     _pause_events(pause_monitor, sink)
+                finish_error = None
                 for src, track in started_tracks:
-                    rest = src.drain(limit=float("inf"))
-                    if src in mic_gates:
-                        rest = pause_monitor.feed(mic_gates[src], rest, time.time(), final=True)
-                    if src in recorders:
-                        recorders[src].write(rest)
-                    track.feed(rest, final=True)
+                    try:
+                        rest = src.drain(limit=float("inf"))
+                        if src in mic_gates:
+                            rest = pause_monitor.feed(mic_gates[src], rest, time.time(), final=True)
+                        if src in recorders:
+                            recorders[src].write(rest)
+                        track.feed(rest, final=True)
+                    except Exception as error:
+                        finish_error = finish_error or error
                 for u in flush_tracks(all_tracks, force=True):
                     if sink:
                         _emit(u, sink, matcher, tracks_by_name, failed_slots)
+                if finish_error:
+                    capture_error = capture_error or finish_error
+                    raise finish_error
             finally:
                 try:
                     for recorder in recorders.values():
                         recorder.close()
+                    if args.ear == "gradium":
+                        for track in all_tracks:
+                            track.close()
+                        if key and args.gradium_metering:
+                            credits = credits_left(key)
+                        log(f"gradium: sent {ear_state()['seconds']:.2f} s, credits remaining: {credits}")
+                        if lifecycle:
+                            lifecycle.update(ear=ear_state())
                     if sink:
+                        if args.ear == "gradium" and capture_error:
+                            sink.comment("gradium " + " ".join(str(capture_error).split()))
                         for track, (since, cause) in (watch.open.items() if watch else ()):
                             log(f"{track}: still silent at the end ({cause} since "
                                 f"{datetime.fromtimestamp(since):%H:%M:%S})")
@@ -434,6 +538,9 @@ def main(argv=None):
             watcher.signal_written.wait()
         if lifecycle:
             lifecycle.update("failed", error=" ".join(str(error).split()) or type(error).__name__)
+        if args.ear == "gradium" and isinstance(error, Exception):
+            log(f"gradium: {error}")
+            return 1
         raise
     finally:
         if pause_monitor:
@@ -517,10 +624,10 @@ def _enroll(argv):
     from .voice import Embedder
 
     if args.file:
-        from mlx_audio.stt.utils import load_audio
-
-        samples = np.asarray(load_audio(args.file, sr=16000), dtype=np.float32).reshape(-1)
+        samples = load_audio(args.file)
     else:
+        if sys.platform != "darwin":
+            ap.error("microphone enrollment requires macOS; on Linux use --file")
         import sounddevice as sd
 
         samples = sd.rec(round(args.seconds * 16000), samplerate=16000, channels=1,
@@ -557,6 +664,14 @@ def _name_current(speaker, name, session=None):
         record = {"wall": datetime.now().isoformat(timespec="seconds"),
                   "name": {"speaker": speaker, "as": None if name == speaker else name}}
         records.write(json.dumps(record, ensure_ascii=False) + "\n")
+
+
+def _default_ear():
+    try:
+        import mlx.core  # noqa: F401
+    except (ImportError, OSError):
+        return "gradium"
+    return "local"
 
 
 def _device(spec):

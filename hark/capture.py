@@ -81,6 +81,7 @@ class Source:
         self.last_sound = None  # ... and last delivered a block above digital silence
         self.heard = None  # (samples drained, wall time the last of them arrived)
         self.stats = _no_stats()
+        self.error = None
 
     def start(self):
         self.anchor = self.last_audio = self.last_sound = time.time()
@@ -95,7 +96,10 @@ class Source:
             self.last_sound = now
         self.stats["device"] += samples.size
         self.stats["peak"] = max(self.stats["peak"], peak)
-        self.queue.put((now, samples))
+        try:
+            self.queue.put_nowait((now, samples))
+        except queue.Full:
+            self.error = RuntimeError(f"{self.name}: capture backlog full; audio cannot be preserved")
 
     def take_stats(self):
         """Samples delivered by the device and padded by `drain`, and peak, since the last call."""
@@ -104,6 +108,8 @@ class Source:
 
     def drain(self, limit=2 * SAMPLE_RATE):
         """Samples since the last call, up to about `limit`, padded to the wall clock."""
+        if self.error:
+            raise self.error
         blocks, got = [], 0
         while got < limit:
             try:
@@ -282,6 +288,7 @@ class PhoneSource(Source):
     def __init__(self, path):
         super().__init__("phone")
         self.path = Path(path)
+        self.queue = queue.Queue(maxsize=320)  # at most 128 s in 400 ms socket reads
         self.server = None
         self.conn = None
         self.lock = threading.Lock()

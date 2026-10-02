@@ -103,7 +103,7 @@ def test_live_capture_marks_a_dead_source_and_logs_to_the_session_log(tmp_path, 
     monkeypatch.setattr(cli, "MicSource", Dead)
     signaller, _ = signal_when_live(tmp_path)
     out = tmp_path / "sessions" / "dead.txt"
-    cli.main(["--room", "-o", str(out)])
+    cli.main(["--ear", "local", "--room", "-o", str(out)])
     signaller.join(timeout=2)
 
     lost = [line for line in out.read_text().splitlines() if " lost at " in line]
@@ -142,13 +142,14 @@ def test_replay_writes_the_log_and_never_marks_sources(tmp_path, monkeypatch):
             pass
 
     monkeypatch.setattr(cli, "HOME", tmp_path)
+    monkeypatch.setattr(cli, "_default_ear", lambda: "local")
     monkeypatch.setattr(cli, "FileSource", Stale)
     monkeypatch.setattr(cli, "Track", FakeTrack)
     monkeypatch.setattr(cli, "load_models", lambda latency: (None, None))
     monkeypatch.setattr(cli, "flush_tracks", lambda tracks, force=False: [])
     (tmp_path / "x.wav").touch()
 
-    cli.main(["--file", str(tmp_path / "x.wav"), "-o", str(tmp_path / "replay")])
+    cli.main(["--ear", "local", "--file", str(tmp_path / "x.wav"), "-o", str(tmp_path / "replay")])
 
     assert " lost at " not in (tmp_path / "replay.txt").read_text()
     assert '"source"' not in (tmp_path / "replay.jsonl").read_text()
