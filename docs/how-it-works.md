@@ -55,8 +55,9 @@ The speech burst includes an 800 ms silence tail, then flushes without ending it
 Long silence is discarded rather than submitted.
 A subsequent burst can share the same connection, with its own pre-roll.
 This is an energy gate, not a semantic speech detector; sufficiently loud background noise passes it.
-A request ends after 10 seconds of submitted audio, 10 source-clock seconds without a voiced frame, 120 seconds of source span, or near 1,200 recognised characters.
-The short replay window bounds the text at risk when retry segmentation changes.
+A request ends after 58 seconds of submitted audio or near 1,200 recognised characters.
+Quiet does not rotate it: the socket can span arbitrarily long source-clock gaps without sending audio.
+The upload bound limits replay work and leaves decoder-tail headroom below an inferred 60-second billing unit.
 
 Each request carries piecewise integer-sample mappings from its compressed cloud clock to the original track.
 Projecting Gradium's `start_s` and `stop_s` through those mappings yields source-relative timestamps, including any silence PhoneSource padded or the gate discarded.
@@ -74,36 +75,41 @@ A cosine similarity below `0.55` against every running centroid creates a new `S
 Centroids average unit-normalized embeddings, one vote per embedded phrase.
 Less than four seconds of audio inherits the preceding speaker without changing its centroid.
 
-Completed phrases are emitted while their request remains open, so a monologue does not wait for the 10-second rotation.
+Completed phrases are emitted while their request remains open, so a monologue does not wait for request rotation.
 There is one speaker per phrase: a brief second speaker or overlapping speech can be absorbed into its dominant voice.
 Speaker slots can fragment, and this does not provide the local ear's frame-level diarization.
 Two-second windows fragment heavily in the AMI calibration; longer windows trade latency and short-turn mistakes for more stable voices.
 
 A final `text` can arrive without `end_text` before EOS.
-hark retains that word through a speech flush.
-The next word's start supplies its end when available; EOS instead infers the end from the real submitted audio duration, excluding transport padding.
-The session log marks EOS inference.
-A quiet request closes after 10 source-clock seconds, bounding the wait for a missing final end.
+The next word's start supplies its end when available; a speech-flush acknowledgement or EOS instead infers the end from the real submitted audio duration, excluding transport padding.
+The log marks inference, and a late end for an inferred flush tail is ignored.
+A final word therefore need not wait for the next speech burst or request rotation.
 
 ### Recovery and resources
 
 Startup validates authentication and releases its socket without submitting audio.
 Each bounded request has a fresh connection and can contain multiple gated speech bursts.
-A dropped connection retries twice, with 0.5- and 1-second backoffs, replaying its audio and flush markers on the same cloud-to-source map.
+A dropped connection retries with cancellable exponential backoff from 0.5 seconds to a 30-second ceiling for the meeting's duration, replaying its audio and flush markers on the same cloud-to-source map.
+Startup outages also permit capture after the first failure.
+The transcript marks service loss and recovery with `# gradium lost at …` and `# gradium back at …`.
 Accepted words are retained independently of successful EOS.
 Replay suppresses segments starting before the preceding attempt's accepted horizon, per text stream.
 If the service changes its segmentation across that boundary, an overlapping continuation can be skipped; hark logs the suppression.
 
 The backlog holds at most 120 seconds of audio, including the in-flight request.
-Exceeding it stops with an explicit error rather than silently dropping speech.
+When full, it omits further recognition with source-interval notices rather than stopping capture or WAV recording.
+Phone capture has a separate ten-minute sample-count bound, independent of relay packet size; admitted audio is drained to the WAV before a capture-overflow error surfaces.
 The worker watches advancing ASR progress and cancellation while input, a flush or EOS is outstanding.
 A flushed, idle connection can wait for the next speech burst; heartbeats without progress do not keep outstanding work alive.
-Authentication and protocol errors are terminal, and persistent failures reach the shared lifecycle as `# gradium …`, a failed `meeting.json` and `# ended`.
+Authentication failures are terminal and reach the shared lifecycle as `# gradium …`, a failed owned `meeting.json` and `# ended`.
+Other provider/network failures remain degraded until recovery or shutdown.
+Timestamp anomalies are clamped and logged, stray word ends are ignored, and unexpected EOS restarts the request rather than masquerading as authentication.
 An embedding failure preserves the recognised text, keeps the previous speaker and disables clustering with a log warning.
 The embedder is warmed before capture, with at most four ONNX CPU threads.
 
-A private, temporary PCM16 archive under `~/.cache/hark` retains the full source clock for delayed recognition and voice matching, even with `--no-save-audio`.
-It uses disk rather than a growing in-memory audio buffer and closes at the end of the meeting.
+A private PCM16 archive in system temporary storage retains the full source clock for delayed recognition and voice matching, even with `--no-save-audio`.
+It stays open through independent final track flushes and closes at the end of the meeting.
+A rolling source-clock buffer cannot cover delayed recognition across arbitrarily long gated gaps; the archive also supports naming when WAV saving is disabled.
 The saved WAV is a separate, optional artifact.
 
 The session log records submitted audio seconds, including replay, and credit balances when the metering endpoint responds.
@@ -111,8 +117,9 @@ A launcher-owned `meeting.json` exposes the latest balance and submitted seconds
 Only live capture with `--launch`, or explicit output physically beneath the HARK home's `meetings/` directory, owns that record; standalone and file capture leave it untouched.
 Metering failure does not stop a meeting; there is no automatic spending limit.
 Balances can lag settled charges.
-Observed billing is consistent with a 15-second request minimum or rounding, so submitted seconds alone do not predict credits used.
-Grouping avoids repeatedly paying for very short speech bursts; the 10-second request bound still trades billing efficiency for a smaller replay window.
+The [measured billing table](../README.md#phone-meetings-on-linux) fits rounding the service's audio-progress clock to 15-second units, including an observed 1.04-second decoder tail; this is not a published guarantee.
+Keeping a gated socket open through idle avoids both submitted silence and repeated short-request charges.
+The 58-second upload cap leaves two seconds of headroom below a 60-second unit, while the character cap bounds transcript size.
 
 ## Local turns
 

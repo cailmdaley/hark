@@ -69,21 +69,34 @@ The [Shuttle](https://github.com/cailmdaley/felt) board relays the phone browser
 On a Linux host, the default ear is Gradium; no daemon configuration change is needed.
 The phone must stay connected and keep microphone access; an always-on ear host does not make mobile browser screen-lock capture reliable.
 
-Gradium charges **3 credits per submitted audio second**.
-The free plan has **45,000 credits/month**, about **4 hours 10 minutes of submitted STT audio**, and **3 concurrent STT streams**.
+Gradium advertises **3 credits per audio second**, **45,000 free credits/month** and **3 concurrent STT streams**.
+Four isolated billing probes measured **495 credits** in total:
+
+| Request pattern | Uploaded audio (s) | Open-socket idle, no audio sent (s) | Requests | Credits |
+|---|---:|---:|---:|---:|
+| 30 s speech clip | 30 | 0 | 1 | 135 |
+| 10 s speech, 20 s idle, 10 s speech | 20 | 20 | 1 | 90 |
+| 10 s speech, 20 s submitted silence, 10 s speech | 40 | 0 | 1 | 135 |
+| Three separate 5 s speech clips | 15.12 | 0 | 3 | 135 |
+
+The last row includes 40 ms of frame padding per request.
+The service's final progress clock exceeded uploaded audio by about 1.04 seconds.
+Charges fit rounding that clock up to 15-second units; this is a measured inference, **not a published billing guarantee**.
+Idle without audio had no advancing server clock; sending silence cost more.
+Earlier, 59.76 seconds across 16 short requests cost 720 credits.
+
 hark gates silence with a conservative energy check, a 320 ms pre-roll and an 800 ms tail.
-Short speech bursts share a request without uploading the intervening quiet; a request ends after at most 10 seconds of submitted audio or 10 seconds of source-clock quiet.
-Meeting length and submitted audio length therefore differ.
-Live receipts indicate a 15-second minimum or rounding per request, so **3 credits × submitted seconds is not a reliable bill estimate**.
-For example, 16 short requests containing 59.76 seconds cost 720 credits.
-Grouping reduces these tiny requests, but the 10-second replay bound still incurs rounding overhead.
-Treat 4 hours 10 minutes as an unrounded upper bound, not a guaranteed meeting allowance.
+Speech bursts share a socket across quiet periods without uploading the intervening quiet or rotating for elapsed wall time.
+Requests rotate at **58 submitted seconds** or near **1,200 recognised characters**.
+The duration leaves two seconds of headroom below a 60-second billing unit for the observed decoder tail; a 60-second input itself could spill into a 75-second bill.
+Retries, shorter requests and gate tails still cost credits.
+**3 × submitted seconds is not a reliable bill estimate**; the nominal 4 hours 10 minutes is an unrounded upper bound, not a guaranteed meeting allowance.
 The log and `meeting.json` record submitted seconds, including retries, and the credit balance at startup and shutdown when metering succeeds.
 `--no-gradium-metering` disables balance requests.
 There is no automatic monthly spending cap in hark.
 
 The [Gradium FAQ](https://docs.gradium.ai/guides/faq) also states a free-tier limit of **1,500 characters per session**, without distinguishing STT from TTS.
-hark rotates requests after at most 10 seconds of input and near 1,200 recognised characters, below that character threshold in ordinary speech.
+hark rotates requests after at most 58 seconds of input and near 1,200 recognised characters, below that character threshold in ordinary speech.
 The developer [request limit](https://docs.gradium.ai/guides/limits) is 3,000 seconds; the [pricing FAQ](https://gradium.ai/pricing) says 300 seconds.
 Both exceed hark's request limits.
 The STT character ceiling remains unverified.
@@ -105,8 +118,10 @@ hark enroll Ada --file ada.wav # create a voiceprint from at least 5 s of speech
 ```
 
 Ctrl-C, SIGTERM and SIGHUP flush pending text and write `# ended`.
-A missing key, rejected authentication or persistent Gradium failure writes a clear `# gradium …` comment and closes the transcript.
-A launcher-owned meeting is also marked failed in `meeting.json`.
+A missing key or rejected authentication writes a clear `# gradium …` comment and closes the transcript; an owned meeting is marked failed in `meeting.json`.
+Other Gradium or network failures keep source capture and WAV recording running, with `# gradium lost at …` and `# gradium back at …` markers.
+Recovery retries for the meeting's duration with cancellable exponential backoff capped at 30 seconds.
+A 120-second recognition backlog includes replay audio; once full, further recognition is omitted with interval notices, while recording continues.
 Only a live invocation with `--launch`, or explicit `-o` under the HARK home's `meetings/` directory, owns that lifecycle record; standalone capture does not overwrite it.
 Reconnects preserve the source clock and suppress already accepted speech on replay.
 If the service changes segment boundaries on replay, a segment starting before the accepted horizon is skipped; its overlapping continuation can be lost.
@@ -128,7 +143,7 @@ Gradium provides no diarization.
 Its word-sized text spans accumulate into roughly **four seconds of unique recognised audio** before hark computes a WeSpeaker embedding and compares it with online speaker centroids at cosine similarity `0.55`.
 Completed phrases appear while speech continues; hark does not wait for the request's end.
 An eight-second source span, an 800 ms gap, a speech-flush acknowledgement or the request's end also closes a phrase.
-A final word without `end_text` stays pending until the next word or EOS; a silent request closes after 10 seconds of source-clock quiet.
+A final word without `end_text` uses the next word's start, or an inferred end at a speech-flush acknowledgement or EOS; quiet does not close the socket.
 Phrases with less than four seconds of audio inherit the preceding speaker.
 There is **one speaker per phrase**, not overlapping-speaker separation.
 Brief replies can be mislabelled and speaker slots can fragment; this is weaker than the local ear's diarization.
@@ -155,13 +170,11 @@ The files are append-only; apply the latest `# S2 = Ada` mapping to earlier line
 
 ```bash
 HARK_DIR="$(mktemp -d /tmp/hk-test.XXXXXX)" uv run pytest
-HARK_DIR="$(mktemp -d /tmp/hk-test.XXXXXX)" uv run scripts/gradium-mutations.py
 ```
 
 Test fixtures isolate HARK state and reject the real default home.
 Gradium tests use a local websocket protocol server and cannot contact the hosted API or read a real key.
-The mutation runner breaks individual behaviours in temporary copies and verifies their targeted tests fail.
-On macOS, it also denies subprocess filesystem writes beneath the real `~/.hark`.
+Use a short temporary `HARK_DIR` for every test or smoke invocation, never the live home. In-process CLI helpers must also isolate `cli.HOME`.
 
 ## License
 

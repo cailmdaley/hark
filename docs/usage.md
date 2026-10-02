@@ -38,9 +38,10 @@ Never put it in the checkout or a transcript.
 
 Gradium receives gated audio over the internet and charges 3 credits per submitted second.
 The free plan has 45,000 credits per month (an unrounded upper bound of 4 hours 10 minutes of STT audio), 3 concurrent streams, and a documented 1,500-character session limit whose STT applicability is ambiguous.
-Live charges indicate a 15-second minimum or rounding per request; 59.76 seconds across 16 short requests cost 720 credits.
+The [billing probes](../README.md#phone-meetings-on-linux) cost 495 credits: one 30-second clip cost 135; two 10-second clips separated by 20 seconds of no-audio idle cost 90; transmitting silence during that gap cost 135; three separate 5-second clips cost 135.
+Charges fit 15-second rounding of the service progress clock, including an observed 1.04-second decoder tail; this is not a published guarantee.
 Do not estimate the bill as simply 3 × submitted seconds.
-hark groups speech bursts, discards intervening long quiet, and rotates after at most 10 submitted seconds, 10 source-clock quiet seconds or 120 source seconds.
+hark groups speech bursts across arbitrarily long quiet without sending the discarded audio and rotates after at most 58 submitted seconds or near 1,200 recognised characters.
 Logs record submitted seconds and observed credit balances; launcher-owned lifecycle files include the latest observation.
 Balances can lag settled charges.
 Background noise above the energy threshold still costs money.
@@ -48,14 +49,15 @@ Background noise above the energy threshold still costs money.
 
 Words accumulate into four seconds of unique recognised audio for CPU speaker embeddings, then appear while the request is still open.
 Phrases close at an eight-second source-wall span, an 800 ms gap, a speech-flush acknowledgement or the request's end too.
-A last word without `end_text` waits for the next word or EOS; quiet closes the request after 10 source-clock seconds.
+A last word without `end_text` uses the next word's start, or an inferred end at a speech-flush acknowledgement or EOS; quiet does not close the request.
 Less than four seconds inherits the preceding speaker.
 There is only one speaker per phrase; short replies and overlap can be mislabelled, and slots can fragment.
 The same enrolled-voice bank and manual names apply.
 
-A Gradium error closes the shared transcript with `# ended`, writes a `# gradium …` explanation and exits nonzero.
-It also marks a launcher-owned meeting failed.
-Bounded reconnects replay audio on its original clock and suppress accepted segments.
+Missing keys and authentication failures close the transcript with `# ended`, write a `# gradium …` explanation and exit nonzero; an owned meeting is marked failed.
+Other provider/network failures keep capture and WAV recording running, with `# gradium lost at …` and `# gradium back at …` markers.
+Cancellable reconnects use exponential backoff capped at 30 seconds for the meeting's duration, replay audio on its original clock and suppress accepted segments.
+A 120-second recognition backlog bounds retained upload/replay audio. Overflow omits further recognition with source-interval notices, not the saved recording.
 Changed replay boundaries can lose an overlapping continuation; the log records the skipped interval.
 See the [pipeline](how-it-works.md#gradium-recognition-and-speakers) for timing, recovery and resource bounds.
 

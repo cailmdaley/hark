@@ -151,7 +151,7 @@ class GradiumTrack:
             raise GradiumError("language must be en, fr or any")
         self.cluster = cluster if cluster is not None else OnlineCluster(minimum_duration=4)
         self.rms, self.hangover = rms, max(1, round(hangover * SAMPLE_RATE / FRAME))
-        # 58 submitted seconds leave room for the decoder tail below the 60-second billing boundary.
+        # Reserve decoder-tail headroom in approximately minute-long requests.
         self.max_frames = max(1, int(max_duration * SAMPLE_RATE / FRAME))
         self.pre = deque(maxlen=round(preroll * SAMPLE_RATE / FRAME))
         self.jobs = queue.Queue(maxsize=queue_size or math.ceil(backlog_seconds * SAMPLE_RATE / FRAME))
