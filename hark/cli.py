@@ -111,6 +111,7 @@ class SignalWatcher:
         self.stop = stop
         self.lifecycle = lifecycle
         self.closed = threading.Event()
+        self.wake = threading.Event()
         self.signal_written = threading.Event()
         self.interrupts = 0
         self.portable = sys.platform != "darwin"
@@ -135,16 +136,16 @@ class SignalWatcher:
             if self.interrupts > 1:
                 os._exit(128 + number)
         self.stop.set()
+        self.wake.set()
 
     def _watch_portable(self):
-        while not self.closed.wait(0.01):
-            if self.stop.is_set():
-                try:
-                    if self.lifecycle:
-                        self.lifecycle.stopping()
-                finally:
-                    self.signal_written.set()
-                return
+        self.wake.wait()
+        if not self.closed.is_set() and self.stop.is_set():
+            try:
+                if self.lifecycle:
+                    self.lifecycle.stopping()
+            finally:
+                self.signal_written.set()
 
     def _restore(self):
         if self.portable:
@@ -172,6 +173,7 @@ class SignalWatcher:
 
     def close(self):
         self.closed.set()
+        self.wake.set()
         if not self.portable:
             signal.pthread_kill(self.thread.ident, self.wake_signal)
         self.thread.join()
