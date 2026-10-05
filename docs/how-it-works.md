@@ -127,7 +127,7 @@ A launcher-owned `meeting.json` exposes the latest balance and submitted seconds
 Only live capture with `--launch`, or explicit output physically beneath the HARK home's `meetings/` directory, owns that record; standalone and file capture leave it untouched.
 Metering failure does not stop a meeting; there is no automatic spending limit.
 Balances can lag settled charges.
-The [measured billing table](../README.md#phone-meetings-on-linux) fits rounding the service's audio-progress clock to 15-second units, including an observed 1.04-second decoder tail; this is not a published guarantee.
+The [measured billing table](usage.md#gradium) fits rounding the service's audio-progress clock to 15-second units, including an observed 1.04-second decoder tail; this is not a published guarantee.
 Sharing a gated socket through short quiet avoids both submitted silence and repeated short-request charges; quiet lasting 60 source seconds closes it before provider expiry.
 The 58-second upload cap leaves two seconds of headroom below a 60-second unit, while the character cap bounds transcript size.
 

@@ -35,12 +35,25 @@ hark --file recording.wav --ear gradium --lang fr
 The key comes from `GRADIUM_API_KEY`, otherwise `~/.config/hark/gradium.key`.
 The file must belong to you, have mode `600` and contain one non-empty key line.
 Never put it in the checkout or a transcript.
+To create it: `mkdir -p ~/.config/hark && chmod 700 ~/.config/hark`, write the key with your editor, then `chmod 600 ~/.config/hark/gradium.key`.
+On Linux, install with `uv tool install .` from a checkout; the CPU speaker model downloads from Hugging Face on first use, and formats other than WAV may need `ffmpeg` on `PATH`.
 
 Gradium receives gated audio over the internet and charges 3 credits per submitted second.
 The free plan has 45,000 credits per month (an unrounded upper bound of 4 hours 10 minutes of STT audio), 3 concurrent streams, and a documented 1,500-character session limit whose STT applicability is ambiguous.
-The [billing probes](../README.md#phone-meetings-on-linux) cost 495 credits: one 30-second clip cost 135; two 10-second clips separated by 20 seconds of no-audio idle cost 90; transmitting silence during that gap cost 135; three separate 5-second clips cost 135.
+Four isolated billing probes cost 495 credits:
+
+| Request pattern | Uploaded audio (s) | Open-socket idle, no audio sent (s) | Requests | Credits |
+|---|---:|---:|---:|---:|
+| 30 s speech clip | 30 | 0 | 1 | 135 |
+| 10 s speech, 20 s idle, 10 s speech | 20 | 20 | 1 | 90 |
+| 10 s speech, 20 s submitted silence, 10 s speech | 40 | 0 | 1 | 135 |
+| Three separate 5 s speech clips | 15.12 | 0 | 3 | 135 |
+
+The last row includes 40 ms of frame padding per request.
+Earlier, 59.76 seconds across 16 short requests cost 720 credits.
 Charges fit 15-second rounding of the service progress clock, including an observed 1.04-second decoder tail; this is not a published guarantee.
 Do not estimate the bill as simply 3 × submitted seconds.
+The developer [request limit](https://docs.gradium.ai/guides/limits) is 3,000 seconds and the [pricing FAQ](https://gradium.ai/pricing) says 300; both exceed hark's request bounds. The [FAQ](https://docs.gradium.ai/guides/faq)'s 1,500-character session limit may or may not apply to STT; hark's ~1,200-character rotation stays below it in ordinary speech.
 hark groups speech bursts across short quiet periods without sending discarded audio.
 Requests rotate after at most 58 submitted seconds, near 1,200 recognised characters, or 60 seconds of source-clock quiet.
 A quiet request ends cleanly before the observed 120-second provider no-output limit; resumed speech opens a fresh one.
@@ -111,6 +124,7 @@ hark processes                             # list CoreAudio process objects and 
 ```
 
 Enrollment needs at least 5 s of audio; the voiceprint and the clip it came from (`<name>.wav`) live in `~/.hark/voices/`.
+To name yourself on another host, copy `~/.hark/voices/me.npy` there.
 With voices enrolled, hark names a diarized slot on its own once enough of that slot's speech matches one voice clearly; see [how it works](how-it-works.md#voice-matching).
 A slot someone named by hand is never renamed automatically.
 
