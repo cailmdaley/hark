@@ -4,7 +4,9 @@
 
 # hark
 
-**hark turns a live conversation into a speaker-labelled transcript that grows as people talk, written to a plain text file any AI agent can read.**
+**hark lets AI agents work *during* a meeting, not after it.**
+While people are still talking, an agent can take notes, look up the paper someone just mentioned, check a number against the data, or start on a task the moment it's agreed.
+hark makes that possible by turning the conversation into a speaker-labelled transcript that grows as people talk, written to a plain text file any agent can read.
 
 ```
 # hark 2026-09-24 19:34 — call: me = mic, S1… = system audio
@@ -17,8 +19,8 @@
 
 Start `hark` when a call or meeting begins.
 A few seconds after each person finishes speaking, their words are appended to the file with a time range and a speaker label.
-An agent running alongside you (Claude Code, Codex, or anything that can read a file) follows that file while the meeting is still going.
-It can keep notes, record decisions, answer a question someone just asked, or start on a task the moment it's agreed.
+An agent running alongside you (Claude Code, Codex, or anything that can read a file) follows that file as it grows.
+By the time the call ends, the notes are written, the questions raised have answers, and the agreed work is already under way.
 
 ## Why a file
 
