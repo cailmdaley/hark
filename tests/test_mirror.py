@@ -220,3 +220,22 @@ def test_late_bytes_from_an_abandoned_connection_do_not_duplicate(tmp_path):
     assert mirror.finish(timeout=5)
     time.sleep(1.2)
     assert remote.read_bytes() == local.read_bytes()
+
+
+def test_watchdog_restarts_a_channel_that_stops_delivering(tmp_path):
+    local, remote = tmp_path / "local.txt", tmp_path / "remote.txt"
+    local.write_bytes(b"")
+    wedged = [sys.executable, "-c", "import time; time.sleep(60)"]
+    commands = iter([wedged])
+
+    def command(offset, *, reset=False):
+        return next(commands, None) or positioned_command(remote, offset, reset=reset)
+
+    mirror = TranscriptMirror(local, "host", "path", command=command,
+                              size_command=remote_size(remote), backoff=0,
+                              stall_timeout=0.3)
+    assert mirror.start()
+    local.write_bytes(b"line one\n")
+    wait_for(lambda: remote.exists() and remote.read_bytes() == b"line one\n", timeout=5)
+    assert mirror.finish(timeout=5)
+    assert remote.read_bytes() == b"line one\n"

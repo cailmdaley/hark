@@ -7,7 +7,8 @@
 
     hark name S2 "Ada" [--session PATH]     name a diarized speaker in the live session
     hark enroll NAME [--seconds 30 | --file x.wav] [--mic DEV]   record a voiceprint
-    hark mirror --resume LOCAL HOST:PATH    finish a mirror that didn't complete
+    hark mirror --resume [--follow] LOCAL HOST:PATH
+                                            finish (or keep following) a mirror that didn't complete
     hark pause [--status] | hark resume     mute the live session's mic, and unmute it
     hark processes                          list CoreAudio processes and their input flags
 
@@ -628,13 +629,23 @@ def _resume_mirror(argv):
     ap.add_argument("--resume", action="store_true", required=True)
     ap.add_argument("local", type=Path)
     ap.add_argument("target", help="remote destination as HOST:PATH")
+    ap.add_argument("--follow", action="store_true",
+                    help="keep streaming a live transcript until its '# ended' footer")
     args = ap.parse_args(argv)
     host, separator, remote_path = args.target.partition(":")
     if not separator or not host or not remote_path:
         ap.error("target must be HOST:PATH")
     mirror = TranscriptMirror(args.local, host, remote_path, resume=True)
     mirror.start()
+    while args.follow and mirror.failure is None and not _has_ended(args.local):
+        time.sleep(1)
     return 0 if mirror.finish() else 1
+
+
+def _has_ended(path):
+    with open(path, "rb") as transcript:
+        transcript.seek(max(0, path.stat().st_size - 4096))
+        return b"# ended" in transcript.read()
 
 
 def _enroll(argv):

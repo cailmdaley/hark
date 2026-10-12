@@ -10,11 +10,13 @@ from .capture import log
 
 SSH_OPTIONS = [
     "-o", "BatchMode=yes",
+    "-o", "ControlPath=none",
     "-o", "ConnectTimeout=10",
     "-o", "ServerAliveInterval=15",
     "-o", "ServerAliveCountMax=3",
 ]
 EOF_TIMEOUT = 3.0
+STALL_TIMEOUT = 60.0
 
 
 def _remote_path(path):
@@ -44,7 +46,8 @@ class TranscriptMirror:
 
     def __init__(self, local_path, host, remote_path, *, command=None, size_command=None,
                  popen=subprocess.Popen, run=subprocess.run, backoff=0.25, max_backoff=5.0,
-                 poll_interval=0.05, eof_timeout=EOF_TIMEOUT, resume=False):
+                 poll_interval=0.05, eof_timeout=EOF_TIMEOUT, resume=False,
+                 stall_timeout=STALL_TIMEOUT):
         self.path = Path(local_path)
         self.host = host
         self.remote_path = remote_path
@@ -58,6 +61,8 @@ class TranscriptMirror:
         self.poll_interval = poll_interval
         self.eof_timeout = eof_timeout
         self.resume = resume
+        self.stall_timeout = stall_timeout
+        self.position = 0
         self.thread = None
         self.process = None
         self.target_size = None
@@ -79,6 +84,9 @@ class TranscriptMirror:
             self.path.stat()
             self.thread = threading.Thread(target=self._run, name="hark-mirror", daemon=True)
             self.thread.start()
+            if self.stall_timeout:
+                threading.Thread(target=self._watch, name="hark-mirror-watchdog",
+                                 daemon=True).start()
         except Exception as error:
             self._stop(error)
             return False
@@ -123,6 +131,38 @@ class TranscriptMirror:
         if not self.completed:
             self._log_recovery()
         return self.completed
+
+    def _watch(self):
+        """Kill a channel that stays open but stops delivering bytes.
+
+        A wedged SSH channel (for example a multiplexed master after a network
+        change) can keep both ends alive while the pipe fills and the writer
+        blocks forever; killing the process unblocks it and the run loop
+        reconnects from the remote size.
+        """
+        last = None
+        while not self.stopping.wait(self.stall_timeout):
+            if self.completed or self.failure is not None:
+                return
+            process = self.process
+            if process is None or process.poll() is not None:
+                last = None
+                continue
+            try:
+                remote = self._remote_size()
+            except Exception:
+                remote = None
+            pending = remote is None or remote < self.position
+            if pending and last is not None and last[0] is process and last[1] == remote:
+                log(f"mirror: remote stuck at {remote} of {self.position} bytes for "
+                    f"{self.stall_timeout:g} s; restarting the SSH channel")
+                try:
+                    process.kill()
+                except OSError:
+                    pass
+                last = None
+                continue
+            last = (process, remote) if pending else None
 
     def _remote_size(self):
         result = self.run(self.size_command, capture_output=True, text=True, check=True,
@@ -234,6 +274,7 @@ class TranscriptMirror:
                         raise MirrorError(f"remote target already contains {offset} bytes; use hark mirror --resume")
                     else:
                         position = offset
+                    self.position = position
                     try:
                         process = self.popen(self._new_command(position, reset=reset),
                                              stdin=subprocess.PIPE, bufsize=0,
@@ -249,7 +290,7 @@ class TranscriptMirror:
                 if returncode is not None:
                     self._drop(process)
                     process = None
-                    if returncode not in (0, 255):
+                    if returncode not in (0, 255) and returncode > 0:
                         raise MirrorError(f"SSH exited {returncode}")
                     failures = self._retry(failures, f"SSH exited {returncode}")
                     continue
@@ -268,11 +309,12 @@ class TranscriptMirror:
                         except (BrokenPipeError, OSError) as error:
                             returncode = self._drop(process)
                             process = None
-                            if returncode not in (None, 0, 255):
+                            if returncode is not None and returncode not in (0, 255) and returncode > 0:
                                 raise MirrorError(f"SSH write failed ({error}); SSH exited {returncode}") from error
                             failures = self._retry(failures, f"SSH write failed ({error})")
                             continue
                         position += len(data)
+                        self.position = position
                         continue
 
                 if self.target_size is not None and position >= self.target_size:
