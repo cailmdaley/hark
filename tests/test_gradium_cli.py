@@ -184,7 +184,7 @@ def test_default_ear_follows_importability_and_explicit_choice_is_lazy(monkeypat
     assert cli._default_ear() == "local"
 
 
-@pytest.mark.parametrize("arguments", [[], ["--room"], ["--ear", "local", "--room"]])
+@pytest.mark.parametrize("arguments", [[], ["--call"], ["--ear", "local", "--call"]])
 def test_linux_device_modes_fail_fast(arguments, monkeypatch):
     monkeypatch.setattr(cli.sys, "platform", "linux")
     monkeypatch.setattr(cli, "MicSource", lambda *a: pytest.fail("device opened"))

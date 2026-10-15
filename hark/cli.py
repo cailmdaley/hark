@@ -1,7 +1,7 @@
 """hark — capture a conversation, append one speaker-labelled line per utterance.
 
-    hark                 call: mic is "me", system audio (Zoom…) diarized as S1…S8
-    hark --room          in person: the mic alone, diarized
+    hark                 in person, or a call on speakers: the mic alone, diarized as S1…S8
+    hark --call          a call on headphones: mic is "me", system audio (Zoom…) diarized as S1…S8
     hark --phone         in person, a phone as the mic: PCM into ~/.hark/phone.sock, diarized
     hark --file x.wav    transcribe a file through the same streaming path
 
@@ -229,7 +229,9 @@ def main(argv=None):
     ap = argparse.ArgumentParser(prog="hark", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     mode = ap.add_mutually_exclusive_group()
-    mode.add_argument("--room", action="store_true", help="mic only, diarized")
+    mode.add_argument("--room", action="store_true", help="mic only, diarized (the default)")
+    mode.add_argument("--call", action="store_true",
+                      help="headphones on a call: mic is me, system audio diarized")
     mode.add_argument("--phone", action="store_true",
                       help="a phone as the mic: listen for s16le 16 kHz PCM on ~/.hark/phone.sock, diarized")
     mode.add_argument("--file", help="transcribe an audio file instead of live input")
@@ -304,9 +306,9 @@ def main(argv=None):
             signal.signal(sig, on_signal)
 
     what = (f"file {args.file}" if args.file else
-            "room: mic diarized as S1…" if args.room else
+            "call: me = mic, S1… = system audio" if args.call else
             "phone: the phone's mic diarized as S1…" if args.phone else
-            "call: me = mic, S1… = system audio")
+            "room: mic diarized as S1…")
     sources = []
     tracks = []
     all_tracks = []
@@ -377,11 +379,11 @@ def main(argv=None):
                     sources = [(FileSource(args.file, realtime=args.realtime), numbered)]
                 elif args.phone:
                     sources = [(PhoneSource(phone_socket), numbered)]
-                elif args.room:
-                    sources = [(MicSource(_device(args.mic)), numbered)]
-                else:
+                elif args.call:
                     sources = [(MicSource(_device(args.mic)), lambda _: "me"),
                                (SystemSource(), numbered)]
+                else:
+                    sources = [(MicSource(_device(args.mic)), numbered)]
 
             log("connecting Gradium…" if args.ear == "gradium" else "loading models…")
             if stop.is_set() or args.ear == "gradium":
@@ -401,7 +403,7 @@ def main(argv=None):
                           if (HOME / "voices").exists() else {})
                 mask = MaskPolicy.parse(args.speaker_mask) if args.speaker_mask != "shared" else None
                 tracks = [(src, gradium.GradiumTrack(src.name, key=key, language=args.lang,
-                                             fixed_speaker="me" if src.name == "mic" and not args.room else None,
+                                             fixed_speaker="me" if src.name == "mic" and args.call else None,
                                              realtime=live or args.realtime, voices=voices)
                            if args.ear == "gradium" else
                            Track(src.name, asr, diar, speaker_label=label,

@@ -3,8 +3,8 @@
 ## Modes
 
 ```bash
-hark                  # call: mic = "me", system audio diarized as S1…S8
-hark --room           # in person: the mic alone, diarized
+hark                  # in person, or a call on speakers: the mic alone, diarized
+hark --call           # a call on headphones: mic = "me", system audio diarized as S1…S8
 hark --phone          # in person, a phone as the mic: PCM arrives on a socket, diarized
 hark --file x.m4a     # a recording through the same streaming path (about 0.15× real time)
 hark --file x.wav --realtime   # replay at real-time pace, e.g. to test an agent against it
@@ -16,8 +16,9 @@ Linux supports phone and file input; call/room devices and microphone enrollment
 Explicit `--ear local` requires MLX.
 Gradium can use Mac audio devices too; the call-mode mic keeps its fixed `me` label.
 
-Call mode assumes headphones: the mic hears only you, and everything the Mac plays (Zoom, Meet, a video) is the other side.
-On speakers the call leaks into the mic.
+Room mode is the default: the mic is diarized, so everyone it hears is numbered, you included. It also covers a call played on speakers, where remote voices reach the mic through the room.
+Call mode (`--call`) assumes headphones: the mic hears only you, and everything the Mac plays (Zoom, Meet, a video) is the other side.
+On speakers, or with someone else in the room, the mic picks up other voices and labels them `me`.
 
 Phone mode suits a room where the laptop's mic is in the wrong place. hark listens on `~/.hark/phone.sock` for raw 16 kHz mono s16le PCM; a relay writes it there, such as the Shuttle board's phone page, which streams the phone's mic over the tailnet. Anything that produces that PCM works too, for example `ffmpeg -i talk.m4a -f s16le -ac 1 -ar 16000 - | nc -U ~/.hark/phone.sock`. One sender at a time: a new connection replaces the old one. While nothing is connected hark records silence, and after 90 s the transcript says `# phone lost at …`. The track is saved as `<stem>.phone.wav`.
 

@@ -40,8 +40,8 @@ The format is a small, documented contract ([docs/format.md](docs/format.md)). B
 
 hark listens to up to two audio sources and labels speakers within each.
 
-- **On a call**, with headphones, the microphone is you (`me`) and the computer's own audio output (Zoom, Meet, a video) is everyone else. hark captures that output through a macOS system-audio tap ([audiotee](https://github.com/makeusabrew/audiotee)) and separates it into speakers `S1`…`S8`.
-- **In a room**, the microphone alone is separated into speakers.
+- **In a room** (the default), the microphone alone is separated into speakers. This includes a call played on speakers, with or without people in the room.
+- **On a call** (`--call`), with headphones, the microphone is you (`me`) and the computer's own audio output (Zoom, Meet, a video) is everyone else. hark captures that output through a macOS system-audio tap ([audiotee](https://github.com/makeusabrew/audiotee)) and separates it into speakers `S1`…`S8`.
 - **With a phone as the microphone**, raw audio arrives on a local socket and is separated the same way. This is useful when the laptop is in the wrong place.
 
 Speech recognition and speaker separation ("diarization") are done by one of two back ends, which hark calls *ears*:
@@ -73,8 +73,8 @@ Grant your terminal the **Microphone** permission, plus **Screen & System Audio 
 Without the second permission, the call side comes through as silence.
 
 ```bash
-hark                          # a call: mic = me, system audio = S1…
-hark --room                   # in person: the mic, diarized
+hark                          # in person, or a call on speakers: the mic, diarized
+hark --call                   # a call on headphones: mic = me, system audio = S1…
 hark --file talk.m4a          # an existing recording
 hark name S2 Ada              # name a speaker in the live session
 hark enroll Ada --file ada.wav  # enroll a voice (≥ 5 s) for automatic naming

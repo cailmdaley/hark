@@ -494,7 +494,7 @@ def test_call_saves_mic_and_system_tracks_each_with_its_own_samples(tmp_path, mo
     signaller, _ = signal_when_live(tmp_path)
     out = tmp_path / "meetings" / "call.txt"
 
-    cli.main(["--ear", "local", "-o", str(out)])
+    cli.main(["--call", "--ear", "local", "-o", str(out)])
     signaller.join(timeout=2)
 
     assert np.array_equal(read_wav(out.with_suffix(".mic.wav")), np.concatenate(mic_fed))
