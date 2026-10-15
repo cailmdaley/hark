@@ -19,7 +19,7 @@ def setup(tmp_path, voices, vector=(1, 0)):
 
 
 def utterance(speaker, start=0):
-    return Utterance("system", speaker, start, start + 5, datetime.now(), "speech",
+    return Utterance("mic", speaker, start, start + 5, datetime.now(), "speech",
                      speech=[(start, start + 5)])
 
 
@@ -47,7 +47,7 @@ def test_manual_name_is_never_overridden(tmp_path):
     sink.close("ended")
 
 
-def test_non_diarized_call_mic_is_not_voice_named(tmp_path):
+def test_non_numbered_slot_is_not_voice_named(tmp_path):
     matcher, sink, track = setup(tmp_path, {"me": np.array([1, 0])})
     matcher.finished(track, utterance("me"))
     assert sink.names == {}

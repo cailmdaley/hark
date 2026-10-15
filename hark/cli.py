@@ -1,7 +1,7 @@
 """hark — capture a conversation, append one speaker-labelled line per utterance.
 
-    hark                 in person, or a call on speakers: the mic alone, diarized as S1…S8
-    hark --call          a call on headphones: mic is "me", system audio (Zoom…) diarized as S1…S8
+    hark                 mic + system audio when available, both diarized as S1…
+    hark --room          mic only, diarized as S1…
     hark --phone         in person, a phone as the mic: PCM into ~/.hark/phone.sock, diarized
     hark --file x.wav    transcribe a file through the same streaming path
 
@@ -37,7 +37,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from .capture import (SAMPLE_RATE, FileSource, MicSource, PhoneSource, SystemSource, WavRecorder,
+from .capture import (AUDIOTEE, SAMPLE_RATE, FileSource, MicSource, PhoneSource, SystemSource, WavRecorder,
                       load_audio, log, log_to)
 from .health import QuietWatch
 from .masking import MaskPolicy
@@ -181,7 +181,27 @@ class SignalWatcher:
         self._restore()
 
 
-def _emit(u, sink, matcher, tracks_by_name, failed_slots):
+class SpeakerSlots:
+    """One session-wide namespace for independent tracks' speaker slots."""
+
+    def __init__(self):
+        self.slots = {}
+
+    def label(self, track, speaker):
+        key = (track, speaker)
+        if key not in self.slots:
+            self.slots[key] = f"S{len(self.slots) + 1}"
+        return self.slots[key]
+
+
+def _system_capture_available():
+    return _device_capture_available() and AUDIOTEE.is_file() and os.access(AUDIOTEE, os.X_OK)
+
+
+def _emit(u, sink, matcher, tracks_by_name, failed_slots, slots=None):
+    # Allocate on the main thread, before naming or either transcript representation.
+    if slots is not None:
+        u.speaker = slots.label(u.track, u.speaker)
     sink.poll_names()
     slot = (u.track, u.speaker)
     if matcher and slot not in failed_slots:
@@ -229,9 +249,8 @@ def main(argv=None):
     ap = argparse.ArgumentParser(prog="hark", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     mode = ap.add_mutually_exclusive_group()
-    mode.add_argument("--room", action="store_true", help="mic only, diarized (the default)")
-    mode.add_argument("--call", action="store_true",
-                      help="headphones on a call: mic is me, system audio diarized")
+    mode.add_argument("--room", action="store_true", help="mic only, diarized")
+    mode.add_argument("--call", action="store_true", help=argparse.SUPPRESS)
     mode.add_argument("--phone", action="store_true",
                       help="a phone as the mic: listen for s16le 16 kHz PCM on ~/.hark/phone.sock, diarized")
     mode.add_argument("--file", help="transcribe an audio file instead of live input")
@@ -305,10 +324,14 @@ def main(argv=None):
         for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
             signal.signal(sig, on_signal)
 
+    system_audio = not (args.room or args.phone or args.file) and _system_capture_available()
+    if not (args.room or args.phone or args.file) and not system_audio:
+        log("system audio unavailable; using mic only (build audiotee with scripts/build-audiotee.sh)")
     what = (f"file {args.file}" if args.file else
-            "call: me = mic, S1… = system audio" if args.call else
             "phone: the phone's mic diarized as S1…" if args.phone else
+            "live: mic + system audio diarized as S1…" if system_audio else
             "room: mic diarized as S1…")
+    slots = SpeakerSlots() if system_audio else None
     sources = []
     tracks = []
     all_tracks = []
@@ -379,11 +402,10 @@ def main(argv=None):
                     sources = [(FileSource(args.file, realtime=args.realtime), numbered)]
                 elif args.phone:
                     sources = [(PhoneSource(phone_socket), numbered)]
-                elif args.call:
-                    sources = [(MicSource(_device(args.mic)), lambda _: "me"),
-                               (SystemSource(), numbered)]
                 else:
                     sources = [(MicSource(_device(args.mic)), numbered)]
+                    if system_audio:
+                        sources.append((SystemSource(), numbered))
 
             log("connecting Gradium…" if args.ear == "gradium" else "loading models…")
             if stop.is_set() or args.ear == "gradium":
@@ -403,7 +425,6 @@ def main(argv=None):
                           if (HOME / "voices").exists() else {})
                 mask = MaskPolicy.parse(args.speaker_mask) if args.speaker_mask != "shared" else None
                 tracks = [(src, gradium.GradiumTrack(src.name, key=key, language=args.lang,
-                                             fixed_speaker="me" if src.name == "mic" and args.call else None,
                                              realtime=live or args.realtime, voices=voices)
                            if args.ear == "gradium" else
                            Track(src.name, asr, diar, speaker_label=label,
@@ -477,7 +498,7 @@ def main(argv=None):
                             recorders[src].write(samples)
                         track.feed(samples)
                 for u in flush_tracks(all_tracks):
-                    _emit(u, sink, matcher, tracks_by_name, failed_slots)
+                    _emit(u, sink, matcher, tracks_by_name, failed_slots, slots)
                     spoken[u.track] = max(spoken.get(u.track, 0.0), u.wall_span[1])
                     said[u.track] = said.get(u.track, 0) + 1
                 if args.ear == "gradium":
@@ -528,7 +549,7 @@ def main(argv=None):
                         finish_error = finish_error or error
                 for u in sorted(final_utterances, key=lambda u: u.wall_span[0]):
                     if sink:
-                        _emit(u, sink, matcher, tracks_by_name, failed_slots)
+                        _emit(u, sink, matcher, tracks_by_name, failed_slots, slots)
                 if finish_error and capture_error is None:
                     capture_error = finish_error
                     raise finish_error

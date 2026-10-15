@@ -37,6 +37,7 @@ def test_primary_capture_error_survives_cleanup_and_other_track_flushes(monkeypa
             return []
     monkeypatch.setattr(cli, '_default_ear', lambda: 'local')
     monkeypatch.setattr(cli, '_device_capture_available', lambda: True)
+    monkeypatch.setattr(cli, '_system_capture_available', lambda: True)
     monkeypatch.setattr(cli, 'load_models', lambda _: (None, None))
     monkeypatch.setattr(cli, 'MicSource', Source)
     monkeypatch.setattr(cli, 'SystemSource', System)

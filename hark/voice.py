@@ -243,7 +243,9 @@ class VoiceMatcher:
         if audio.size < 5 * 16000:
             return
         embedding = self.embedder(audio)
-        self.scores[key] = {name: float(np.dot(embedding, vector)) for name, vector in self.voices.items()}
+        self.scores[key] = {name: float(np.dot(embedding, vector))
+                            for name, vector in self.voices.items()
+                            if name != "me" or utterance.track != "system"}
         self._assign(self.scores[key])
 
     def _assign(self, latest):
@@ -252,7 +254,8 @@ class VoiceMatcher:
         held = set(self.sink.names.values())
         for voice in sorted(latest, key=latest.get, reverse=True):
             claimants = sorted(((scores[voice], slot) for (_, slot), scores in self.scores.items()
-                                if self._automatic(slot) and self._claim(scores) == voice), reverse=True)
+                                if voice in scores and self._automatic(slot)
+                                and self._claim(scores) == voice), reverse=True)
             if not claimants:
                 continue
             (best, winner), rest = claimants[0], claimants[1:]

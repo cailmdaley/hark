@@ -105,6 +105,7 @@ def test_live_modes_feed_and_save_identical_gated_pcm_and_leave_system_untouched
 
     monkeypatch.setattr(cli, "_default_ear", lambda: "local")
     monkeypatch.setattr(cli, "_device_capture_available", lambda: True)
+    monkeypatch.setattr(cli, "_system_capture_available", lambda: True)
     monkeypatch.setattr(cli, "HOME", tmp_path)
     monkeypatch.setattr(cli, "SignalWatcher", Signals)
     monkeypatch.setattr(cli, "MicSource", Mic)
@@ -114,7 +115,7 @@ def test_live_modes_feed_and_save_identical_gated_pcm_and_leave_system_untouched
     monkeypatch.setattr(cli, "load_models", lambda *_: (None, None))
     monkeypatch.setattr(cli, "flush_tracks", lambda *_, **__: [])
     out = tmp_path / "session.txt"
-    cli.main(([] if room else ["--call"]) + ["--ear", "local", "--launch", "test", "-o", str(out)])
+    cli.main((["--room"] if room else []) + ["--ear", "local", "--launch", "test", "-o", str(out)])
 
     original = np.concatenate(blocks)
     expected = original.copy()

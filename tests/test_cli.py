@@ -236,7 +236,12 @@ def test_signal_during_model_loading_stops_without_starting_audio(tmp_path, monk
     source_instances = []
 
     def load_models(latency):
-        os.kill(os.getpid(), signal.SIGINT)
+        if sys.platform == "darwin":
+            # Native-library threads may be unmasked; target the sigwait consumer.
+            watcher = next(t for t in threading.enumerate() if t.name == "hark-signals")
+            signal.pthread_kill(watcher.ident, signal.SIGINT)
+        else:
+            os.kill(os.getpid(), signal.SIGINT)
         deadline = time.monotonic() + 1
         while time.monotonic() < deadline:
             state = json.loads((tmp_path / "meeting.json").read_text())
@@ -485,16 +490,18 @@ def test_phone_listens_on_the_hark_dir_socket_and_saves_a_phone_track(tmp_path, 
     assert np.array_equal(read_wav(out.with_suffix(".phone.wav")), np.concatenate(fed))
 
 
-def test_call_saves_mic_and_system_tracks_each_with_its_own_samples(tmp_path, monkeypatch):
+@pytest.mark.parametrize("mode", [[], ["--call"]])
+def test_live_saves_mic_and_system_tracks_each_with_its_own_samples(tmp_path, monkeypatch, mode):
     cli, Source = fake_live_capture(monkeypatch, tmp_path)
     Mic, mic_fed = feed_chunks(Source, "mic", [tone(440, 3000)])
     System, system_fed = feed_chunks(Source, "system", [tone(220, 4000), tone(330, 1000)])
     monkeypatch.setattr(cli, "MicSource", Mic)
     monkeypatch.setattr(cli, "SystemSource", System)
+    monkeypatch.setattr(cli, "_system_capture_available", lambda: True)
     signaller, _ = signal_when_live(tmp_path)
     out = tmp_path / "meetings" / "call.txt"
 
-    cli.main(["--call", "--ear", "local", "-o", str(out)])
+    cli.main(mode + ["--ear", "local", "-o", str(out)])
     signaller.join(timeout=2)
 
     assert np.array_equal(read_wav(out.with_suffix(".mic.wav")), np.concatenate(mic_fed))
