@@ -162,7 +162,8 @@ A slot claims a voice when the cosine similarity is at least 0.55 and leads the 
 The 0.55 floor sits above the worst impostor clips seen in testing, which scored about 0.5.
 
 An enrolled voice named `me` follows those same rules for mic slots, with no preferred slot or special threshold.
-System-audio slots exclude `me` from automatic display-name candidates and cannot take that name away from a mic slot.
+System-audio slots cannot automatically claim the display name `me` or take it away from a mic slot.
+Their scores against `me` still count when checking ambiguity against other enrolled voices, so excluding the name doesn't make another voice easier to claim.
 Phone and file naming retain their ordinary enrolled-bank behavior.
 Gradium's identity anchors still receive the full bank on each track: anchor identity controls cluster reuse, independently of display-name eligibility.
 Manual names retain precedence, including a manually assigned `me`.

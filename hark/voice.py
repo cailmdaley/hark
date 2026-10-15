@@ -201,6 +201,7 @@ class VoiceMatcher:
         self.clips = defaultdict(lambda: deque())
         self.segments = self.clips
         self.scores = {}  # (track, slot) -> {voice: latest cosine}
+        self.sources = {}  # (track, slot) -> source name, independent of display names
         self.given = {}  # slot -> the name this matcher wrote for it
 
     def _automatic(self, slot):
@@ -243,9 +244,8 @@ class VoiceMatcher:
         if audio.size < 5 * 16000:
             return
         embedding = self.embedder(audio)
-        self.scores[key] = {name: float(np.dot(embedding, vector))
-                            for name, vector in self.voices.items()
-                            if name != "me" or utterance.track != "system"}
+        self.sources[key] = utterance.track
+        self.scores[key] = {name: float(np.dot(embedding, vector)) for name, vector in self.voices.items()}
         self._assign(self.scores[key])
 
     def _assign(self, latest):
@@ -253,9 +253,9 @@ class VoiceMatcher:
 
         held = set(self.sink.names.values())
         for voice in sorted(latest, key=latest.get, reverse=True):
-            claimants = sorted(((scores[voice], slot) for (_, slot), scores in self.scores.items()
-                                if voice in scores and self._automatic(slot)
-                                and self._claim(scores) == voice), reverse=True)
+            claimants = sorted(((scores[voice], key[1]) for key, scores in self.scores.items()
+                                if not (voice == "me" and self.sources.get(key) == "system")
+                                and self._automatic(key[1]) and self._claim(scores) == voice), reverse=True)
             if not claimants:
                 continue
             (best, winner), rest = claimants[0], claimants[1:]

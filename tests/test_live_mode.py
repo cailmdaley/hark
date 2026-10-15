@@ -117,6 +117,23 @@ def test_me_is_matched_on_mic_not_system_and_cannot_be_stolen(tmp_path):
     sink.close("ended")
 
 
+@pytest.mark.parametrize("me_score", [1., .7])
+def test_system_me_match_still_prevents_a_false_other_name(tmp_path, me_score):
+    sink = Sink(tmp_path / "session.txt", "test")
+    # Ada clears the floor, but doesn't beat me by the ordinary bank margin.
+    matcher = VoiceMatcher({"me": np.array([me_score, np.sqrt(1 - me_score ** 2)]),
+                            "Ada": np.array([.8, .6])},
+                           sink, embedder=lambda _: np.array([1., 0.]))
+    audio = AudioBuffer()
+    audio.append(0, np.ones(6 * 16000, np.float32))
+    track = type("Track", (), {"audio": audio})()
+    matcher.finished(track, Utterance("system", "S1", 0, 5, datetime.now(), "speech",
+                                      speech=[(0, 5)]))
+    assert sink.names == {}
+    assert next(iter(matcher.scores.values()))["me"] == me_score
+    sink.close("ended")
+
+
 def test_system_availability_checks_executable_without_opening_devices(tmp_path, monkeypatch):
     tap = tmp_path / "audiotee"
     monkeypatch.setattr(cli, "AUDIOTEE", tap)
