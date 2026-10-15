@@ -37,7 +37,9 @@ def test_live_selection_diarizes_every_source_and_allocates_unique_slots(
 
     class Track:
         def __init__(self, name, *args, **kwargs):
-            self.name, self.processed, self.audio = name, 0., None
+            self.name, self.processed = name, 0.
+            self.audio = AudioBuffer()
+            self.audio.append(0, np.ones(6 * 16000, np.float32))
             self.sent_seconds = 0.
             self.label = kwargs.get("speaker_label", lambda _: "S1")
             self.pending = True
@@ -55,7 +57,7 @@ def test_live_selection_diarizes_every_source_and_allocates_unique_slots(
             if track.pending and (force or track.name != "system"):
                 track.pending = False
                 result.append(Utterance(track.name, track.label("speaker_0"),
-                                        0, 1, datetime.now(), "hello"))
+                                        0, 5, datetime.now(), "hello", speech=[(0, 5)]))
         return result
 
     monkeypatch.setattr(cli, "Track", Track)
@@ -79,6 +81,9 @@ def test_live_selection_diarizes_every_source_and_allocates_unique_slots(
     utterances = [r for r in records if "speaker" in r]
     assert [(r["track"], r["speaker"]) for r in utterances] == list(
         zip(expected, [f"S{i + 1}" for i in range(len(expected))]))
+    assert utterances[0]["name"] == "me"
+    if len(utterances) == 2:
+        assert "name" not in utterances[1]
     assert "me = mic" not in out.read_text()
     assert out.read_text().splitlines()[-1].startswith("# ended ")
     assert sorted(p.suffixes[-2] for p in tmp_path.glob("*.wav")) == sorted(f".{s}" for s in expected)
@@ -100,7 +105,7 @@ def test_global_slots_remain_stable_across_tracks_and_more_than_eight_speakers(t
 def test_me_is_matched_on_mic_not_system_and_cannot_be_stolen(tmp_path):
     sink = Sink(tmp_path / "session.txt", "test")
     matcher = VoiceMatcher({"me": np.array([1., 0.]), "Ada": np.array([0., 1.])},
-                           sink, embedder=lambda _: np.array([1., 0.]))
+                           sink, embedder=lambda _: np.array([1., 0.]), name_tracks={"me": {"mic"}})
     tracks = {}
     for name in ["mic", "system"]:
         audio = AudioBuffer()
@@ -117,13 +122,13 @@ def test_me_is_matched_on_mic_not_system_and_cannot_be_stolen(tmp_path):
     sink.close("ended")
 
 
-@pytest.mark.parametrize("me_score", [1., .7])
-def test_system_me_match_still_prevents_a_false_other_name(tmp_path, me_score):
+@pytest.mark.parametrize("me_score,ada_score", [(1., .65), (1., .8), (.7, .8)])
+def test_system_me_match_still_prevents_a_false_other_name(tmp_path, me_score, ada_score):
     sink = Sink(tmp_path / "session.txt", "test")
     # Ada clears the floor, but doesn't beat me by the ordinary bank margin.
     matcher = VoiceMatcher({"me": np.array([me_score, np.sqrt(1 - me_score ** 2)]),
-                            "Ada": np.array([.8, .6])},
-                           sink, embedder=lambda _: np.array([1., 0.]))
+                            "Ada": np.array([ada_score, np.sqrt(1 - ada_score ** 2)])},
+                           sink, embedder=lambda _: np.array([1., 0.]), name_tracks={"me": {"mic"}})
     audio = AudioBuffer()
     audio.append(0, np.ones(6 * 16000, np.float32))
     track = type("Track", (), {"audio": audio})()
@@ -132,6 +137,30 @@ def test_system_me_match_still_prevents_a_false_other_name(tmp_path, me_score):
     assert sink.names == {}
     assert next(iter(matcher.scores.values()))["me"] == me_score
     sink.close("ended")
+
+
+def test_file_named_system_retains_ordinary_me_matching(tmp_path, monkeypatch):
+    from gradium_mock import MockGradium
+    from hark.capture import WavRecorder
+    from test_gradium import speech
+    from test_gradium_cli import configure
+
+    bank = tmp_path / "voices"
+    bank.mkdir()
+    np.save(bank / "me.npy", [1., 0.])
+    monkeypatch.setattr("hark.voice.Embedder", lambda: lambda _: np.array([1., 0.]))
+    audio = tmp_path / "system.wav"
+    recorder = WavRecorder(audio)
+    recorder.write(speech(6))
+    recorder.close()
+    with MockGradium(plans=[[("replayed voice", 0, 5.5)]]) as mock:
+        configure(monkeypatch, tmp_path, mock)
+        cli.main(["--ear", "gradium", "--file", str(audio), "-o", str(tmp_path / "replay.txt")])
+    records = [json.loads(line) for line in (tmp_path / "replay.jsonl").read_text().splitlines()]
+    utterance = next(record for record in records if "speaker" in record)
+    assert utterance["track"] == "system"
+    assert utterance["speaker"] == "S1" and utterance["name"] == "me"
+    assert "# S1 = me" in (tmp_path / "replay.txt").read_text()
 
 
 def test_system_availability_checks_executable_without_opening_devices(tmp_path, monkeypatch):

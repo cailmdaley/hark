@@ -190,12 +190,16 @@ class VoiceMatcher:
     slot. A clear new winner takes the name from its holder, which is written
     back to its own label (`# S1 = S1`). Slots whose name a human set or
     changed are left alone, and their names are never handed to another slot.
+    `name_tracks` can restrict a display name to specified source names without
+    removing its scores from the bank-confidence and ambiguity checks.
     """
 
-    def __init__(self, voices, sink, embedder=None, threshold=VOICE_THRESHOLD, margin=VOICE_MARGIN):
+    def __init__(self, voices, sink, embedder=None, threshold=VOICE_THRESHOLD, margin=VOICE_MARGIN,
+                 name_tracks=None):
         self.voices, self.sink = voices, sink
         self.embedder = embedder or Embedder()
         self.threshold, self.margin = threshold, margin
+        self.name_tracks = name_tracks or {}
         self.seconds = defaultdict(float)
         self.checked = defaultdict(int)
         self.clips = defaultdict(lambda: deque())
@@ -254,7 +258,8 @@ class VoiceMatcher:
         held = set(self.sink.names.values())
         for voice in sorted(latest, key=latest.get, reverse=True):
             claimants = sorted(((scores[voice], key[1]) for key, scores in self.scores.items()
-                                if not (voice == "me" and self.sources.get(key) == "system")
+                                if (voice not in self.name_tracks
+                                    or self.sources.get(key) in self.name_tracks[voice])
                                 and self._automatic(key[1]) and self._claim(scores) == voice), reverse=True)
             if not claimants:
                 continue

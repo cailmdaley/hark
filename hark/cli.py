@@ -332,6 +332,7 @@ def main(argv=None):
             "live: mic + system audio diarized as S1…" if system_audio else
             "room: mic diarized as S1…")
     slots = SpeakerSlots() if system_audio else None
+    name_tracks = {"me": {"mic"}} if system_audio else None
     sources = []
     tracks = []
     all_tracks = []
@@ -381,7 +382,7 @@ def main(argv=None):
         if voices:
             from .voice import VoiceMatcher
 
-            matcher = VoiceMatcher(voices, sink)
+            matcher = VoiceMatcher(voices, sink, name_tracks=name_tracks)
         log(f"transcript → {out}")
         if args.ear == "gradium" and mirror_target:
             mirror = TranscriptMirror(out, *mirror_target)
@@ -441,7 +442,7 @@ def main(argv=None):
             elif voices:
                 from .voice import VoiceMatcher
 
-                matcher = VoiceMatcher(voices, sink)
+                matcher = VoiceMatcher(voices, sink, name_tracks=name_tracks)
             if args.ear == "gradium":
                 for track in all_tracks:
                     track.start(stop=stop)
