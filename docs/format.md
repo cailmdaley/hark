@@ -15,17 +15,23 @@ Utterance lines are appended as turns finish, in end-time order rather than star
 A short interjection can therefore appear before a longer turn that started earlier, while its two timestamps keep the intervals clear.
 
 ```
-19:34:12-19:34:18 me   Sure, I reran the pipeline last night with the new masks
-19:34:00-19:34:30 S1   Okay, let's get started.
-19:34:29-19:34:38 S2   Did anyone check whether the redshift distributions changed?
+19:34:12-19:34:18 S1   Sure, I reran the pipeline last night with the new masks
+19:34:00-19:34:30 S2   Okay, let's get started.
+19:34:29-19:34:38 S3   Did anyone check whether the redshift distributions changed?
 ```
 
 Speaker labels:
 
-- `me`: the microphone in call mode (it isn't diarized)
-- `S1` … `S8`: local diarizer slots, numbered in order of first appearance, per session
-- `S<n>`: Gradium CPU speaker clusters, numbered in order of first appearance, without an eight-slot cap
-- a name, once a slot has been named (see below)
+- `S<n>`: stable, numbered speaker slots, unique across the session's captured tracks.
+  The local ear has up to eight slots per track (up to sixteen in mic + system capture); Gradium has no fixed cap.
+- a name, once a slot has been named (see below).
+  `me` is an ordinary name, not a source label or a reserved slot.
+  An enrolled `me` voice can name a mic slot through ordinary matching but never automatically names a system-audio slot.
+
+In two-track capture, slots are numbered by first emitted utterance and remain distinct even if the same voice is heard on both tracks.
+Mic-only, phone and file sessions retain the ear's own numbering.
+JSONL `track` identifies the audio source; a text speaker number alone doesn't encode its source.
+Phone and file matching retain their ordinary enrolled-bank behavior.
 
 The local ear writes conversational turns.
 Gradium writes short phrases assembled from word-sized spans, with one speaker per phrase.
@@ -36,7 +42,7 @@ Every other line starts with `# `:
 
 | Line | Meaning |
 |---|---|
-| `# hark 2026-09-24 19:34 — call: me = mic, S1… = system audio` | Header: start time and mode. Room mode says `room: mic diarized as S1…`, phone mode `phone: the phone's mic diarized as S1…`, a replay `file <path>` |
+| `# hark 2026-09-24 19:34 — live: mic + system audio diarized as S1…` | Header: start time and selected sources. Mic-only capture (`--room` or unavailable system tap) says `room: mic diarized as S1…`, phone mode `phone: the phone's mic diarized as S1…`, a replay `file <path>`. The hidden `--call` alias uses the same header as default capture |
 | `# S2 = Ada` | From here on, slot S2 is Ada. The latest line for a slot wins. Apply it to earlier lines from that slot too |
 | `# S2 = S2` | S2 is anonymous again |
 | `# system audio lost at 16:37:55 — no signal from the tap; nothing from the call is being transcribed` | A live source stopped delivering audio. The time is when it went quiet |
@@ -62,7 +68,8 @@ One JSON object per line. Every record has `wall`, an ISO-8601 local timestamp t
 ```
 
 - `track`: `mic`, `system` or `phone` live; for `--file`, the file's name without extension
-- `speaker`: the stable slot (`me`, `S1`…), even when a name is shown in the text file
+- `speaker`: the stable numbered slot (`S1`, `S2`…), unique across tracks, even when a name (including `me`) is shown in the text file.
+  `me` is never emitted as the slot by live capture.
 - `start`, `end`: seconds into the track's saved audio file (`<stem>.<track>.wav`), so an utterance can be cut out of the recording exactly.
   The text line's end time is `wall + (end - start)`, to within a second.
 - `name`: present only when the slot is named

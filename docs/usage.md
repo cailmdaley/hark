@@ -3,8 +3,8 @@
 ## Modes
 
 ```bash
-hark                  # in person, or a call on speakers: the mic alone, diarized
-hark --call           # a call on headphones: mic = "me", system audio diarized as S1…S8
+hark                  # mic + system audio when available, both diarized as S1…
+hark --room           # mic only, everyone diarized
 hark --phone          # in person, a phone as the mic: PCM arrives on a socket, diarized
 hark --file x.m4a     # a recording through the same streaming path (about 0.15× real time)
 hark --file x.wav --realtime   # replay at real-time pace, e.g. to test an agent against it
@@ -14,11 +14,19 @@ hark --file x.wav --realtime   # replay at real-time pace, e.g. to test an agent
 The default is local when MLX is importable, otherwise Gradium.
 Linux supports phone and file input; call/room devices and microphone enrollment require macOS.
 Explicit `--ear local` requires MLX.
-Gradium can use Mac audio devices too; the call-mode mic keeps its fixed `me` label.
+Gradium can use Mac audio devices too; both ears diarize every captured track.
 
-Room mode is the default: the mic is diarized, so everyone it hears is numbered, you included. It also covers a call played on speakers, where remote voices reach the mic through the room.
-Call mode (`--call`) assumes headphones: the mic hears only you, and everything the Mac plays (Zoom, Meet, a video) is the other side.
-On speakers, or with someone else in the room, the mic picks up other voices and labels them `me`.
+Default live capture listens to the mic and everything the Mac plays (Zoom, Meet, a video).
+Every speaker gets a numbered slot, you included, with unique slots across the two tracks.
+Each track is diarized independently, so a voice heard on both tracks can occupy two slots.
+On loudspeakers, computer audio can reach the mic too and appear twice; use headphones or `--room` to capture it only once.
+`--room` uses the mic alone, suitable for an in-person meeting or a call heard through the room.
+`--call` is a hidden compatibility alias for default live capture, accepted for launchers; it doesn't change attribution or require headphones.
+
+System capture is available when macOS device capture is supported and the audiotee path is an executable file.
+If not, default capture logs a warning and uses the mic alone; build the tap with `scripts/build-audiotee.sh` or set `HARK_AUDIOTEE` to an executable.
+Permissions aren't probed by this check: a tap without System Audio Recording permission can still deliver silence.
+Check the session log and lost-source markers if system audio is missing.
 
 Phone mode suits a room where the laptop's mic is in the wrong place. hark listens on `~/.hark/phone.sock` for raw 16 kHz mono s16le PCM; a relay writes it there, such as the Shuttle board's phone page, which streams the phone's mic over the tailnet. Anything that produces that PCM works too, for example `ffmpeg -i talk.m4a -f s16le -ac 1 -ar 16000 - | nc -U ~/.hark/phone.sock`. One sender at a time: a new connection replaces the old one. While nothing is connected hark records silence, and after 90 s the transcript says `# phone lost at …`. The track is saved as `<stem>.phone.wav`.
 
@@ -85,9 +93,9 @@ See the [pipeline](how-it-works.md#gradium-recognition-and-speakers) for timing,
 Each utterance line includes its full start and end time as `HH:MM:SS-HH:MM:SS`:
 
 ```
-14:03:12-14:03:18 me   Sure, I reran the pipeline last night with the new masks
-14:03:00-14:03:30 S1   Okay, let's get started.
-14:03:29-14:03:38 S2   Did anyone check whether the redshift distributions changed?
+14:03:12-14:03:18 S1   Sure, I reran the pipeline last night with the new masks
+14:03:00-14:03:30 S2   Okay, let's get started.
+14:03:29-14:03:38 S3   Did anyone check whether the redshift distributions changed?
 ```
 
 Hark appends lines as turns finish, in end-time order; start times can move backward across speakers.
@@ -97,6 +105,8 @@ The [format contract](format.md) defines the text and JSONL records.
 
 | Option | Default | |
 |---|---|---|
+| `--room` | | capture only the mic, diarized |
+| `--phone` | | capture only PCM from the phone socket, diarized |
 | `--ear local\|gradium` | local if MLX imports, otherwise Gradium | recognition and speaker attribution backend |
 | `--no-gradium-metering` | | skip credit-balance requests |
 | `--title TEXT` | | appended to the session filename |
@@ -126,6 +136,8 @@ hark processes                             # list CoreAudio process objects and 
 
 Enrollment needs at least 5 s of audio; the voiceprint and the clip it came from (`<name>.wav`) live in `~/.hark/voices/`.
 To name yourself on another host, copy `~/.hark/voices/me.npy` there.
+There is no fixed `me` speaker: an enrolled `me` voice can name a mic slot only when ordinary matching is confident, and automatic naming never assigns `me` to system audio.
+Phone and file voice matching use their enrolled banks as usual.
 With voices enrolled, hark names a diarized slot on its own once enough of that slot's speech matches one voice clearly; see [how it works](how-it-works.md#voice-matching).
 A slot someone named by hand is never renamed automatically.
 
@@ -145,7 +157,9 @@ The ASR and the saved mic WAV receive the same samples, with zeros for every pau
 
 ## Saved audio
 
-Live sessions keep each track beside the transcript as 16 kHz mono 16-bit WAV: `<stem>.mic.wav`, and in call mode `<stem>.system.wav`. Each file holds the full source track from its first sample.
+Live sessions keep each captured track beside the transcript as 16 kHz mono 16-bit WAV: `<stem>.mic.wav` and, when system audio is enabled, `<stem>.system.wav`.
+`--room` saves only the mic; `--phone` saves `<stem>.phone.wav` instead.
+Each file holds the full source track from its first sample.
 The local models receive those samples directly; Gradium receives gated spans of them, while its utterance offsets still index the complete WAV. JSONL `start`/`end` times are seconds into these files. Live input is padded to hold the wall clock, so the files stay aligned with real time even when a device stalls.
 
 The mic is rounded to 16-bit before the models see it, so `hark --file <stem>.mic.wav` replays a track through the same pipeline with identical samples.

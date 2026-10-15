@@ -9,11 +9,11 @@ While people are still talking, an agent can take notes, look up the paper someo
 hark makes that possible by turning the conversation into a speaker-labelled transcript that grows as people talk, written to a plain text file any agent can read.
 
 ```
-# hark 2026-09-24 19:34 — call: me = mic, S1… = system audio
-19:34:12-19:34:18 me   Sure, I reran the pipeline last night with the new masks
-19:34:00-19:34:30 S1   Okay, let's get started.
-19:34:29-19:34:38 S2   Did anyone check whether the redshift distributions changed?
-# S2 = Ada
+# hark 2026-09-24 19:34 — live: mic + system audio diarized as S1…
+19:34:12-19:34:18 S1   Sure, I reran the pipeline last night with the new masks
+19:34:00-19:34:30 S2   Okay, let's get started.
+19:34:29-19:34:38 S3   Did anyone check whether the redshift distributions changed?
+# S3 = Ada
 # ended 19:35:19
 ```
 
@@ -40,9 +40,18 @@ The format is a small, documented contract ([docs/format.md](docs/format.md)). B
 
 hark listens to up to two audio sources and labels speakers within each.
 
-- **In a room** (the default), the microphone alone is separated into speakers. This includes a call played on speakers, with or without people in the room.
-- **On a call** (`--call`), with headphones, the microphone is you (`me`) and the computer's own audio output (Zoom, Meet, a video) is everyone else. hark captures that output through a macOS system-audio tap ([audiotee](https://github.com/makeusabrew/audiotee)) and separates it into speakers `S1`…`S8`.
-- **With a phone as the microphone**, raw audio arrives on a local socket and is separated the same way. This is useful when the laptop is in the wrong place.
+- **By default**, hark captures the microphone and the computer's audio output (Zoom, Meet, a video) through a macOS system-audio tap ([audiotee](https://github.com/makeusabrew/audiotee)).
+  Both tracks are separated into speakers, with unique numbered slots across the session, including you.
+  If the tap executable isn't available, hark logs a warning and uses the mic alone.
+- **Mic only** (`--room`) separates everyone the microphone hears into speakers.
+  Use it when you don't want computer audio captured, including a call played on speakers and heard through the room.
+- **With a phone as the microphone** (`--phone`), raw audio arrives on a local socket and is separated the same way.
+  This is useful when the laptop is in the wrong place.
+
+The two tracks are diarized independently: the same voice heard on both can occupy two slots.
+With loudspeakers, computer audio can also reach the microphone and appear twice; use headphones or `--room` to avoid capturing it on both tracks.
+No source is labelled `me` automatically.
+An enrolled voice named `me` can name a mic slot through ordinary voice matching, but never a system-audio slot.
 
 Speech recognition and speaker separation ("diarization") are done by one of two back ends, which hark calls *ears*:
 
@@ -73,8 +82,8 @@ Grant your terminal the **Microphone** permission, plus **Screen & System Audio 
 Without the second permission, the call side comes through as silence.
 
 ```bash
-hark                          # in person, or a call on speakers: the mic, diarized
-hark --call                   # a call on headphones: mic = me, system audio = S1…
+hark                          # mic + system audio when available, both diarized
+hark --room                   # mic only, everyone diarized
 hark --file talk.m4a          # an existing recording
 hark name S2 Ada              # name a speaker in the live session
 hark enroll Ada --file ada.wav  # enroll a voice (≥ 5 s) for automatic naming
@@ -102,7 +111,10 @@ In Claude Code, the `Monitor` tool on that command delivers new lines to the age
 hark stands on its own, but it was built alongside [Shuttle](https://cailmdaley.github.io/felt/shuttle/), an orchestration app for running coding agents against written tasks, with a board for following their work ([source](https://github.com/cailmdaley/felt)).
 In Shuttle, a meeting is just another way to start an agent:
 
-- **Meetings from the board.** The board's Capture form has a Meeting toggle (Call, Room or Phone). A meeting can also be attached to an existing task's card. Shuttle starts hark on the Mac and launches an agent with the transcript path in its instructions. The card shows the meeting's duration and latest lines, with a Stop button.
+- **Meetings from the board.** The board's Capture form has a Meeting toggle (Call, Room or Phone).
+  A meeting can also be attached to an existing task's card.
+  Shuttle starts hark on the Mac and launches an agent with the transcript path in its instructions.
+  The card shows the meeting's duration and latest lines, with a Stop button.
 - **A scribe.** The agent takes the *scribe* role. It files a note for the meeting where the project keeps them, keeps running notes of decisions and action items with timestamps and speakers, and keeps a live HTML report on the board that it rewrites as the meeting goes. When a meeting is attached to an existing task, that task's own agent follows it, so the conversation feeds straight into ongoing work.
 - **The phone as a microphone.** The board has a phone page. Opened on a phone, it streams the phone's microphone over a private network ([Tailscale](https://tailscale.com)) to the socket of `hark --phone`. On a Linux host this uses the Gradium ear, so a room meeting can be transcribed with the laptop closed.
 - **Agents on other machines.** `hark --mirror host:path` appends the transcript to a file on a remote machine over SSH, so the agent can run where the project lives, such as a computing cluster, while hark records on the laptop.

@@ -1,9 +1,9 @@
 # How it works
 
 ```
-mic ─ 300 ms lookback + pause gate ─┐             ┌─ me     (call mode: not diarized)
-                                    ├─ 16 kHz tracks ─ diarizer ─ masks ─ one ASR decoder per speaker ─ turns ─ .txt + .jsonl
-system audio ───────────────────────┘ (audiotee)   └─ S1…S8
+mic ─ 300 ms lookback + pause gate ─ independent diarizer + masks + ASR ─┐
+                                                                     ├─ turns ─ unique S<n> slots ─ .txt + .jsonl
+system audio ─ audiotee ────────── independent diarizer + masks + ASR ─┘
 ```
 
 `--ear local|gradium` selects recognition and speaker attribution.
@@ -26,7 +26,17 @@ Samples are timed by when the device delivered them, not by their position in th
 Muted samples become zeros for both the ASR and the saved WAV, so the track keeps its length and timeline.
 System and phone audio are neither delayed nor muted, and the lost-source watch reads the device's own signal, so a pause never looks like a lost mic.
 
-In call mode the mic is one speaker (`me`) and only system audio is diarized. In room mode the mic is diarized.
+Default live capture opens the mic and system audio when the audiotee path is an executable file on a supported macOS host.
+Without that executable, hark warns and uses only the mic; it doesn't probe recording permissions.
+`--room` selects mic only, `--phone` selects the socket input only, and hidden `--call` is a compatibility alias for the default.
+Both ears diarize each track independently; no track has a fixed `me` speaker.
+A voice captured by both tracks can receive two slots, and loudspeaker playback can be transcribed on both tracks.
+Use headphones or `--room` to avoid capturing playback twice.
+
+For two-track capture, the main thread maps each `(track, ear-local slot)` to a session-wide `S<n>` before voice matching and transcript output.
+Slots are allocated in order of first emitted utterance, including utterances flushed at shutdown, and remain stable for the session.
+The local ear supports eight speakers per track, so a two-track session can use slots beyond `S8`; Gradium has no fixed slot cap.
+This mapping doesn't merge identities across sources or change the diarizer's own slots.
 
 ## Local recognition and diarization
 
@@ -145,7 +155,17 @@ Each speaker's turn closes independently, which is why lines from different spea
 
 ## Voice matching
 
-Voice matching applies to anonymous slots (`S1`…) from either ear, never to the call-mode mic. Enrolled voices (`hark enroll`, at least 5 s of audio) are [WeSpeaker](https://github.com/wenet-e2e/wespeaker) ResNet34 embeddings, run through ONNX Runtime. For each diarized slot, hark collects the most recent 15 s of that slot's speech and embeds it once the slot has 5 s, then again after every further 20 s. A slot claims a voice when the cosine similarity is at least 0.55 and leads the next enrolled voice by 0.21. The 0.55 floor sits above the worst impostor clips seen in testing, which scored about 0.5.
+Voice matching applies to anonymous slots (`S1`…) from either ear, including the mic in default live capture.
+Enrolled voices (`hark enroll`, at least 5 s of audio) are [WeSpeaker](https://github.com/wenet-e2e/wespeaker) ResNet34 embeddings, run through ONNX Runtime.
+For each diarized slot, hark collects the most recent 15 s of that slot's speech and embeds it once the slot has 5 s, then again after every further 20 s.
+A slot claims a voice when the cosine similarity is at least 0.55 and leads the next enrolled voice by 0.21.
+The 0.55 floor sits above the worst impostor clips seen in testing, which scored about 0.5.
+
+An enrolled voice named `me` follows those same rules for mic slots, with no preferred slot or special threshold.
+System-audio slots exclude `me` from automatic display-name candidates and cannot take that name away from a mic slot.
+Phone and file naming retain their ordinary enrolled-bank behavior.
+Gradium's identity anchors still receive the full bank on each track: anchor identity controls cluster reuse, independently of display-name eligibility.
+Manual names retain precedence, including a manually assigned `me`.
 
 A name belongs to one slot at a time. When several slots claim the same voice, the strongest gets it only if it leads every other claimant by the same 0.21 margin. If that winner isn't the current holder, hark hands the name over: it writes `# S1 = S1` for the old holder, then names the new one. Names a human sets are never touched, and never given to another slot.
 
