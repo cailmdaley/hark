@@ -204,7 +204,8 @@ def test_exit_or_stall_is_reaped_and_restarted(monkeypatch, capsys, reason):
 def test_stop_interrupts_helper_pump_without_delivery(monkeypatch):
     helper = capture.PCMProcessSource("mic AEC", ["unused"])
     stopped = []
-    helper.proc = SimpleNamespace(poll=lambda: None, terminate=lambda: stopped.append(True))
+    helper.proc = SimpleNamespace(poll=lambda: None, terminate=lambda: stopped.append(True),
+                                  wait=lambda timeout: 0)
     helper.stop()
     assert stopped == [True]
     assert helper._pump(SimpleNamespace(stdout=SimpleNamespace(fileno=lambda: 42))) == (False, "stopped")

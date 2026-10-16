@@ -248,15 +248,36 @@ class PCMProcessSource(Source):
         self.command = command
         self.owner = owner if owner is not None else self
         self.proc = None
+        self.supervisor = None
+        self.delivery_lock = threading.Lock()
         self.stopping = threading.Event()
 
     def _open(self):
-        threading.Thread(target=self._supervise, daemon=True).start()
+        self.supervisor = threading.Thread(target=self._supervise, daemon=True)
+        self.supervisor.start()
 
     def stop(self):
-        self.stopping.set()
-        if self.proc and self.proc.poll() is None:
-            self.proc.terminate()
+        """Fence delivery before the caller's final drain, then reap and join the helper."""
+        with self.delivery_lock:
+            self.stopping.set()
+        proc = self.proc
+        if proc:
+            try:
+                if proc.poll() is None:
+                    proc.terminate()
+                try:
+                    proc.wait(timeout=0.5)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+                    proc.wait(timeout=0.5)
+            except ProcessLookupError:
+                pass  # The supervisor reaped it concurrently.
+            except subprocess.TimeoutExpired:
+                log(f"{self.name}: helper did not exit after kill; delivery is stopped")
+        if self.supervisor and self.supervisor is not threading.current_thread():
+            self.supervisor.join(timeout=1.0)
+            if self.supervisor.is_alive():
+                log(f"{self.name}: supervisor shutdown timed out; delivery is stopped")
 
     def _supervise(self):
         failures = 0
@@ -310,8 +331,11 @@ class PCMProcessSource(Source):
             samples = np.frombuffer(pending[:n], dtype="<i2").astype(np.float32) / 32768.0
             pending = pending[n:]
             if n:
-                self.owner._deliver(samples)
-                self._check_silence()
+                with self.delivery_lock:
+                    if self.stopping.is_set():
+                        return got, "stopped"
+                    self.owner._deliver(samples)
+                    self._check_silence()
         return got, "stopped"
 
     def _check_silence(self):
