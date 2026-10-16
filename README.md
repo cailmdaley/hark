@@ -55,6 +55,7 @@ Room capture, voice enrollment and explicit `--mic` devices use raw input instea
 If dual-track capture can't use AEC because the helper is missing or a mic is specified, hark warns that playback may appear on both tracks.
 Helper failures are logged and retried without silently switching to raw capture.
 Headphones or `--room` remain alternatives when playback leaks into the mic.
+The [device measurement and guarded probe](docs/aec.md) document measured leakage, reproduction steps and limits.
 No source is labelled `me` automatically.
 An enrolled voice named `me` can name a mic slot through ordinary voice matching, but never a system-audio slot.
 
