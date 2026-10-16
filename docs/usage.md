@@ -195,6 +195,8 @@ To let an agent on another machine follow the meeting, mirror the transcript ove
 hark --mirror server:~/.hark/meetings/telecon.txt -o ~/.hark/meetings/telecon.txt --title telecon
 ```
 
+Mirroring uses your SSH configuration, including an existing ControlMaster connection for hosts that require interactive authentication.
+Connection and keepalive timeouts, plus the mirror's progress watchdog, bound broken connections.
 Mirroring is best-effort: if the connection drops, local capture continues, and `hark mirror --resume` finishes the copy afterwards. The remote needs GNU `dd` (Linux; macOS's `dd` lacks `oflag=seek_bytes`), and hark refuses to mirror onto a remote file that already has content, except with `--resume`.
 
 Launcher-owned live recordings publish `$HARK_DIR/meeting.json` (`~/.hark/meeting.json` when `HARK_DIR` is unset).

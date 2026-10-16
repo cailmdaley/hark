@@ -10,6 +10,15 @@ import pytest
 from hark.mirror import TranscriptMirror, ssh_commands
 
 
+def test_ssh_commands_preserve_user_multiplexing_and_timeouts():
+    for command in ssh_commands("nibi", "~/meeting.txt"):
+        assert not any(option.lower().startswith(("controlpath=", "controlmaster=", "controlpersist="))
+                       for option in command)
+        for option in ("BatchMode=yes", "ConnectTimeout=10", "ServerAliveInterval=15",
+                       "ServerAliveCountMax=3"):
+            assert option in command
+
+
 def wait_for(predicate, timeout=3):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:

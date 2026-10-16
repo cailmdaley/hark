@@ -10,7 +10,6 @@ from .capture import log
 
 SSH_OPTIONS = [
     "-o", "BatchMode=yes",
-    "-o", "ControlPath=none",
     "-o", "ConnectTimeout=10",
     "-o", "ServerAliveInterval=15",
     "-o", "ServerAliveCountMax=3",
