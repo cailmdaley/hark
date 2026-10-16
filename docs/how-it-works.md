@@ -13,7 +13,19 @@ The diagram shows the local ear; Gradium replaces the diarizer/ASR chain with cl
 
 ## Capture
 
-The mic is read through PortAudio (`sounddevice`). System audio comes from [audiotee](https://github.com/makeusabrew/audiotee), a Swift program that opens a Core Audio process tap and writes raw PCM to stdout. hark supervises it: if the tap stalls for 5 s or exits, hark restarts it with a backoff that grows to at most 30 s, and logs each restart. A mic that delivers nothing for 5 s is reopened the same way. Both tracks are captured at 16 kHz mono and padded to hold the wall clock, so timestamps stay true even when a device falls behind.
+In default dual-track capture, the default mic is read through `bin/voice-mic` (overridden by `HARK_VOICE_MIC`).
+This Swift helper uses macOS VoiceProcessingIO for acoustic echo cancellation (AEC), the system voice-processing facility also exposed through AVAudioEngine.
+It suppresses computer playback picked up by the mic, uses minimum playback ducking, and disables automatic gain control.
+Build it with `scripts/build-voice-mic.sh`.
+Room capture, microphone enrollment, and explicit `--mic` devices use raw PortAudio (`sounddevice`) input.
+If dual-track capture can't use AEC because the helper isn't executable or a mic was specified, hark logs an explicit warning before opening raw input.
+
+System audio comes from [audiotee](https://github.com/makeusabrew/audiotee), a Swift program that opens a Core Audio process tap and writes raw PCM to stdout.
+Both helpers emit 16 kHz mono s16le PCM and share a supervisor: if a helper stalls for 5 s, exits, or can't start, hark logs the failure and retries with a backoff capped at 30 s.
+An AEC helper failure leaves a padded mic gap, not an unannounced switch to raw input.
+Raw PortAudio input is reopened after 5 s without data.
+Both mic backends deliver into the same mic queue, timestamps, sample statistics and error state, so recording, pause gating and source health don't depend on the backend.
+Both tracks are padded to hold the wall clock, so timestamps stay true even when a device falls behind.
 
 A background watcher pauses the mic while a dictation app records.
 Every 75 ms it reads CoreAudio's process-object list with `ctypes` and checks each process's input-capture flag and bundle ID.
@@ -30,8 +42,9 @@ Default live capture opens the mic and system audio when the audiotee path is an
 Without that executable, hark warns and uses only the mic; it doesn't probe recording permissions.
 `--room` selects mic only, `--phone` selects the socket input only, and hidden `--call` is a compatibility alias for the default.
 Both ears diarize each track independently; no track has a fixed `me` speaker.
-A voice captured by both tracks can receive two slots, and loudspeaker playback can be transcribed on both tracks.
-Use headphones or `--room` to avoid capturing playback twice.
+A voice captured by both tracks can receive two slots.
+AEC suppresses loudspeaker leakage into the default mic but doesn't merge identities across tracks or guarantee perfect separation.
+Without AEC, loudspeaker playback can be transcribed on both tracks; headphones or `--room` avoid capturing playback twice.
 
 For two-track capture, the main thread maps each `(track, ear-local slot)` to a session-wide `S<n>` before voice matching and transcript output.
 Slots are allocated in order of first emitted utterance, including utterances flushed at shutdown, and remain stable for the session.

@@ -41,6 +41,7 @@ The format is a small, documented contract ([docs/format.md](docs/format.md)). B
 hark listens to up to two audio sources and labels speakers within each.
 
 - **By default**, hark captures the microphone and the computer's audio output (Zoom, Meet, a video) through a macOS system-audio tap ([audiotee](https://github.com/makeusabrew/audiotee)).
+  The default mic uses macOS acoustic echo cancellation (AEC) through the `voice-mic` helper to suppress computer playback picked up by the mic.
   Both tracks are separated into speakers, with unique numbered slots across the session, including you.
   If the tap executable isn't available, hark logs a warning and uses the mic alone.
 - **Mic only** (`--room`) separates everyone the microphone hears into speakers.
@@ -49,7 +50,11 @@ hark listens to up to two audio sources and labels speakers within each.
   This is useful when the laptop is in the wrong place.
 
 The two tracks are diarized independently: the same voice heard on both can occupy two slots.
-With loudspeakers, computer audio can also reach the microphone and appear twice; use headphones or `--room` to avoid capturing it on both tracks.
+AEC uses system VoiceProcessingIO, the voice-processing facility also exposed through AVAudioEngine, with minimum playback ducking and automatic gain control disabled.
+Room capture, voice enrollment and explicit `--mic` devices use raw input instead.
+If dual-track capture can't use AEC because the helper is missing or a mic is specified, hark warns that playback may appear on both tracks.
+Helper failures are logged and retried without silently switching to raw capture.
+Headphones or `--room` remain alternatives when playback leaks into the mic.
 No source is labelled `me` automatically.
 An enrolled voice named `me` can name a mic slot through ordinary voice matching, but never a system-audio slot.
 
@@ -74,6 +79,7 @@ Local capture needs a Mac with Apple Silicon running macOS 14.2 or later, Python
 ```bash
 git clone https://github.com/cailmdaley/hark && cd hark
 scripts/build-audiotee.sh   # builds bin/audiotee
+scripts/build-voice-mic.sh  # builds bin/voice-mic (system AEC)
 uv sync
 uv run hark                 # models download on first run (~3 GB)
 ```
