@@ -3,7 +3,8 @@
 Every live sample is exactly representable as s16le PCM, so a track saved by `WavRecorder`
 and replayed with `--file` feeds the models the same numbers they heard live.
 
-Mic via PortAudio (sounddevice); system audio via `audiotee`, a Core Audio
+Mic via VoiceProcessingIO (`voice-mic`) for echo cancellation or PortAudio
+(sounddevice) for raw input; system audio via `audiotee`, a Core Audio
 process tap that writes s16le PCM to stdout (built by scripts/build-audiotee.sh);
 a phone (or any remote mic) as s16le PCM written into a Unix socket hark listens on.
 
@@ -32,6 +33,19 @@ import numpy as np
 SAMPLE_RATE = 16000
 BLOCK = SAMPLE_RATE // 10  # 100 ms
 AUDIOTEE = Path(os.environ.get("HARK_AUDIOTEE", Path(__file__).parent.parent / "bin" / "audiotee"))
+VOICE_MIC = Path(os.environ.get("HARK_VOICE_MIC", Path(__file__).parent.parent / "bin" / "voice-mic"))
+
+
+def voice_mic_path():
+    """Resolve the optional AEC helper without opening an audio device."""
+    return Path(os.environ.get("HARK_VOICE_MIC", VOICE_MIC))
+
+
+def voice_mic_available():
+    path = voice_mic_path()
+    return path.is_file() and os.access(path, os.X_OK)
+
+
 STALL_SEC = 5.0
 LATE_OK = 1.0  # a device may run this far behind the wall clock before we pad
 SOUND = 1e-4  # peak amplitude above digital silence
@@ -154,10 +168,23 @@ class MicSource(Source):
     def __init__(self, device=None):
         super().__init__("mic")
         self.device = device
+        self.echo_cancel = False
+        self.helper = None
         self.stream = None
         self.stopping = threading.Event()
 
     def _open(self):
+        if self.echo_cancel:
+            if self.device is not None:
+                log("mic: AEC unavailable with explicit --mic; using raw input (playback may appear twice)")
+            elif not voice_mic_available():
+                log(f"mic: AEC unavailable: {voice_mic_path()} is not executable; using raw input "
+                    "(playback may appear twice); build bin/voice-mic or set HARK_VOICE_MIC")
+            else:
+                self.helper = PCMProcessSource("mic AEC (VoiceProcessingIO)", [str(voice_mic_path())], owner=self)
+                log("mic: requesting system VoiceProcessingIO AEC via voice-mic; helper failures are logged")
+                self.helper._open()
+                return
         self._stream()
         threading.Thread(target=self._watch, daemon=True).start()
 
@@ -204,19 +231,24 @@ class MicSource(Source):
 
     def stop(self):
         self.stopping.set()
+        if self.helper:
+            self.helper.stop()
         self._close()
 
 
-class SystemSource(Source):
-    """Everything the Mac plays (Zoom, Meet, a video), via a supervised audiotee."""
+class PCMProcessSource(Source):
+    """Supervise a helper emitting mono 16 kHz s16le PCM, optionally into another source.
 
-    def __init__(self):
-        super().__init__("system")
-        if not AUDIOTEE.exists():
-            raise SystemExit(f"audiotee not found at {AUDIOTEE} — run scripts/build-audiotee.sh")
+    Delivery belongs to `owner`: its queue, timestamps, stats and errors are the
+    capture track's single source of truth, regardless of which backend reads it.
+    """
+
+    def __init__(self, name, command, owner=None):
+        super().__init__(name)
+        self.command = command
+        self.owner = owner if owner is not None else self
         self.proc = None
         self.stopping = threading.Event()
-        self.warned = False
 
     def _open(self):
         threading.Thread(target=self._supervise, daemon=True).start()
@@ -229,27 +261,35 @@ class SystemSource(Source):
     def _supervise(self):
         failures = 0
         while not self.stopping.is_set():
-            self.proc = subprocess.Popen(
-                [str(AUDIOTEE), "--sample-rate", str(SAMPLE_RATE)],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                start_new_session=True,  # a terminal Ctrl-C reaches hark, not the tap
-            )
-            threading.Thread(target=self._stderr, args=(self.proc,), daemon=True).start()
-            got_audio, why = self._pump(self.proc)
-            if self.proc.poll() is None:
-                self.proc.kill()
-            code = self.proc.wait()
+            got_audio, code = False, None
+            self.proc = None
+            try:
+                self.proc = subprocess.Popen(
+                    self.command, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                    start_new_session=True,  # Ctrl-C reaches hark, not the helper
+                )
+                threading.Thread(target=self._stderr, args=(self.proc,), daemon=True).start()
+                got_audio, why = self._pump(self.proc)
+            except Exception as error:  # noqa: BLE001 — retry while drain pads the gap
+                why = f"failed ({error}); capture unavailable"
+            finally:
+                if self.proc:
+                    if self.proc.poll() is None:
+                        self.proc.kill()
+                    code = self.proc.wait()
+                    self.proc.stdout.close()
+
             if self.stopping.is_set():
                 break
             failures = 0 if got_audio else failures + 1
-            delay = min(30.0, 2.0 ** failures)
-            log(f"system audio: tap {why} (exit code {code})"
+            delay = min(30.0, 2.0 ** min(failures, 5))
+            log(f"{self.name}: helper {why} (exit code {code}); capture unavailable until recovery"
                 + (f", keeps failing ({failures}× without audio)" if failures >= 3 else "")
                 + f", restarting in {delay:.0f} s")
             self.stopping.wait(delay)
 
     def _pump(self, proc):
-        """Forward PCM until the tap exits or stalls: (any audio arrived, "stalled" or "hit EOF")."""
+        """Forward PCM until the helper exits or stalls, returning whether audio arrived and why."""
         fd = proc.stdout.fileno()
         pending = b""
         last = time.monotonic()
@@ -269,13 +309,37 @@ class SystemSource(Source):
             n = len(pending) // 2 * 2
             samples = np.frombuffer(pending[:n], dtype="<i2").astype(np.float32) / 32768.0
             pending = pending[n:]
-            self._deliver(samples)
-            if not self.warned and self.last_sound == self.anchor and time.time() - self.anchor > 20:
-                log("system audio is pure silence after 20 s. If something is playing, grant "
-                    "your terminal System Settings → Privacy & Security → Screen & System "
-                    "Audio Recording → 'System Audio Recording Only', then restart the terminal.")
-                self.warned = True
+            if n:
+                self.owner._deliver(samples)
+                self._check_silence()
         return got, "stopped"
+
+    def _check_silence(self):
+        pass
+
+    def _stderr(self, proc):
+        for line in proc.stderr:
+            text = line.decode("utf-8", errors="replace").strip()
+            if text:
+                log(f"{self.name}: {text}")
+        proc.stderr.close()
+
+
+class SystemSource(PCMProcessSource):
+    """Everything the Mac plays (Zoom, Meet, a video), via a supervised audiotee."""
+
+    def __init__(self):
+        if not AUDIOTEE.exists():
+            raise SystemExit(f"audiotee not found at {AUDIOTEE} — run scripts/build-audiotee.sh")
+        super().__init__("system", [str(AUDIOTEE), "--sample-rate", str(SAMPLE_RATE)])
+        self.warned = False
+
+    def _check_silence(self):
+        if not self.warned and self.last_sound == self.anchor and time.time() - self.anchor > 20:
+            log("system audio is pure silence after 20 s. If something is playing, grant "
+                "your terminal System Settings → Privacy & Security → Screen & System "
+                "Audio Recording → 'System Audio Recording Only', then restart the terminal.")
+            self.warned = True
 
     def _stderr(self, proc):
         for line in proc.stderr:
@@ -285,6 +349,7 @@ class SystemSource(Source):
                 continue
             if rec.get("message_type") == "error":
                 log(f"audiotee: {rec.get('data', rec)}")
+        proc.stderr.close()
 
 
 class PhoneSource(Source):

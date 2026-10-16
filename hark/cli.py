@@ -404,7 +404,9 @@ def main(argv=None):
                 elif args.phone:
                     sources = [(PhoneSource(phone_socket), numbered)]
                 else:
-                    sources = [(MicSource(_device(args.mic)), numbered)]
+                    mic = MicSource(_device(args.mic))
+                    mic.echo_cancel = system_audio
+                    sources = [(mic, numbered)]
                     if system_audio:
                         sources.append((SystemSource(), numbered))
 
