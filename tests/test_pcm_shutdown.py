@@ -47,9 +47,9 @@ def test_stop_joins_blocked_pump_and_prevents_late_delivery(monkeypatch, blocked
     monkeypatch.setattr(capture.subprocess, "Popen", Child)
     monkeypatch.setattr(capture.select, "select", select)
     monkeypatch.setattr(capture.os, "read", read)
-    mic = capture.MicSource()
+    helper = capture.PCMProcessSource("system", ["unused"])
+    mic = helper
     mic.anchor = mic.last_audio = mic.last_sound = time.time()
-    helper = capture.PCMProcessSource("mic AEC", ["unused"], owner=mic)
     helper._open()
     assert entered.wait(2)
 
@@ -75,9 +75,9 @@ def test_stop_joins_blocked_pump_and_prevents_late_delivery(monkeypatch, blocked
 
 def test_stop_waits_for_already_admitted_delivery(monkeypatch):
     entered, release, returned = threading.Event(), threading.Event(), threading.Event()
-    mic = capture.MicSource()
+    helper = capture.PCMProcessSource("system", ["unused"])
+    mic = helper
     mic.anchor = mic.last_audio = mic.last_sound = time.time()
-    helper = capture.PCMProcessSource("mic AEC", ["unused"], owner=mic)
     deliver = mic._deliver
 
     def admitted(samples):

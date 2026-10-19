@@ -25,13 +25,16 @@ def test_live_selection_diarizes_every_source_and_allocates_unique_slots(
         tmp_path, monkeypatch, ear, mode, available, expected):
     _, Source = fake_live_capture(monkeypatch, tmp_path)
     monkeypatch.setattr(cli, "_system_capture_available", lambda: available)
-    mic_modes = []
+    aec_modes = []
+    from hark import aec
+
+    class Canceller:
+        def __init__(self, **kwargs): aec_modes.append(True)
+        def feed(self, mic=(), system=(), **kwargs): return np.asarray(mic, np.float32)
+
+    monkeypatch.setattr(aec, "EchoCanceller", Canceller)
     for attribute, name in [("MicSource", "mic"), ("SystemSource", "system"), ("PhoneSource", "phone")]:
         source, _ = feed_chunks(Source, name, [])
-        if name == "mic":
-            def open_mic(self):
-                mic_modes.append(self.echo_cancel)
-            monkeypatch.setattr(source, "_open", open_mic)
         monkeypatch.setattr(cli, attribute, source)
     voices = tmp_path / "voices"
     voices.mkdir()
@@ -75,7 +78,7 @@ def test_live_selection_diarizes_every_source_and_allocates_unique_slots(
     signaller.join(2)
     assert not signaller.is_alive()
     assert [name for name, _ in made] == expected
-    assert mic_modes == (["system" in expected] if "mic" in expected else [])
+    assert aec_modes == ([True] if "system" in expected else [])
     for name, options in made:
         assert options.get("fixed_speaker") is None
         if ear == "local":

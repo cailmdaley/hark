@@ -341,6 +341,12 @@ def main(argv=None):
     sink = matcher = mirror = watch = None
     recorders = {}
     mic_gates = {}
+    aec = None
+    deduper = None
+    if system_audio:
+        from .dedupe import EchoDeduper
+
+        deduper = EchoDeduper(report=log)
     pause_monitor = None
     mirror_complete = True
     tracks_by_name = {}
@@ -352,6 +358,27 @@ def main(argv=None):
     ear_beat = capture_started
     capture_error = None
     lost_ears = set()
+
+    def feed_sources(final=False):
+        drained = {}
+        for src, track in started_tracks:
+            samples = src.drain(limit=float("inf") if final else SAMPLE_RATE // 2)
+            if src in mic_gates:
+                samples = pause_monitor.feed(mic_gates[src], samples, time.time(), final=final)
+            drained[src.name] = samples
+        busy = any(samples.size for samples in drained.values())
+        if aec:
+            drained["mic"] = aec.feed(drained.get("mic", ()), drained.get("system", ()), final=final)
+        for src, track in started_tracks:
+            samples = drained[src.name]
+            if src in recorders:
+                recorders[src].write(samples)
+            if samples.size or final:
+                track.feed(samples, final=final)
+        return busy
+
+    def ready_utterances(utterances, final=False):
+        return deduper.feed(utterances, time.time(), final=final) if deduper else utterances
 
     def ear_notices():
         for track in all_tracks:
@@ -405,7 +432,6 @@ def main(argv=None):
                     sources = [(PhoneSource(phone_socket), numbered)]
                 else:
                     mic = MicSource(_device(args.mic))
-                    mic.echo_cancel = system_audio
                     sources = [(mic, numbered)]
                     if system_audio:
                         sources.append((SystemSource(), numbered))
@@ -470,6 +496,13 @@ def main(argv=None):
                     mic_gates[src] = MicGate(src)
                 track.t0 = (datetime.combine(now.date(), datetime.min.time()) if args.file
                             else datetime.fromtimestamp(src.anchor))
+            if system_audio and len(started_sources) == 2:
+                from .aec import EchoCanceller
+
+                mic, system = started_sources
+                offset = round((system.anchor - mic.anchor) * SAMPLE_RATE)
+                aec = EchoCanceller(system_offset=offset, report=log)
+                log("aec: WebRTC AEC3 on raw mic + system reference (2 s alignment buffer)")
             if lifecycle and len(started_sources) == len(sources) and not stop.is_set():
                 lifecycle.update("live")
 
@@ -490,17 +523,8 @@ def main(argv=None):
                         ear_beat = time.monotonic() + 1
                 if pause_monitor:
                     _pause_events(pause_monitor, sink)
-                busy = False
-                for src, track in started_tracks:
-                    samples = src.drain(limit=SAMPLE_RATE // 2)
-                    busy = busy or bool(samples.size)
-                    if src in mic_gates:
-                        samples = pause_monitor.feed(mic_gates[src], samples, time.time())
-                    if samples.size:
-                        if src in recorders:
-                            recorders[src].write(samples)
-                        track.feed(samples)
-                for u in flush_tracks(all_tracks):
+                busy = feed_sources()
+                for u in ready_utterances(flush_tracks(all_tracks)):
                     _emit(u, sink, matcher, tracks_by_name, failed_slots, slots)
                     spoken[u.track] = max(spoken.get(u.track, 0.0), u.wall_span[1])
                     said[u.track] = said.get(u.track, 0) + 1
@@ -530,19 +554,14 @@ def main(argv=None):
                     pause_monitor.stop()
                     _pause_events(pause_monitor, sink)
                 finish_error = None
-                for src, track in started_tracks:
-                    try:
-                        rest = src.drain(limit=float("inf"))
-                        if src in mic_gates:
-                            rest = pause_monitor.feed(mic_gates[src], rest, time.time(), final=True)
-                        if src in recorders:
-                            recorders[src].write(rest)
-                        track.feed(rest, final=True)
-                        # drain returns admitted audio before a capture error; surface it only after writing.
+                try:
+                    feed_sources(final=True)
+                    # Surface capture errors after preserving the admitted audio.
+                    for src in started_sources:
                         if getattr(src, "error", None):
                             raise src.error
-                    except Exception as error:
-                        finish_error = finish_error or error
+                except Exception as error:
+                    finish_error = error
                 ear_notices()
                 final_utterances = []
                 for track in all_tracks:
@@ -550,7 +569,7 @@ def main(argv=None):
                         final_utterances.extend(flush_tracks([track], force=True))
                     except Exception as error:
                         finish_error = finish_error or error
-                for u in sorted(final_utterances, key=lambda u: u.wall_span[0]):
+                for u in ready_utterances(sorted(final_utterances, key=lambda u: u.wall_span[0]), final=True):
                     if sink:
                         _emit(u, sink, matcher, tracks_by_name, failed_slots, slots)
                 if finish_error and capture_error is None:

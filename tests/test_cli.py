@@ -498,13 +498,21 @@ def test_live_saves_mic_and_system_tracks_each_with_its_own_samples(tmp_path, mo
     monkeypatch.setattr(cli, "MicSource", Mic)
     monkeypatch.setattr(cli, "SystemSource", System)
     monkeypatch.setattr(cli, "_system_capture_available", lambda: True)
+    heard = {"mic": [], "system": []}
+    class RecordingTrack(cli.Track):
+        def feed(self, samples, **kwargs): heard[self.name].append(samples)
+    monkeypatch.setattr(cli, "Track", RecordingTrack)
     signaller, _ = signal_when_live(tmp_path)
     out = tmp_path / "meetings" / "call.txt"
 
     cli.main(mode + ["--ear", "local", "--keep-audio", "-o", str(out)])
     signaller.join(timeout=2)
 
-    assert np.array_equal(read_wav(out.with_suffix(".mic.wav")), np.concatenate(mic_fed))
+    clean = np.concatenate(heard["mic"])
+    assert clean.size == np.concatenate(mic_fed).size
+    assert not np.array_equal(clean, np.concatenate(mic_fed))
+    assert np.array_equal(read_wav(out.with_suffix(".mic.wav")), clean)
+    assert np.array_equal(read_wav(out.with_suffix(".system.wav")), np.concatenate(heard["system"]))
     assert np.array_equal(read_wav(out.with_suffix(".system.wav")), np.concatenate(system_fed))
     assert read_wav(out.with_suffix(".system.wav")).size == 5000
 

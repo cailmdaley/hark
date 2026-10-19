@@ -124,10 +124,14 @@ def test_live_modes_feed_and_save_identical_gated_pcm_and_leave_system_untouched
     if shutdown_pause:
         expected[20800:] = 0  # final observed pause at 1.6 mutes the held [1.3, 1.6) onset
     heard = np.concatenate(feeds["mic"])
-    assert np.array_equal(heard, expected)
+    assert heard.size == expected.size
+    if room:
+        assert np.array_equal(heard, expected)
+    else:
+        assert not heard[expected == 0].any()  # AEC tails cannot unmute a paused sample.
     assert np.array_equal(read_wav(out.with_suffix(".mic.wav")), heard)
     assert tracks["mic"].t0.timestamp() == 100 and tracks["mic"].processed == pytest.approx(1.6)
-    assert first_feed["mic"] == pytest.approx(100.4)
+    assert first_feed["mic"] == pytest.approx(100.4 if room else 101.6)
     if not room:
         assert np.array_equal(np.concatenate(feeds["system"]), -original)
         assert np.array_equal(read_wav(out.with_suffix(".system.wav")), -original)

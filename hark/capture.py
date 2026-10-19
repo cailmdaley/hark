@@ -3,8 +3,7 @@
 Every live sample is exactly representable as s16le PCM, so a track saved by `WavRecorder`
 and replayed with `--file` feeds the models the same numbers they heard live.
 
-Mic via VoiceProcessingIO (`voice-mic`) for echo cancellation or PortAudio
-(sounddevice) for raw input; system audio via `audiotee`, a Core Audio
+Raw mic via PortAudio (sounddevice); system audio via `audiotee`, a Core Audio
 process tap that writes s16le PCM to stdout (built by scripts/build-audiotee.sh);
 a phone (or any remote mic) as s16le PCM written into a Unix socket hark listens on.
 
@@ -33,19 +32,6 @@ import numpy as np
 SAMPLE_RATE = 16000
 BLOCK = SAMPLE_RATE // 10  # 100 ms
 AUDIOTEE = Path(os.environ.get("HARK_AUDIOTEE", Path(__file__).parent.parent / "bin" / "audiotee"))
-VOICE_MIC = Path(os.environ.get("HARK_VOICE_MIC", Path(__file__).parent.parent / "bin" / "voice-mic"))
-
-
-def voice_mic_path():
-    """Resolve the optional AEC helper without opening an audio device."""
-    return Path(os.environ.get("HARK_VOICE_MIC", VOICE_MIC))
-
-
-def voice_mic_available():
-    path = voice_mic_path()
-    return path.is_file() and os.access(path, os.X_OK)
-
-
 STALL_SEC = 5.0
 LATE_OK = 1.0  # a device may run this far behind the wall clock before we pad
 SOUND = 1e-4  # peak amplitude above digital silence
@@ -168,23 +154,10 @@ class MicSource(Source):
     def __init__(self, device=None):
         super().__init__("mic")
         self.device = device
-        self.echo_cancel = False
-        self.helper = None
         self.stream = None
         self.stopping = threading.Event()
 
     def _open(self):
-        if self.echo_cancel:
-            if self.device is not None:
-                log("mic: AEC unavailable with explicit --mic; using raw input (playback may appear twice)")
-            elif not voice_mic_available():
-                log(f"mic: AEC unavailable: {voice_mic_path()} is not executable; using raw input "
-                    "(playback may appear twice); build bin/voice-mic or set HARK_VOICE_MIC")
-            else:
-                self.helper = PCMProcessSource("mic AEC (VoiceProcessingIO)", [str(voice_mic_path())], owner=self)
-                log("mic: requesting system VoiceProcessingIO AEC via voice-mic; helper failures are logged")
-                self.helper._open()
-                return
         self._stream()
         threading.Thread(target=self._watch, daemon=True).start()
 
@@ -231,22 +204,15 @@ class MicSource(Source):
 
     def stop(self):
         self.stopping.set()
-        if self.helper:
-            self.helper.stop()
         self._close()
 
 
 class PCMProcessSource(Source):
-    """Supervise a helper emitting mono 16 kHz s16le PCM, optionally into another source.
+    """Supervise a helper emitting mono 16 kHz s16le PCM."""
 
-    Delivery belongs to `owner`: its queue, timestamps, stats and errors are the
-    capture track's single source of truth, regardless of which backend reads it.
-    """
-
-    def __init__(self, name, command, owner=None):
+    def __init__(self, name, command):
         super().__init__(name)
         self.command = command
-        self.owner = owner if owner is not None else self
         self.proc = None
         self.supervisor = None
         self.delivery_lock = threading.Lock()
@@ -334,7 +300,7 @@ class PCMProcessSource(Source):
                 with self.delivery_lock:
                     if self.stopping.is_set():
                         return got, "stopped"
-                    self.owner._deliver(samples)
+                    self._deliver(samples)
                     self._check_silence()
         return got, "stopped"
 
