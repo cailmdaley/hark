@@ -15,9 +15,13 @@ def echo_match(mic, system):
     if min(a[1], b[1]) <= max(a[0], b[0]):
         return False
     left, right = (re.findall(r"\w+", u.text.casefold()) for u in (mic, system))
-    return (min(len(left), len(right)) >= 3
-            and min(len(left), len(right)) / max(len(left), len(right)) >= 0.8
-            and SequenceMatcher(None, left, right, autojunk=False).ratio() >= 0.87)
+    if len(left) < 3 or len(left) != len(right):
+        return False
+    # Fuzz spelling, not missing/added words or semantic substitutions.
+    return all(a == b or (min(len(a), len(b)) >= 6
+                         and SequenceMatcher(None, a, b, autojunk=False).ratio() >= .9
+                         and not a.endswith(b) and not b.endswith(a))
+               for a, b in zip(left, right))
 
 
 class EchoDeduper:

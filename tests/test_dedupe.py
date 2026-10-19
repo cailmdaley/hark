@@ -13,7 +13,10 @@ def utterance(track, text, start=0, duration=3):
 
 @pytest.mark.parametrize("mic,system,match", [
     ("The purple telescope measures galaxies!", "the PURPLE telescope measures galaxies", True),
-    ("We need to discuss the covariance matrix today", "We need to discuss a covariance matrix today", True),
+    ("We need to discuss the covarience matrix today", "We need to discuss the covariance matrix today", True),
+    ("I do not think we should approve the proposal today", "I do think we should approve the proposal today", False),
+    ("I do think we should reject the proposal today", "I do think we should approve the proposal today", False),
+    ("This difference is insignificant", "This difference is significant", False),
     ("I disagree about the covariance", "We need to discuss the covariance matrix today", False),
     ("Yes", "Yes", False),
     ("Please write down forty two but I think it is wrong", "Please write down forty two", False),

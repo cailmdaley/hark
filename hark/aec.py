@@ -73,7 +73,9 @@ class EchoCanceller:
         self.mic = np.concatenate((self.mic, np.asarray(mic, np.float32)))
         self.reference = np.concatenate((self.reference, np.asarray(system, np.float32)))
         end = self.mic_base + len(self.mic)
-        ready = end if final else max(self.position, end - LOOKAHEAD)
+        reference_end = self.reference_base + len(self.reference)
+        ready = end if final else max(self.position, min(end - LOOKAHEAD,
+                                                        reference_end - SEARCH - 800))
         output = []
         while self.position < ready:
             if self.position >= self.next_estimate:

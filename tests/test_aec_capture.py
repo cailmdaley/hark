@@ -67,6 +67,13 @@ def test_lookahead_and_independent_reference_chunks():
     assert aec.feed(final=True).size == LOOKAHEAD
 
 
+def test_late_reference_is_admitted_before_any_affected_mic_frame():
+    aec = EchoCanceller(processor=Identity())
+    assert not aec.feed(np.ones(4 * 16000, np.float32)).size
+    clean = aec.feed(system=np.ones(5 * 16000, np.float32))
+    assert clean.size == 2 * 16000
+
+
 def test_muted_samples_stay_silent_with_filter_tail():
     class Tail(Identity):
         def process_stream(self, frame):
@@ -79,7 +86,8 @@ def test_muted_samples_stay_silent_with_filter_tail():
     assert not clean[173:].any()
 
 
-def test_real_webrtc_cancels_echo_and_preserves_double_talk():
+@pytest.mark.parametrize("lag", [-16000, 4000, 16000])
+def test_real_webrtc_cancels_echo_and_preserves_double_talk(lag):
     # Band-limited echo plus a pulsed near-end tone exercises the native library.
     # Intelligible double-talk is measured separately with speech clips.
     from scipy.signal import butter, sosfilt
@@ -92,7 +100,9 @@ def test_real_webrtc_cancels_echo_and_preserves_double_talk():
     near = (.04 * np.sin(2 * np.pi * (230 * t + 40 * np.sin(t * 6)))
             * np.maximum(0, np.sin(2 * np.pi * 3 * t))).astype(np.float32)
     near[:8 * 16000] = 0
-    echo = np.r_[np.zeros(4000), far[:-4000] * .5].astype(np.float32)
+    from hark.aec import aligned_slice
+
+    echo = aligned_slice(far, 0, -lag, n) * .5
     raw = echo + near
     aec = EchoCanceller()
     output = [aec.feed(raw[i:i + 1600], far[i:i + 1600]) for i in range(0, n, 1600)]
@@ -108,4 +118,4 @@ def test_real_webrtc_cancels_echo_and_preserves_double_talk():
     similarity = max(correlation) / (np.linalg.norm(clean[mixed]) * np.linalg.norm(near[mixed]))
     assert similarity > .5
     assert np.linalg.norm(clean[mixed]) / np.linalg.norm(near[mixed]) > .4
-    assert abs(aec.delay - 4000) < 320
+    assert abs(aec.delay - lag) < 320

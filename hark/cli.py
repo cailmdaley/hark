@@ -360,21 +360,40 @@ def main(argv=None):
     lost_ears = set()
 
     def feed_sources(final=False):
-        drained = {}
+        import numpy as np
+
+        drained, errors = {}, []
         for src, track in started_tracks:
-            samples = src.drain(limit=float("inf") if final else SAMPLE_RATE // 2)
+            samples = np.zeros(0, np.float32)
+            try:
+                samples = src.drain(limit=float("inf") if final else SAMPLE_RATE // 2)
+            except Exception as error:
+                errors.append(error)
             if src in mic_gates:
-                samples = pause_monitor.feed(mic_gates[src], samples, time.time(), final=final)
+                try:
+                    samples = pause_monitor.feed(mic_gates[src], samples, time.time(), final=final)
+                except Exception as error:
+                    errors.append(error)
+                    samples = np.zeros_like(samples)  # A broken mute gate must not expose speech.
             drained[src.name] = samples
         busy = any(samples.size for samples in drained.values())
         if aec:
-            drained["mic"] = aec.feed(drained.get("mic", ()), drained.get("system", ()), final=final)
+            try:
+                drained["mic"] = aec.feed(drained.get("mic", ()), drained.get("system", ()), final=final)
+            except Exception as error:
+                errors.append(error)
+                drained["mic"] = np.zeros(0, np.float32)  # Never fall back to an uncancelled mic.
         for src, track in started_tracks:
             samples = drained[src.name]
             if src in recorders:
                 recorders[src].write(samples)
-            if samples.size or final:
-                track.feed(samples, final=final)
+            try:
+                if samples.size or final:
+                    track.feed(samples, final=final)
+            except Exception as error:
+                errors.append(error)
+        if errors:
+            raise errors[0]
         return busy
 
     def ready_utterances(utterances, final=False):
