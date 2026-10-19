@@ -19,10 +19,9 @@ Gradium can use Mac audio devices too; both ears diarize every captured track.
 Default live capture listens to the mic and everything the Mac plays (Zoom, Meet, a video).
 Every speaker gets a numbered slot, you included, with unique slots across the two tracks.
 Each track is diarized independently, so a voice heard on both tracks can occupy two slots.
-The default mic uses acoustic echo cancellation (AEC) to suppress computer playback picked up by the microphone.
-Build `bin/voice-mic` with `scripts/build-voice-mic.sh`, or set `HARK_VOICE_MIC` to an executable helper.
-The helper uses system VoiceProcessingIO (the voice-processing facility also exposed through AVAudioEngine), with minimum playback ducking and automatic gain control disabled.
-AEC isn't a guarantee that the two tracks never overlap; headphones or `--room` are alternatives if playback leaks through.
+Software acoustic echo cancellation (AEC) uses the captured system track to suppress playback picked up by the microphone, including an explicit `--mic` device.
+It adds two seconds of mic buffering for alignment; residual mic copies of overlapping system utterances are dropped when their text closely matches.
+AEC doesn't change device modes or output volume, but simultaneous near-end speech can still lose words; see the [measurements and limits](aec.md).
 `--room` uses the mic alone, suitable for an in-person meeting or a call heard through the room.
 `--call` is a hidden compatibility alias for default live capture, accepted for launchers; it doesn't change attribution or require headphones.
 
@@ -31,10 +30,9 @@ If not, default capture logs a warning and uses the mic alone; build the tap wit
 Permissions aren't probed by this check: a tap without System Audio Recording permission can still deliver silence.
 Check the session log and lost-source markers if system audio is missing.
 
-AEC availability is checked separately from system capture.
-A missing or non-executable `voice-mic`, or an explicit `--mic` device, selects raw PortAudio input with a warning when both tracks are enabled.
-`--room`, mic-only fallback when system capture is unavailable, and microphone enrollment use raw input without AEC.
-If an AEC helper starts but fails or stalls, hark logs the failure and restarts it while padding the gap with silence; it doesn't silently switch to raw input.
+AEC is installed with hark through the LiveKit Python package; no mic helper needs building.
+`--room`, `--phone`, files, enrollment and mic-only fallback have no AEC or cross-track deduplication.
+The mic always uses raw PortAudio capture; processing happens inside hark before recognition and optional WAV saving.
 
 Phone mode suits a room where the laptop's mic is in the wrong place. hark listens on `~/.hark/phone.sock` for raw 16 kHz mono s16le PCM; a relay writes it there, such as the Shuttle board's phone page, which streams the phone's mic over the tailnet. Anything that produces that PCM works too, for example `ffmpeg -i talk.m4a -f s16le -ac 1 -ar 16000 - | nc -U ~/.hark/phone.sock`. One sender at a time: a new connection replaces the old one. While nothing is connected hark records silence, and after 90 s the transcript says `# phone lost at …`. The track is saved as `<stem>.phone.wav`.
 
@@ -106,7 +104,8 @@ Each utterance line includes its full start and end time as `HH:MM:SS-HH:MM:SS`:
 14:03:29-14:03:38 S3   Did anyone check whether the redshift distributions changed?
 ```
 
-Hark appends lines as turns finish, in end-time order; start times can move backward across speakers.
+Hark appends lines as turns finish; mic lines in two-track capture wait another three seconds to catch system copies that finish later.
+Time ranges, rather than file order, place lines across speakers.
 The [format contract](format.md) defines the text and JSONL records.
 
 ## Options
@@ -119,7 +118,7 @@ The [format contract](format.md) defines the text and JSONL records.
 | `--no-gradium-metering` | | skip credit-balance requests |
 | `--title TEXT` | | appended to the session filename |
 | `-o PATH` | `~/.hark/sessions/…` | write the transcript here instead |
-| `--mic DEVICE` | system default | raw input device, by name or index; disables AEC |
+| `--mic DEVICE` | system default | input device, by name or index; software AEC stays on with system capture |
 | `--lang CODE` | auto | pin the ASR language, e.g. `en-US`, `fr-FR` |
 | `--latency` | `low` | local-ear diarizer lookahead: `low` 1.04 s, `very_low` 0.64 s, `ultra_low` 0.32 s. Shorter means faster lines and worse speaker separation |
 | `--gap SECONDS` | `3` | local-ear silence that ends a turn when nobody else takes over |
@@ -170,7 +169,7 @@ hark keeps no audio by default: transcripts are the record. With `--keep-audio`,
 Each file holds the full source track from its first sample.
 The local models receive those samples directly; Gradium receives gated spans of them, while its utterance offsets still index the complete WAV. JSONL `start`/`end` times are seconds into these files. Live input is padded to hold the wall clock, so the files stay aligned with real time even when a device stalls.
 
-The mic is rounded to 16-bit before the models see it, so `hark --file <stem>.mic.wav` replays a track through the same pipeline with identical samples.
+The saved mic is the echo-cancelled, pause-muted, 16-bit PCM that the models hear, so `hark --file <stem>.mic.wav` replays it with identical samples and no second AEC pass.
 Paused mic spans contain digital silence in the WAV; system audio remains untouched.
 This is how diarization changes get tested against real meetings.
 
@@ -179,8 +178,8 @@ Kept audio is temporary. Each live start deletes `.wav` files under `~/.hark/ses
 ## Session log
 
 `<stem>.log` keeps hark's own log, one timestamped line per message.
-It records every system-audio tap and AEC helper exit and restart, raw mic reopens and errors, dictation-pause transitions, plus a heartbeat once a minute for each live source: seconds the device delivered, seconds hark padded, peak amplitude, and utterances.
-AEC helper diagnostics are preserved in the log, including initialization errors.
+It records system-tap exits and restarts, raw mic reopens and errors, AEC alignment changes, residual-echo drops, dictation-pause transitions, and a heartbeat once a minute for each live source.
+Heartbeats report seconds the device delivered, seconds hark padded, raw peak amplitude, and emitted utterances.
 It's the first place to look when a transcript has a gap.
 
 ## Lost sources

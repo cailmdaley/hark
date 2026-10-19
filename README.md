@@ -41,7 +41,7 @@ The format is a small, documented contract ([docs/format.md](docs/format.md)). B
 hark listens to up to two audio sources and labels speakers within each.
 
 - **By default**, hark captures the microphone and the computer's audio output (Zoom, Meet, a video) through a macOS system-audio tap ([audiotee](https://github.com/makeusabrew/audiotee)).
-  The default mic uses macOS acoustic echo cancellation (AEC) through the `voice-mic` helper to suppress computer playback picked up by the mic.
+  In-process WebRTC acoustic echo cancellation (AEC) uses the captured system track to suppress playback leaking into the raw mic.
   Both tracks are separated into speakers, with unique numbered slots across the session, including you.
   If the tap executable isn't available, hark logs a warning and uses the mic alone.
 - **Mic only** (`--room`) separates everyone the microphone hears into speakers.
@@ -50,11 +50,10 @@ hark listens to up to two audio sources and labels speakers within each.
   This is useful when the laptop is in the wrong place.
 
 The two tracks are diarized independently: the same voice heard on both can occupy two slots.
-AEC uses system VoiceProcessingIO, the voice-processing facility also exposed through AVAudioEngine, with minimum playback ducking and automatic gain control disabled.
-Room capture, voice enrollment and explicit `--mic` devices use raw input instead.
-If dual-track capture can't use AEC because the helper is missing or a mic is specified, hark warns that playback may appear on both tracks.
-Helper failures are logged and retried without silently switching to raw capture.
-Headphones or `--room` remain alternatives when playback leaks into the mic.
+AEC runs in software, without changing the device's processing mode, output volume or routing, and works with explicit `--mic` devices too.
+Mic audio waits two seconds for reference alignment; nearly identical overlapping mic/system utterances are deduplicated, with drops logged.
+Room capture, enrollment and mic-only fallback use raw input.
+Echo suppression doesn't guarantee near-end speech survives simultaneous remote speech; headphones remain the most reliable option for that.
 The [device measurement and guarded probe](docs/aec.md) document measured leakage, reproduction steps and limits.
 No source is labelled `me` automatically.
 An enrolled voice named `me` can name a mic slot through ordinary voice matching, but never a system-audio slot.
@@ -80,7 +79,6 @@ Local capture needs a Mac with Apple Silicon running macOS 14.2 or later, Python
 ```bash
 git clone https://github.com/cailmdaley/hark && cd hark
 scripts/build-audiotee.sh   # builds bin/audiotee
-scripts/build-voice-mic.sh  # builds bin/voice-mic (system AEC)
 uv sync
 uv run hark                 # models download on first run (~3 GB)
 ```
@@ -98,7 +96,7 @@ hark enroll Ada --file ada.wav  # enroll a voice (≥ 5 s) for automatic naming
 
 Ctrl-C ends the session cleanly and writes `# ended`.
 Transcripts go to `~/.hark/sessions/`, and `~/.hark/current.txt` always points at the live one.
-Audio is kept beside the transcript for 14 days, so a meeting can be replayed through the pipeline later.
+`--keep-audio` saves the processed tracks beside the transcript for replay; kept audio expires after 14 days.
 
 On Linux, or with the Gradium ear, see [docs/usage.md](docs/usage.md#gradium) for the API key, cost and limits.
 
@@ -138,7 +136,7 @@ None of this is required to use hark: the flags are ordinary ones (`--phone`, `-
 ## Development
 
 ```bash
-HARK_DIR="$(mktemp -d /tmp/hk-test.XXXXXX)" uv run pytest
+HARK_DIR="$(mktemp -d /tmp/hk-test.XXXXXX)" uv run pytest -q -o faulthandler_timeout=60
 ```
 
 Tests isolate hark's state directory and refuse to touch the real `~/.hark`.

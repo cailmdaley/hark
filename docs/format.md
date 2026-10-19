@@ -11,8 +11,8 @@ The first full 24-hour timestamp is the start and the second is the end; both us
 For live sessions these are wall-clock times.
 For `--file`, they are offsets into the file, starting at `00:00:00`.
 
-Utterance lines are appended as turns finish, in end-time order rather than start-time order.
-A short interjection can therefore appear before a longer turn that started earlier, while its two timestamps keep the intervals clear.
+Utterance lines are appended as turns finish; two-track mic lines also wait briefly for residual-echo deduplication.
+Lines aren't globally time-sorted: use their start/end ranges to place overlapping turns.
 
 ```
 19:34:12-19:34:18 S1   Sure, I reran the pipeline last night with the new masks

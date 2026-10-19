@@ -66,6 +66,29 @@ def test_all_zero_capture_is_inconclusive(probe):
         probe.metrics(np.zeros(200), np.ones(100))
 
 
+def test_processed_metrics_use_the_raw_measurement_window(probe):
+    reference = np.random.default_rng(2).normal(size=1000).astype(np.float32)
+    audio = np.r_[reference, np.zeros(2000), reference * .1].astype(np.float32)
+    result = probe.metrics(audio, reference, offset=3000)
+    assert result["reference_projection_gain"] == pytest.approx(.1, rel=1e-5)
+    assert result["best_offset_seconds"] == 3000 / 16000
+
+
+def test_probe_explicitly_targets_built_in_devices(probe, monkeypatch):
+    import sys
+    from types import SimpleNamespace
+
+    played = []
+    monkeypatch.setitem(sys.modules, "sounddevice", SimpleNamespace(
+        default=SimpleNamespace(device="AirPods"),
+        play=lambda samples, **kwargs: played.append((samples, kwargs))))
+    assert probe.MIC == "MacBook Pro Microphone"
+    probe.play_reference(np.ones(10, np.float32), .35)
+    samples, kwargs = played[0]
+    assert kwargs == {"samplerate": 16000, "device": "MacBook Pro Speakers"}
+    np.testing.assert_allclose(samples, .35)
+
+
 def test_silent_or_short_reference_is_not_a_measurement(probe):
     with pytest.raises(ValueError):
         probe.metrics(np.zeros(100), np.zeros(100))

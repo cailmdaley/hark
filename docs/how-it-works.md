@@ -1,9 +1,9 @@
 # How it works
 
 ```
-mic ─ 300 ms lookback + pause gate ─ independent diarizer + masks + ASR ─┐
-                                                                     ├─ turns ─ unique S<n> slots ─ .txt + .jsonl
-system audio ─ audiotee ────────── independent diarizer + masks + ASR ─┘
+raw mic ─ pause gate ─ software AEC ─ WAV + diarizer + masks + ASR ─┐
+                           ↑                                      ├─ turns ─ echo dedupe ─ S<n> slots ─ .txt + .jsonl
+system ─ audiotee ──────────┴────── WAV + diarizer + masks + ASR ──┘
 ```
 
 `--ear local|gradium` selects recognition and speaker attribution.
@@ -13,19 +13,21 @@ The diagram shows the local ear; Gradium replaces the diarizer/ASR chain with cl
 
 ## Capture
 
-In default dual-track capture, the default mic is read through `bin/voice-mic` (overridden by `HARK_VOICE_MIC`).
-This Swift helper uses macOS VoiceProcessingIO for acoustic echo cancellation (AEC), the system voice-processing facility also exposed through AVAudioEngine.
-It suppresses computer playback picked up by the mic, uses minimum playback ducking, and disables automatic gain control.
-Build it with `scripts/build-voice-mic.sh`.
-Room capture, microphone enrollment, and explicit `--mic` devices use raw PortAudio (`sounddevice`) input.
-If dual-track capture can't use AEC because the helper isn't executable or a mic was specified, hark logs an explicit warning before opening raw input.
+The microphone always uses raw PortAudio (`sounddevice`) input, from the default device or `--mic DEV`, reopened after 5 s without data.
+System audio comes from [audiotee](https://github.com/makeusabrew/audiotee), a Swift Core Audio process tap emitting 16 kHz mono s16le PCM.
+Its supervisor retries exits, failed starts and 5 s stalls, with backoff capped at 30 s.
+Both sources are padded to hold the wall clock when a device falls behind.
 
-System audio comes from [audiotee](https://github.com/makeusabrew/audiotee), a Swift program that opens a Core Audio process tap and writes raw PCM to stdout.
-Both helpers emit 16 kHz mono s16le PCM and share a supervisor: if a helper stalls for 5 s, exits, or can't start, hark logs the failure and retries with a backoff capped at 30 s.
-An AEC helper failure leaves a padded mic gap, not an unannounced switch to raw input.
-Raw PortAudio input is reopened after 5 s without data.
-Both mic backends deliver into the same mic queue, timestamps, sample statistics and error state, so recording, pause gating and source health don't depend on the backend.
-Both tracks are padded to hold the wall clock, so timestamps stay true even when a device falls behind.
+With both tracks enabled, `hark/aec.py` processes the pause-muted mic before WAV saving, diarization and ASR.
+[LiveKit's AudioProcessingModule](https://docs.livekit.io/reference/python/livekit/rtc/apm.html) supplies WebRTC AEC3 on 10 ms, 16 kHz mono frames, with gain control and noise suppression disabled.
+The system reference is never replayed or modified downstream.
+A two-second mic buffer admits late reference frames; waveform correlation over a bounded ±1.5 s search removes coarse timeline offsets once per second.
+The system start anchor is expressed on the mic's sample clock; the reference is then fed 50 ms ahead of its estimated echo, before each mic frame.
+AEC3 handles the remaining fine delay and clock drift.
+Four seconds of history cover correlation; processing preserves mic sample count and index, including partial final frames.
+Alignment changes appear in the log.
+No device-wide voice processing, routing or output-volume changes are requested.
+The [AEC measurements](aec.md) include double-talk failures; perfect echo separation or speech preservation isn't guaranteed.
 
 A background watcher pauses the mic while a dictation app records.
 Every 75 ms it reads CoreAudio's process-object list with `ctypes` and checks each process's input-capture flag and bundle ID.
@@ -43,8 +45,13 @@ Without that executable, hark warns and uses only the mic; it doesn't probe reco
 `--room` selects mic only, `--phone` selects the socket input only, and hidden `--call` is a compatibility alias for the default.
 Both ears diarize each track independently; no track has a fixed `me` speaker.
 A voice captured by both tracks can receive two slots.
-AEC suppresses loudspeaker leakage into the default mic but doesn't merge identities across tracks or guarantee perfect separation.
-Without AEC, loudspeaker playback can be transcribed on both tracks; headphones or `--room` avoid capturing playback twice.
+AEC suppresses loudspeaker leakage without merging speaker identities.
+A small text stage drops a mic utterance only when its wall span overlaps a recent system utterance and its normalized words match, allowing minor spelling differences in long words.
+Added or omitted words, semantic substitutions and short acknowledgments are retained.
+Mic lines wait three seconds after finalization to allow either track to finish first; system lines are immediate, and the cache retains a minute of system utterances.
+Completion skew beyond three seconds or differently segmented copies can escape deduplication.
+Every drop is logged before speaker-slot allocation and voice matching; the saved WAV is unaffected.
+Shutdown compares all final utterances together before releasing held mic lines.
 
 For two-track capture, the main thread maps each `(track, ear-local slot)` to a session-wide `S<n>` before voice matching and transcript output.
 Slots are allocated in order of first emitted utterance, including utterances flushed at shutdown, and remain stable for the session.

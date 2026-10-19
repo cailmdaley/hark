@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Measure loudspeaker leakage in raw and VoiceProcessingIO mic recordings.
+"""Measure loudspeaker leakage in simultaneous raw and software-AEC mic recordings.
 
 Run with an isolated HARK_DIR. Playback is opt-in, limited to eight seconds,
 and refused unless Shuttle's meeting API confirms no recording is active.
@@ -12,14 +12,17 @@ import os
 from pathlib import Path
 import subprocess
 import shlex
-import sys
 import time
 import urllib.request
 
 import numpy as np
 from scipy.signal import correlate
 
-from hark.capture import VOICE_MIC, WavRecorder, load_audio
+from hark.aec import EchoCanceller
+from hark.capture import MicSource, SystemSource, WavRecorder, load_audio
+
+MIC = "MacBook Pro Microphone"
+SPEAKER = "MacBook Pro Speakers"
 
 
 def live_hark_command(command):
@@ -63,13 +66,14 @@ def playback_allowed(url):
     return state
 
 
-def metrics(audio, reference):
+def metrics(audio, reference, offset=None):
     if len(audio) < len(reference) or not np.any(reference):
         raise ValueError("Capture is shorter than the reference, or reference is silent")
     if not np.any(audio):
         raise ValueError("Capture is all-zero PCM; suppression is inconclusive, not successful AEC")
-    correlation = correlate(audio, reference, mode="valid", method="fft")
-    offset = int(np.argmax(np.abs(correlation)))
+    if offset is None:
+        correlation = correlate(audio, reference, mode="valid", method="fft")
+        offset = int(np.argmax(np.abs(correlation)))
     span = audio[offset:offset + len(reference)]
     rms = float(np.sqrt(np.mean(span ** 2)))
     norm = float(np.linalg.norm(span) * np.linalg.norm(reference))
@@ -82,15 +86,11 @@ def metrics(audio, reference):
     }
 
 
-def raw_worker():
+def play_reference(reference, gain):
+    """Target laptop speakers explicitly, never a connected headphone default."""
     import sounddevice as sd
 
-    def callback(data, *_):
-        sys.stdout.buffer.write(data.tobytes())
-        sys.stdout.buffer.flush()
-
-    with sd.InputStream(samplerate=16000, channels=1, dtype="int16", callback=callback):
-        time.sleep(30)
+    sd.play(reference * gain, samplerate=16000, device=SPEAKER)
 
 
 def main():
@@ -98,7 +98,7 @@ def main():
     parser.add_argument("audio", type=Path, help="known speech clip, at most eight seconds")
     parser.add_argument("out", type=Path, help="new output directory for recordings and metrics")
     parser.add_argument("--play", action="store_true", help="allow short speaker playback")
-    parser.add_argument("--volume", type=float, default=0.35, help="afplay gain, 0–1; system volume unchanged")
+    parser.add_argument("--volume", type=float, default=0.35, help="playback gain, 0–1; system volume unchanged")
     parser.add_argument("--meeting-api", default="http://localhost:4000/api/v1/meeting")
     args = parser.parse_args()
     if not args.play:
@@ -110,48 +110,56 @@ def main():
     reference = load_audio(args.audio)
     if not 0 < len(reference) <= 8 * 16000:
         parser.error("Use a non-empty speech clip no longer than eight seconds")
-    if not VOICE_MIC.is_file():
-        parser.error("Build bin/voice-mic with scripts/build-voice-mic.sh")
     playback_allowed(args.meeting_api)
     args.out.mkdir(parents=True, exist_ok=False)
     import sounddevice as sd
 
-    report = {"clip": str(args.audio.resolve()), "afplay_gain": args.volume,
+    report = {"clip": str(args.audio.resolve()), "playback_gain": args.volume,
               "volume_settings": subprocess.check_output(["osascript", "-e", "get volume settings"], text=True).strip(),
-              "input_device": sd.query_devices(kind="input"),
-              "output_device": sd.query_devices(kind="output"),
+              "input_device": sd.query_devices(MIC, kind="input"),
+              "output_device": sd.query_devices(SPEAKER, kind="output"),
               "macos": subprocess.check_output(["sw_vers", "-productVersion"], text=True).strip(),
               "near_end_control_tested": False,
-              "note": "Sequential raw/AEC trials; RMS includes ambient noise. Correlation measures waveform similarity, not word accuracy. Near-end speech preservation is not established."}
-    for mode in ("raw", "aec"):
-        playback_allowed(args.meeting_api)
-        pcm = args.out / f"{mode}.pcm"
-        command = ([str(VOICE_MIC)] if mode == "aec" else
-                   [sys.executable, str(Path(__file__).resolve()), "--raw-worker"])
-        with pcm.open("wb") as output, (args.out / f"{mode}.log").open("wb") as log:
-            process = subprocess.Popen(command, stdout=output, stderr=log, start_new_session=True)
-            try:
-                deadline = time.monotonic() + 8
-                while pcm.stat().st_size == 0 and process.poll() is None and time.monotonic() < deadline:
-                    time.sleep(0.05)
-                if process.poll() is not None or pcm.stat().st_size == 0:
-                    raise RuntimeError(f"{mode} capture failed; see {mode}.log")
-                time.sleep(1)
+              "note": "Same raw mic before/after software AEC, measured in the same window. RMS includes ambient noise; near-end speech preservation needs a separate control."}
+    mic, system = MicSource(MIC), SystemSource()
+    recorders = {name: WavRecorder(args.out / f"{name}.wav") for name in ("raw", "aec", "system")}
+    started = []
+    aec = None
+    try:
+        for source in (mic, system):
+            source.start()
+            started.append(source)
+        aec = EchoCanceller(round((system.anchor - mic.anchor) * 16000), report=print)
+        start = time.monotonic()
+        played = False
+        while time.monotonic() - start < 2 + len(reference) / 16000 + 2:
+            if not played and time.monotonic() - start >= 2:
+                if not mic.stats["device"] or not system.stats["device"]:
+                    raise RuntimeError("Capture unavailable; check microphone/system-audio permissions")
                 playback_allowed(args.meeting_api)
-                subprocess.run(["afplay", "-v", str(args.volume), str(args.audio)], check=True, timeout=12)
-                time.sleep(1)
-            finally:
-                process.terminate()
-                try:
-                    process.wait(timeout=3)
-                except subprocess.TimeoutExpired:
-                    process.kill()
-                    process.wait()
-        samples = np.fromfile(pcm, dtype="<i2").astype(np.float32) / 32768
-        recorder = WavRecorder(args.out / f"{mode}.wav")
-        recorder.write(samples)
-        recorder.close()
-        report[mode] = metrics(samples, reference)
+                play_reference(reference, args.volume)
+                played = True
+            raw, far = mic.drain(), system.drain()
+            recorders["raw"].write(raw)
+            recorders["system"].write(far)
+            recorders["aec"].write(aec.feed(raw, far))
+            time.sleep(0.02)
+        sd.wait()
+    finally:
+        sd.stop()
+        for source in started:
+            source.stop()
+        if aec is not None:
+            raw, far = mic.drain(), system.drain()
+            recorders["raw"].write(raw)
+            recorders["system"].write(far)
+            recorders["aec"].write(aec.feed(raw, far, final=True))
+        for recorder in recorders.values():
+            recorder.close()
+    report["raw"] = metrics(load_audio(args.out / "raw.wav"), reference)
+    offset = round(report["raw"]["best_offset_seconds"] * 16000)
+    report["aec"] = metrics(load_audio(args.out / "aec.wav"), reference, offset=offset)
+    report["final_alignment_seconds"] = aec.delay / 16000
     raw, aec = report["raw"], report["aec"]
     report["baseline_detected"] = raw["absolute_peak_correlation"] >= 0.1
     report["rms_reduction_db"] = 20 * math.log10(raw["rms"] / aec["rms"]) if aec["rms"] else None
@@ -162,7 +170,4 @@ def main():
 
 
 if __name__ == "__main__":
-    if sys.argv[1:] == ["--raw-worker"]:
-        raw_worker()
-    else:
-        main()
+    main()

@@ -1,53 +1,86 @@
 # Acoustic echo cancellation
 
-Default two-track live capture uses the Mac's VoiceProcessingIO microphone path when `bin/voice-mic` is built and the default microphone is selected.
-The helper selects the default input and output devices, negotiates matching mono 16 kHz client formats, and renders silence rather than replaying the microphone or system audio.
-VoiceProcessingIO uses the output device as its acoustic echo reference.
-This is Apple's voice-processing Audio Unit, the underlying alternative to `AVAudioEngine.inputNode.setVoiceProcessingEnabled`.
-Automatic gain control is disabled; other-app ducking is set to its minimum, which is not a guarantee of zero ducking.
+Default mic + system capture applies WebRTC AEC3 inside hark, using audiotee's system track as the far-end reference.
+The mic is captured raw through PortAudio, including with `--mic DEV`; hark doesn't enable device-wide voice processing, change routing, or adjust output volume.
+`--room`, `--phone`, file replay, enrollment and mic-only fallback have no AEC.
+The optional saved mic WAV contains exactly the processed, pause-muted PCM the models hear.
 
-Build it with `scripts/build-voice-mic.sh`.
-Room-only capture, enrollment and an explicitly selected `--mic` use the raw microphone.
-A missing helper leaves dual capture running with a warning and no echo cancellation.
-A helper failure is logged and retried; padded silence is not evidence of successful cancellation.
-AEC is device-dependent and is not a guarantee that every remote word disappears.
+## Library and timing
 
-## MacBook device measurement
+[LiveKit RTC 1.1.21](https://pypi.org/project/livekit/1.1.21/) provides `AudioProcessingModule`, with echo cancellation enabled and gain control, high-pass filtering and noise suppression disabled.
+Its [Python API](https://docs.livekit.io/reference/python/livekit/rtc/apm.html) wraps [WebRTC's audio processing module](https://github.com/livekit/rust-sdks/blob/main/webrtc-sys/src/apm.cpp).
+The release has macOS arm64 and Linux x86_64/aarch64 wheels.
+The macOS wheel is installed and exercised by native-processing tests; the Linux x86_64 wheel resolves and installs with uv's platform selector, but isn't executed on this Mac.
+The wrapper needs no LiveKit account, connection or server.
 
-A short hardware trial on macOS 26.5.2 uses the built-in MacBook Pro Speakers and MacBook Pro Microphone.
-The speaker volume is 44, unmuted, with `afplay` gain 0.35; the trial does not change routing or system volume.
+Each track's `drain()` pads its own sample timeline, which can lag sample arrival by up to a second.
+Start anchors alone therefore don't align echo.
+The pure `hark/aec.py` stage buffers at least two seconds of mic audio, waits for the reference window, and estimates coarse mic/reference lag once per second by waveform correlation over ±1.5 seconds.
+It retains the last confident estimate during silence or unrelated near-end speech.
+The reference is fed 50 ms ahead of the estimated echo, then the mic is processed in 10 ms frames; AEC3 handles finer delay and drift.
+Shutdown preserves the exact mic length, including a short last frame.
+Paused and padded zero samples stay zero after processing.
+
+`hark/dedupe.py` drops residual mic copies only when their wall spans overlap system speech and their normalized word sequences closely match.
+It tolerates small spelling differences in long words, not added/omitted words or general semantic substitutions; short acknowledgments survive.
+Mic utterances wait three seconds after finalization to allow the system copy to finish first.
+System lines are immediate; drops and alignment changes go to `<stem>.log`.
+Differently segmented copies, delayed completion beyond that hold, or changed recognition can escape deduplication.
+
+## Built-in speaker measurement
+
+On macOS 26.5.2, a short trial uses **MacBook Pro Speakers and MacBook Pro Microphone**, system output volume **44**, input volume **99**, and playback gain **0.35**.
 The reference is Samantha's synthesized sentence: “The purple telescope measures seven distant galaxies. Please write down the number forty two.”
-Raw PortAudio capture and processed VoiceProcessingIO capture are sequential trials at 16 kHz mono.
-The meeting API reports a failed, inactive meeting before playback.
+Raw mic, processed mic and system reference are captured simultaneously, with RMS measured over the same reference-length window selected from the raw mic.
 
-| Metric | Raw mic | VoiceProcessingIO mic |
+| Metric | Raw mic | Software AEC mic |
 |---|---:|---:|
-| RMS over a reference-length window | 0.007355 | 0.0007750 |
-| Absolute peak normalized correlation with reference | 0.1688 | 0.1346 |
-| Absolute least-squares reference projection gain | 0.007836 | 0.0006584 |
-| Local-ear replay | All 14 reference words | No transcript lines |
+| RMS | 0.031319 | 0.0040762 |
+| Absolute normalized correlation with original speech | 0.49265 | 0.007325 |
+| Absolute reference projection gain | 0.097371 | 0.0001884 |
+| Local-ear replay | 14/14 reference words, with “measure” for “measures” | No transcript lines |
 
-The measured RMS reduction is **19.5 dB** (processed RMS is 10.5% of raw RMS).
-The reference projection is **21.5 dB** lower.
-A second trial at system volume 38 and `afplay` gain 1 measures 16.6 dB RMS reduction, with recognizable reference fragments in the raw transcript and no processed transcript lines.
-These metrics include room noise and acoustic filtering; neither is a laboratory echo-return-loss measurement.
-Each trial's window is selected by maximum absolute waveform correlation, so its offset can differ between raw and processed capture.
-No transcript lines means no recognized leakage in this short trial, not zero acoustic leakage.
-These short trials do not establish near-end speech preservation, double-talk behavior, performance with external speakers, or reliable cancellation across volume levels.
+The measured RMS reduction is **17.71 dB**; reference projection is **54.27 dB** lower.
+These include ambient noise and acoustic filtering, not a laboratory echo-return-loss measurement.
+The estimated coarse mic lag is **+104 ms** after accounting for source start anchors.
+An isolated default-mode live check produces **one system utterance, zero mic utterances**, and exits cleanly after SIGINT.
+The original default devices and the built-in speaker's muted/zero-volume settings are restored after testing.
+Muted-speaker baselines have no detectable leakage and aren't evidence of cancellation.
 
-## Reproducing the probe
+## Double-talk and real-call limits
 
-Do not play test audio while a meeting is recording.
-The probe checks `http://localhost:4000/api/v1/meeting` and ordinary local hark CLI processes before capture and immediately before each playback.
-It refuses playback unless the API explicitly contains `meeting: null` or a meeting whose state is `ended` or `failed`, with no local live hark command detected.
-API failure or an unknown state also prevents playback.
-The API covers managed meetings; process detection also covers ordinary standalone CLI capture, but is not a shared recording lock.
-Keep other launchers idle during the probe: these checks cannot prevent a recording from starting after the check.
-It never stops another recording, changes routing, or changes the system volume.
-Keep clips short and quiet.
+The offline double-talk test repeats the measured acoustic mic/system pair and adds an independent Daniel speech clip to the mic during far-end playback: “My blue notebook contains five careful measurements. We should check the calibration tomorrow.”
+The near-only control recognizes **13/13 words**, both raw and after AEC with a silent reference.
+
+| Near speech RMS relative to recorded echo + noise | Near-end words recognized after AEC |
+|---|---:|
+| +7.95 dB | 13/13 |
+| +1.93 dB | 6/13 |
+| −4.09 dB | 6/13 |
+
+At the lower two levels only “We should check the calibration tomorrow” survives recognition.
+The raw +1.93 dB mixture recognizes 7/13 near words, so the failure isn't attributable entirely to AEC; software processing still doesn't meet full preservation at that level.
+A synthetic pulsed-tone regression checks that double-talk isn't universally silenced, but isn't a speech-quality test.
+**Simultaneous near-end speech preservation is not established across practical volume levels.**
+
+A 25-second excerpt of a saved raw two-track call yields **6.88 dB RMS reduction** over its final 20 seconds.
+Raw mic and system replays contain the same remote passage; processed mic replay yields no lines.
+Its estimated mic lag is around **−265 ms**, with some lower-confidence alternative peaks around −200 ms.
+A separate raw-call pair has weak correlations outside its opening, so it doesn't support a reliable drift estimate.
+Offline AEC processing takes about **0.2 s per 25–28 s of audio** on this Mac (roughly 0.7–0.9% of one core by elapsed time).
+These short tests don't establish long-call drift handling, device-switch recovery, Zoom mic coexistence or live human double-talk; those need a real call.
+
+## Guarded reproduction
+
+**Never play probes into an existing recording or into AirPods/headphones.**
+Before each playback, check `pgrep -fl hark`, the default devices (`system_profiler SPAudioDataType`), and the managed meeting API.
+The probe requires an explicit inactive API state and rejects local live hark CLI commands, including standalone recordings.
+API failure or an unknown state prevents playback.
+These checks aren't a shared recording lock: keep other launchers idle and require a quiet window.
+The script targets the built-in mic and speakers explicitly, so connected AirPods aren't used.
+It doesn't unmute speakers or change volume; verify that the built-in speakers are audible before interpreting a baseline, and restore any manually changed settings afterwards.
 
 ```bash
-scripts/build-voice-mic.sh
 say -v Samantha -o /tmp/hark-reference.aiff \
   'The purple telescope measures seven distant galaxies. Please write down the number forty two.'
 HARK_DIR="$(mktemp -d /tmp/hk-aec.XXXXXX)" uv run python scripts/aec-probe.py \
@@ -55,24 +88,7 @@ HARK_DIR="$(mktemp -d /tmp/hk-aec.XXXXXX)" uv run python scripts/aec-probe.py \
 ```
 
 Use a new output directory for each run.
-The script records raw and processed WAVs, helper logs and `metrics.json`, including device and volume settings.
-It limits the reference to eight seconds, rejects all-zero captured PCM as inconclusive, and requires a detectable raw baseline before interpreting attenuation.
-A quiet or muted playback that never reaches the mic cannot demonstrate AEC.
-Nonzero processed samples still do not establish near-end speech preservation; that needs a separate near-end control.
-Replay each WAV with `hark --file` and a separate temporary `HARK_DIR` to check recognized words too.
-Keep the WAVs private: they also contain whatever else the microphone hears.
-
-## API evidence and implementation limits
-
-[Chromium's macOS input implementation](https://github.com/chromium/chromium/blob/main/media/audio/apple/audio_low_latency_input.cc) selects an input and an output device for VoiceProcessingIO and provides a silent output callback.
-This is evidence that macOS supports a device-level reference without routing the meeting through hark's own playback.
-[Apple's voice-processing overview](https://developer.apple.com/videos/play/wwdc2019/510/) describes the AVAudioEngine path; [its ducking overview](https://developer.apple.com/videos/play/wwdc2023/10235/) distinguishes minimum ducking from disabled ducking.
-
-An AVAudioEngine probe on this Mac reports a nine-channel input format.
-Default conversion produces zero-valued PCM; explicitly selecting channel zero produces audio but does not establish that the selected channel is the processed uplink.
-Connecting an output branch in that graph fails with OSStatus `-10875` during initialization.
-Those samples are not counted as successful AEC.
-The mono VoiceProcessingIO helper avoids the undocumented channel mapping and initializes successfully on the real devices.
-
-If a particular device cannot use this path, the next option is WebRTC AEC3 with the captured system track as an explicit render reference, including delay and clock-drift estimation.
-That path requires its own device measurements and double-talk checks; it is not implemented here.
+The script limits playback to eight seconds and saves `raw.wav`, `aec.wav`, `system.wav` and `metrics.json`, including device names and volume settings.
+It rejects all-zero PCM as inconclusive and requires a detectable raw baseline before interpreting attenuation.
+Replay each WAV with `hark --file`, a separate temporary `HARK_DIR`, and separate transcript paths; this doesn't play sound.
+Keep mic WAVs private because they include whatever else the room microphone hears.
