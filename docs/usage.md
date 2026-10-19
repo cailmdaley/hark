@@ -124,7 +124,7 @@ The [format contract](format.md) defines the text and JSONL records.
 | `--latency` | `low` | local-ear diarizer lookahead: `low` 1.04 s, `very_low` 0.64 s, `ultra_low` 0.32 s. Shorter means faster lines and worse speaker separation |
 | `--gap SECONDS` | `3` | local-ear silence that ends a turn when nobody else takes over |
 | `--speaker-mask` | `exclusive` | local-ear speakers that hear a frame two speakers share; see [how it works](how-it-works.md#speaker-masks) |
-| `--no-save-audio` | | don't keep the audio |
+| `--keep-audio` | off | save each track as `<stem>.<track>.wav` |
 | `--pause-for PATTERNS` | `aquavoice,aqua-voice` | pause the mic while a matching CoreAudio process captures input; give comma-separated bundle-ID substrings or `none` |
 | `--mirror HOST:PATH` | | also append the transcript to a file on another machine over SSH |
 | `--launch ID` | | a launcher's id, echoed into `meeting.json` |
@@ -165,7 +165,7 @@ The ASR and the saved mic WAV receive the same samples, with zeros for every pau
 
 ## Saved audio
 
-Live sessions keep each captured track beside the transcript as 16 kHz mono 16-bit WAV: `<stem>.mic.wav` and, when system audio is enabled, `<stem>.system.wav`.
+hark keeps no audio by default: transcripts are the record. With `--keep-audio`, a live session saves each captured track beside the transcript as 16 kHz mono 16-bit WAV: `<stem>.mic.wav` and, when system audio is enabled, `<stem>.system.wav`.
 `--room` saves only the mic; `--phone` saves `<stem>.phone.wav` instead.
 Each file holds the full source track from its first sample.
 The local models receive those samples directly; Gradium receives gated spans of them, while its utterance offsets still index the complete WAV. JSONL `start`/`end` times are seconds into these files. Live input is padded to hold the wall clock, so the files stay aligned with real time even when a device stalls.
@@ -174,7 +174,7 @@ The mic is rounded to 16-bit before the models see it, so `hark --file <stem>.mi
 Paused mic spans contain digital silence in the WAV; system audio remains untouched.
 This is how diarization changes get tested against real meetings.
 
-Audio is temporary. Each live start deletes `.wav` files under `~/.hark/sessions/` and `~/.hark/meetings/` that are older than 14 days (`AUDIO_RETENTION_DAYS` in `hark/cli.py`). Transcripts are never deleted. If writing audio fails (a full disk, say), the recording stops and the transcript carries on.
+Kept audio is temporary. Each live start deletes `.wav` files under `~/.hark/sessions/` and `~/.hark/meetings/` that are older than 14 days (`AUDIO_RETENTION_DAYS` in `hark/cli.py`). Transcripts are never deleted. If writing audio fails (a full disk, say), the recording stops and the transcript carries on.
 
 ## Session log
 

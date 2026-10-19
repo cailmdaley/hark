@@ -47,7 +47,7 @@ def test_startup_outage_keeps_actual_phone_wav_growing_then_recovers(monkeypatch
                 os.kill(os.getpid(), signal.SIGTERM)
         worker = threading.Thread(target=sender)
         worker.start()
-        assert cli.main(['--ear', 'gradium', '--phone', '--launch', 'test', '-o', str(home / 'meeting.txt')]) is None
+        assert cli.main(['--ear', 'gradium', '--phone', '--launch', 'test', '--keep-audio', '-o', str(home / 'meeting.txt')]) is None
         worker.join(3)
         assert not failures and not worker.is_alive()
         text = (home / 'meeting.txt').read_text()

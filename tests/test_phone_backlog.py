@@ -60,7 +60,7 @@ def test_overflow_tail_is_fully_recorded_before_error(monkeypatch):
         monkeypatch.setattr(cli, 'Track', Track)
         import pytest
         with pytest.raises(RuntimeError, match='capture backlog full'):
-            cli.main(['--ear', 'local', '--phone', '--launch', 'test', '-o', str(home / 'out.txt')])
+            cli.main(['--ear', 'local', '--phone', '--launch', 'test', '--keep-audio', '-o', str(home / 'out.txt')])
         with wave.open(str(home / 'out.phone.wav')) as wav:
             assert wav.getnframes() == 3200
             assert wav.readframes(3200) == b'\1\0' * 3200

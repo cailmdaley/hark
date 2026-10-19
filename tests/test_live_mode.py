@@ -71,7 +71,7 @@ def test_live_selection_diarizes_every_source_and_allocates_unique_slots(
     monkeypatch.setattr(cli, "flush_tracks", flush)
     out = tmp_path / "session.txt"
     signaller, _ = signal_when_live(tmp_path)
-    cli.main(mode + ["--ear", ear, "--launch", "test", "-o", str(out)])
+    cli.main(mode + ["--ear", ear, "--launch", "test", "--keep-audio", "-o", str(out)])
     signaller.join(2)
     assert not signaller.is_alive()
     assert [name for name, _ in made] == expected

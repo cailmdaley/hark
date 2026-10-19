@@ -115,7 +115,7 @@ def test_live_modes_feed_and_save_identical_gated_pcm_and_leave_system_untouched
     monkeypatch.setattr(cli, "load_models", lambda *_: (None, None))
     monkeypatch.setattr(cli, "flush_tracks", lambda *_, **__: [])
     out = tmp_path / "session.txt"
-    cli.main((["--room"] if room else []) + ["--ear", "local", "--launch", "test", "-o", str(out)])
+    cli.main((["--room"] if room else []) + ["--ear", "local", "--launch", "test", "--keep-audio", "-o", str(out)])
 
     original = np.concatenate(blocks)
     expected = original.copy()

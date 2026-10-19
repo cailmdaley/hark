@@ -140,9 +140,9 @@ Timestamp anomalies are clamped and logged, stray word ends are ignored, and une
 An embedding failure preserves the recognised text, keeps the previous speaker and disables clustering with a log warning.
 The embedder is warmed before capture, with at most four ONNX CPU threads.
 
-A private PCM16 archive in system temporary storage retains the full source clock for delayed recognition and voice matching, even with `--no-save-audio`.
+A private PCM16 archive in system temporary storage retains the full source clock for delayed recognition and voice matching, whether or not `--keep-audio` saves WAVs.
 It stays open through independent final track flushes and closes at the end of the meeting.
-A rolling source-clock buffer cannot cover old queued recognition across extended outages; the archive also supports naming when WAV saving is disabled.
+A rolling source-clock buffer cannot cover old queued recognition across extended outages; the archive also supports naming, since WAVs are not saved by default.
 The saved WAV is a separate, optional artifact.
 
 The session log records submitted audio seconds, including replay, and credit balances when the metering endpoint responds.

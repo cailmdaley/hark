@@ -43,6 +43,6 @@ def test_primary_capture_error_survives_cleanup_and_other_track_flushes(monkeypa
     monkeypatch.setattr(cli, 'SystemSource', System)
     monkeypatch.setattr(cli, 'Track', Track)
     with pytest.raises(RuntimeError) as error:
-        cli.main(['--call', '--ear', 'local', '--pause-for', 'none', '--no-save-audio', '-o', str(tmp_path / 'out.txt')])
+        cli.main(['--call', '--ear', 'local', '--pause-for', 'none', '-o', str(tmp_path / 'out.txt')])
     assert error.value is primary
     assert flushed == ['mic', 'system']

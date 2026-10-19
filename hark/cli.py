@@ -12,9 +12,9 @@
     hark pause [--status] | hark resume     mute the live session's mic, and unmute it
     hark processes                          list CoreAudio processes and their input flags
 
-Live capture keeps each track beside the transcript as <stem>.mic.wav and
-<stem>.system.wav (or <stem>.phone.wav) (16 kHz mono 16-bit PCM, t = 0 at the track's first sample,
-replayable with --file); --no-save-audio opts out. At startup, saved audio under
+Live capture keeps no audio by default; --keep-audio saves each track beside the
+transcript as <stem>.mic.wav and <stem>.system.wav (or <stem>.phone.wav) (16 kHz mono
+16-bit PCM, t = 0 at the track's first sample, replayable with --file). At startup, saved audio under
 ~/.hark/meetings and ~/.hark/sessions older than 14 days is deleted; transcripts
 are kept.
 
@@ -275,8 +275,8 @@ def main(argv=None):
     ap.add_argument("--mirror", help="append the transcript to HOST:PATH over SSH")
     ap.add_argument("-o", "--out", type=Path, help="write the transcript here instead of ~/.hark/sessions/")
     ap.add_argument("--launch", help="launcher's id for this recording, echoed into meeting.json")
-    ap.add_argument("--no-save-audio", dest="save_audio", action="store_false",
-                    help="don't keep the live tracks as <stem>.<track>.wav beside the transcript")
+    ap.add_argument("--keep-audio", dest="save_audio", action="store_true",
+                    help="keep the live tracks as <stem>.<track>.wav beside the transcript")
     args = ap.parse_args(argv)
     args.ear = args.ear or _default_ear()
     if args.ear == "gradium":

@@ -70,7 +70,7 @@ They're combined the way NVIDIA's integration guide describes. The diarizer deci
 
 **The Gradium ear** sends gated speech to [Gradium](https://gradium.ai)'s streaming speech-to-text API. hark identifies speakers locally, by grouping [WeSpeaker](https://github.com/wenet-e2e/wespeaker) voice embeddings computed on the CPU. It runs on Linux machines without a GPU or audio devices, which makes it suitable for an always-on server receiving a phone's audio. Its speaker labels are coarser than the local ear's (one speaker per phrase), and audio leaves the machine.
 
-Both ears share everything else: the transcript format, saved audio, voice enrollment and naming, lost-source markers, and mirroring the transcript to another machine over SSH.
+Both ears share everything else: the transcript format, optional saved audio (`--keep-audio`), voice enrollment and naming, lost-source markers, and mirroring the transcript to another machine over SSH.
 [docs/how-it-works.md](docs/how-it-works.md) has the full pipeline, including how turns are formed, how voices are matched and how changes are evaluated against real meetings.
 
 ## Install and run

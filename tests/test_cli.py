@@ -449,7 +449,7 @@ def tone(freq, n):
     return on_pcm16_grid((0.25 * np.sin(2 * np.pi * freq * np.arange(n) / 16000)).astype(np.float32))
 
 
-def test_room_saves_the_mic_track_by_default_sample_for_sample(tmp_path, monkeypatch):
+def test_room_keeps_the_mic_track_sample_for_sample(tmp_path, monkeypatch):
     cli, Source = fake_live_capture(monkeypatch, tmp_path)
     mic = tone(440, 8000)
     Mic, fed = feed_chunks(Source, "mic", [mic[:5000], mic[5000:]])
@@ -457,7 +457,7 @@ def test_room_saves_the_mic_track_by_default_sample_for_sample(tmp_path, monkeyp
     signaller, _ = signal_when_live(tmp_path)
     out = tmp_path / "sessions" / "phrase.txt"
 
-    cli.main(["--ear", "local", "--launch", "test", "--room", "-o", str(out)])
+    cli.main(["--ear", "local", "--launch", "test", "--room", "--keep-audio", "-o", str(out)])
     signaller.join(timeout=2)
 
     assert sorted(p.name for p in out.parent.glob("*.wav")) == ["phrase.mic.wav"]
@@ -480,7 +480,7 @@ def test_phone_listens_on_the_hark_dir_socket_and_saves_a_phone_track(tmp_path, 
     signaller, _ = signal_when_live(tmp_path)
     out = tmp_path / "sessions" / "walk.txt"
 
-    cli.main(["--ear", "local", "--launch", "test", "--phone", "-o", str(out)])
+    cli.main(["--ear", "local", "--launch", "test", "--phone", "--keep-audio", "-o", str(out)])
     signaller.join(timeout=2)
 
     state = json.loads((tmp_path / "meeting.json").read_text())
@@ -501,7 +501,7 @@ def test_live_saves_mic_and_system_tracks_each_with_its_own_samples(tmp_path, mo
     signaller, _ = signal_when_live(tmp_path)
     out = tmp_path / "meetings" / "call.txt"
 
-    cli.main(mode + ["--ear", "local", "-o", str(out)])
+    cli.main(mode + ["--ear", "local", "--keep-audio", "-o", str(out)])
     signaller.join(timeout=2)
 
     assert np.array_equal(read_wav(out.with_suffix(".mic.wav")), np.concatenate(mic_fed))
@@ -509,15 +509,13 @@ def test_live_saves_mic_and_system_tracks_each_with_its_own_samples(tmp_path, mo
     assert read_wav(out.with_suffix(".system.wav")).size == 5000
 
 
-def test_no_save_audio_opts_out_and_a_file_is_never_rerecorded(tmp_path, monkeypatch):
+def test_audio_is_not_kept_by_default(tmp_path, monkeypatch):
     cli, _ = fake_live_capture(monkeypatch, tmp_path)
     signaller, _ = signal_when_live(tmp_path)
     out = tmp_path / "sessions" / "quiet.txt"
-    cli.main(["--ear", "local", "--launch", "test", "--room", "--no-save-audio", "-o", str(out)])
+    cli.main(["--ear", "local", "--launch", "test", "--room", "-o", str(out)])
     signaller.join(timeout=2)
     assert not list(out.parent.glob("*.wav"))
-    with pytest.raises(SystemExit):
-        cli.main(["--ear", "local", "--room", "--save-audio", "-o", str(out)])
 
 
 def test_saved_audio_replays_bit_for_bit_through_the_file_loader(tmp_path):
