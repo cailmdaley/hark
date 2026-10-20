@@ -476,7 +476,7 @@ def main(argv=None):
                                              realtime=live or args.realtime, voices=voices)
                            if args.ear == "gradium" else
                            Track(src.name, asr, diar, speaker_label=label,
-                                 language=args.lang, gap=args.gap, mask=mask))
+                                 language=args.lang, gap=args.gap, mask=mask, stop=stop))
                           for src, label in sources]
                 all_tracks = [track for _, track in tracks]
                 if not voices and args.ear == "local":

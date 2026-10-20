@@ -72,8 +72,9 @@ class Track:
     """One audio stream through its own speaker-streaming session."""
 
     def __init__(self, name, asr, diar, *, speaker_label, language=None, gap=3.0, max_len=30.0,
-                 mask=None):
+                 mask=None, stop=None):
         self.name = name
+        self.stop = stop  # once set, all-zero padding is skipped so shutdown never waits on silence
         if mask:
             from .session import GatedSession
 
@@ -99,7 +100,10 @@ class Track:
     def feed(self, samples, final=False):
         step = SAMPLE_RATE // 2  # feed in bounded chunks even when a source has a backlog
         for i in range(0, samples.size, step):
-            self._step(samples[i : i + step])
+            chunk = samples[i : i + step]
+            if self.stop is not None and self.stop.is_set() and not chunk.any():
+                continue
+            self._step(chunk)
         if final:
             self._step(samples[:0], final=True)
 
