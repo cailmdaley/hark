@@ -33,6 +33,8 @@ SAMPLE_RATE = 16000
 BLOCK = SAMPLE_RATE // 10  # 100 ms
 AUDIOTEE = Path(os.environ.get("HARK_AUDIOTEE", Path(__file__).parent.parent / "bin" / "audiotee"))
 STALL_SEC = 5.0
+JUMP_SEC = 30.0  # a wall-clock deficit this large is a suspend or stall, not jitter: skip it
+JUMP_PAD = 5.0  # silence still fed after a skip, so pending speech closes before the timeline moves
 LATE_OK = 1.0  # a device may run this far behind the wall clock before we pad
 SOUND = 1e-4  # peak amplitude above digital silence
 
@@ -85,6 +87,7 @@ class Source:
         self.heard = None  # (samples drained, wall time the last of them arrived)
         self.stats = _no_stats()
         self.error = None
+        self.jump = 0.0  # seconds of wall time skipped since the last `take_jump`
 
     def start(self):
         self.anchor = self.last_audio = self.last_sound = time.time()
@@ -115,6 +118,11 @@ class Source:
         stats, self.stats = self.stats, _no_stats()
         return stats
 
+    def take_jump(self):
+        """Seconds of wall time `drain` skipped since the last call."""
+        jump, self.jump = self.jump, 0.0
+        return jump
+
     def drain(self, limit=2 * SAMPLE_RATE):
         """Samples since the last call, up to about `limit`, padded to the wall clock."""
         if self.error and self.queue.empty():
@@ -136,6 +144,13 @@ class Source:
                 behind = (time.time() - self.anchor) * SAMPLE_RATE - self.delivered - got
             else:
                 behind = 0
+            if behind > JUMP_SEC * SAMPLE_RATE:
+                skipped = behind - JUMP_PAD * SAMPLE_RATE
+                self.anchor += skipped / SAMPLE_RATE
+                self.jump += skipped / SAMPLE_RATE
+                behind -= skipped
+                log(f"{self.name}: wall clock ran {skipped / SAMPLE_RATE:.0f} s ahead of the audio "
+                    "(system sleep?); skipping the gap")
             if behind > LATE_OK * SAMPLE_RATE:
                 blocks.append(np.zeros(int(behind - LATE_OK * SAMPLE_RATE / 2), np.float32))
                 self.stats["padded"] += blocks[-1].size

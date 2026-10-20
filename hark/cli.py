@@ -34,7 +34,7 @@ import sys
 import tempfile
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from .capture import (AUDIOTEE, SAMPLE_RATE, FileSource, MicSource, PhoneSource, SystemSource, WavRecorder,
@@ -359,11 +359,15 @@ def main(argv=None):
     capture_error = None
     lost_ears = set()
 
+    deferred_jumps = {}
+
     def feed_sources(final=False):
         import numpy as np
 
         drained, errors = {}, []
         for src, track in started_tracks:
+            if deferred_jumps.get(src):
+                track.t0 += timedelta(seconds=deferred_jumps.pop(src))
             samples = np.zeros(0, np.float32)
             try:
                 samples = src.drain(limit=float("inf") if final else SAMPLE_RATE // 2)
@@ -376,6 +380,8 @@ def main(argv=None):
                     errors.append(error)
                     samples = np.zeros_like(samples)  # A broken mute gate must not expose speech.
             drained[src.name] = samples
+            if jump := getattr(src, "take_jump", float)():
+                deferred_jumps[src] = jump  # applied next call, after this audio's speech has flushed
         busy = any(samples.size for samples in drained.values())
         if aec:
             try:
