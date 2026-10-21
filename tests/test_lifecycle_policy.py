@@ -37,6 +37,7 @@ def capture(monkeypatch, tmp_path):
         name = "phone"
         anchor = time.time()
         last_audio = last_sound = anchor
+        has_sound = False
 
         def __init__(self, *args, **kwargs):
             self.done = threading.Event()

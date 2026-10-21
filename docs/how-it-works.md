@@ -42,7 +42,12 @@ System and phone audio are neither delayed nor muted, and the lost-source watch 
 
 Default live capture opens the mic and system audio when the audiotee path is an executable file on a supported macOS host.
 Without that executable, hark warns and uses only the mic; it doesn't probe recording permissions.
-`--room` selects mic only, `--phone` selects the socket input only, and hidden `--call` is a compatibility alias for the default.
+Default capture serves all desktop meetings, including in-person meetings; `--phone` selects the socket input for mobile meetings.
+Hidden `--call` is a compatibility alias for the default.
+A system track delivering digital silence is exempt from silence-based loss until it has carried sound (peak > 1e-4) in the current session.
+After that, 90 s of silence while another track has a recent utterance can mark it lost.
+No device samples for 90 s always marks a live track lost, even if it has never carried sound.
+Recovery requires sound above the same threshold; padding and resumed zero samples don't count.
 Both ears diarize each track independently; no track has a fixed `me` speaker.
 A voice captured by both tracks can receive two slots.
 AEC suppresses loudspeaker leakage without merging speaker identities.

@@ -6,6 +6,7 @@ from datetime import datetime
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 
 from hark.health import QUIET_SEC, Quiet, QuietWatch
 from hark.transcript import Sink
@@ -15,7 +16,7 @@ T0 = datetime(2026, 9, 29, 16, 37, 55).timestamp()
 
 def test_no_signal_goes_quiet_unconditionally_from_the_last_delivery():
     watch = QuietWatch()
-    sources = {"mic": (T0, T0)}
+    sources = {"mic": (T0, T0, False)}
     assert watch.check(T0 + QUIET_SEC - 1, sources, {}) == []
     assert watch.check(T0 + QUIET_SEC, sources, {}) == [Quiet("mic", "silent", T0, "no signal")]
 
@@ -23,7 +24,7 @@ def test_no_signal_goes_quiet_unconditionally_from_the_last_delivery():
 def test_digital_silence_counts_only_while_another_track_speaks():
     watch = QuietWatch()
     now = T0 + 100
-    sources = {"system": (now, T0)}  # samples keep arriving, all zeros
+    sources = {"system": (now, T0, True)}  # sound earlier, now only zeros
     assert watch.check(now, sources, {}) == []
     assert watch.check(now, sources, {"system": now - 5}) == []  # its own track doesn't count
     assert watch.check(now, sources, {"mic": now - QUIET_SEC - 1}) == []  # too long ago
@@ -33,21 +34,150 @@ def test_digital_silence_counts_only_while_another_track_speaks():
 def test_both_sources_silent_in_a_lull_is_not_a_marker():
     watch = QuietWatch()
     now = T0 + 600
-    sources = {"mic": (now, T0), "system": (now, T0)}
+    sources = {"mic": (now, T0, False), "system": (now, T0, False)}
     assert watch.check(now, sources, {"mic": T0 - 10, "system": T0 - 20}) == []
 
 
 def test_one_marker_per_episode_then_back_then_a_new_episode():
     watch = QuietWatch()
     events = [e for now in np.arange(T0, T0 + 900, 0.5)
-              for e in watch.check(now, {"system": (T0, T0)}, {"mic": now})]
+              for e in watch.check(now, {"system": (T0, T0, False)}, {"mic": now})]
     assert events == [Quiet("system", "silent", T0, "no signal")]
     back = T0 + 855
-    assert watch.check(back + 1, {"system": (back, back)}, {}) == [
+    assert watch.check(back + 1, {"system": (back, back, True)}, {}) == [
         Quiet("system", "back", T0, "no signal", back)]
-    assert watch.check(back + 2, {"system": (back + 2, back)}, {}) == []
-    assert watch.check(back + QUIET_SEC, {"system": (back + QUIET_SEC, back)}, {"mic": back + 80}) == [
+    assert watch.check(back + 2, {"system": (back + 2, back, True)}, {}) == []
+    assert watch.check(back + QUIET_SEC, {"system": (back + QUIET_SEC, back, True)}, {"mic": back + 80}) == [
         Quiet("system", "silent", back, "silence")]
+
+
+def test_never_audible_system_stays_healthy_despite_continued_mic_utterances(monkeypatch):
+    from hark.capture import Source
+
+    clock = [T0]
+    monkeypatch.setattr("hark.capture.time.time", lambda: clock[0])
+    src = Source("system")
+    monkeypatch.setattr(src, "_open", lambda: None)
+    src.start()
+    watch = QuietWatch()
+
+    def check():
+        return watch.check(clock[0], {src.name: (src.last_audio, src.last_sound, src.has_sound)},
+                           {"mic": clock[0]})
+
+    for elapsed in range(0, 601, 15):
+        clock[0] = T0 + elapsed
+        src._deliver(np.zeros(16, np.float32))
+        assert check() == []
+    assert not src.has_sound and watch.open == {}
+
+    # Actual device sound arms the silence heuristic for the rest of the session.
+    clock[0] += 1
+    src._deliver(np.full(16, .01, np.float32))
+    heard = clock[0]
+    assert src.has_sound and check() == []
+    for elapsed in range(1, 90):
+        clock[0] = heard + elapsed
+        src._deliver(np.zeros(16, np.float32))
+        assert check() == []
+    clock[0] = heard + QUIET_SEC
+    src._deliver(np.zeros(16, np.float32))
+    assert check() == [Quiet("system", "silent", heard, "silence")]
+    clock[0] += QUIET_SEC
+    src._deliver(np.zeros(16, np.float32))
+    assert check() == []  # no duplicate loss, and zeros aren't recovery
+    clock[0] += 1
+    src._deliver(np.full(16, -.01, np.float32))
+    assert check() == [Quiet("system", "back", heard, "silence", clock[0])]
+    clock[0] += QUIET_SEC
+    src._deliver(np.zeros(16, np.float32))
+    assert check() == [Quiet("system", "silent", heard + QUIET_SEC * 2 + 1, "silence")]
+
+
+@pytest.mark.parametrize("has_sound", [False, True])
+def test_system_no_samples_is_lost_even_without_prior_sound_and_needs_sound_to_recover(has_sound):
+    watch = QuietWatch()
+    sources = {"system": (T0, T0, has_sound)}
+    assert watch.check(T0 + QUIET_SEC - .01, sources, {}) == []
+    assert watch.check(T0 + QUIET_SEC, sources, {}) == [
+        Quiet("system", "silent", T0, "no signal")]
+    # A resumed stream of zeros is not recovery, nor another loss event.
+    assert watch.check(T0 + 200, {"system": (T0 + 200, T0, has_sound)}, {"mic": T0 + 200}) == []
+    assert watch.check(T0 + 201, {"system": (T0 + 201, T0 + 201, True)}, {}) == [
+        Quiet("system", "back", T0, "no signal", T0 + 201)]
+
+
+@pytest.mark.parametrize("track", ["mic", "phone"])
+def test_never_audible_other_tracks_still_use_silence_heuristic(track):
+    watch = QuietWatch()
+    now = T0 + QUIET_SEC
+    assert watch.check(now, {track: (now, T0, False)}, {"system": now}) == [
+        Quiet(track, "silent", T0, "silence")]
+
+
+@pytest.mark.parametrize("peak,audible", [
+    (0., False),
+    (np.nextafter(1e-4, 0.), False),
+    (1e-4, False),
+    (np.nextafter(1e-4, np.inf), True),
+    (-1e-4, False),
+    (-np.nextafter(1e-4, np.inf), True),
+])
+def test_source_sound_threshold_is_strict_and_session_scoped(monkeypatch, peak, audible):
+    from hark.capture import Source
+
+    clock = [T0]
+    monkeypatch.setattr("hark.capture.time.time", lambda: clock[0])
+    src = Source("system")
+    monkeypatch.setattr(src, "_open", lambda: None)
+    src.start()
+    clock[0] += 1
+    src._deliver(np.array([peak], dtype=np.float64))
+    assert src.has_sound is audible
+    assert src.last_sound == (clock[0] if audible else T0)
+    clock[0] += 1
+    src._deliver(np.zeros(1, np.float32))
+    assert src.has_sound is audible  # silence doesn't disarm a previously audible source
+    clock[0] = T0 + 100
+    src._deliver(np.zeros(1, np.float32))
+    assert QuietWatch().check(clock[0], {
+        "system": (src.last_audio, src.last_sound, src.has_sound)}, {"mic": clock[0]}) == (
+            [Quiet("system", "silent", src.last_sound, "silence")] if audible else [])
+    src.start()
+    assert not src.has_sound  # sound in another session doesn't arm this one
+
+
+def test_system_startup_silence_message_is_conditional_and_once(monkeypatch, tmp_path):
+    from hark import capture
+
+    tap = tmp_path / "audiotee"
+    tap.touch()
+    monkeypatch.setattr(capture, "AUDIOTEE", tap)
+    clock = [T0]
+    monkeypatch.setattr(capture.time, "time", lambda: clock[0])
+    messages = []
+    monkeypatch.setattr(capture, "log", messages.append)
+    src = capture.SystemSource()
+    monkeypatch.setattr(src, "_open", lambda: None)
+    src.start()
+    src._check_silence()
+    assert messages == []
+    clock[0] += 21
+    src._deliver(np.zeros(16, np.float32))
+    src._check_silence()
+    src._check_silence()
+    assert len(messages) == 1
+    assert "expected if nothing is playing" in messages[0]
+    assert "If playback is missing, check" in messages[0]
+    assert "System Audio Recording Only" in messages[0]
+
+    # Even sound at the start timestamp counts; timestamp equality isn't evidence of silence.
+    src.start()
+    src.warned = False
+    src._deliver(np.full(16, .01, np.float32))
+    clock[0] += 21
+    src._check_silence()
+    assert len(messages) == 1
 
 
 def test_sink_writes_marker_lines_and_records_without_touching_names(tmp_path):
@@ -79,10 +209,10 @@ def test_padding_is_not_device_audio(monkeypatch):
     src = Source("mic")
     src.anchor = src.last_audio = src.last_sound = time.time() - 3
     src._deliver(np.zeros(1600, np.float32))
-    assert src.last_sound == src.anchor
+    assert src.last_sound == src.anchor and not src.has_sound
     src._deliver(np.full(1600, 0.01, np.float32))
     heard = src.last_sound
-    assert heard > src.anchor
+    assert heard > src.anchor and src.has_sound
     src.last_audio = src.last_sound = src.anchor  # the device then falls silent for 3 s
     padded = src.drain()
     assert padded.size > SAMPLE_RATE and (src.last_audio, src.last_sound) == (src.anchor, src.anchor)

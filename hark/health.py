@@ -4,6 +4,8 @@ A source is quiet after QUIET_SEC with either
   - no signal: the device delivered nothing (a stalled or restarting tap, a vanished mic); or
   - silence: it delivered only digital silence while another track produced an utterance
     within the last QUIET_SEC, so a quiet room or a lull in the meeting never counts.
+    System audio must have carried sound in this session before silence counts as loss;
+    a tap delivering silence throughout an in-person meeting is expected.
 It is back once it delivers sound again. Each episode yields one "silent" and at most one
 "back" event; an episode still open when the session ends stays open.
 """
@@ -28,20 +30,20 @@ class QuietWatch:
         self.open = {}  # track -> (since, cause)
 
     def check(self, now, sources, spoken):
-        """`sources`: {track: (last_audio, last_sound)}; `spoken`: {track: wall end of its last
+        """`sources`: {track: (last_audio, last_sound, has_sound)}; `spoken`: {track: wall end of its last
         utterance}. Returns the events since the previous call."""
         events = []
-        for track, (audio, sound) in sources.items():
+        for track, (audio, sound, has_sound) in sources.items():
             if track in self.open:
                 since, cause = self.open[track]
-                if sound > since:
+                if has_sound and sound > since:
                     del self.open[track]
                     events.append(Quiet(track, "back", since, cause, sound))
                 continue
             others = any(end > now - self.quiet for other, end in spoken.items() if other != track)
             if now - audio >= self.quiet:
                 self.open[track] = audio, "no signal"
-            elif now - sound >= self.quiet and others:
+            elif (track != "system" or has_sound) and now - sound >= self.quiet and others:
                 self.open[track] = sound, "silence"
             else:
                 continue

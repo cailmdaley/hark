@@ -42,7 +42,7 @@ Every other line starts with `# `:
 
 | Line | Meaning |
 |---|---|
-| `# hark 2026-09-24 19:34 — live: mic + system audio diarized as S1…` | Header: start time and selected sources. Mic-only capture (`--room` or unavailable system tap) says `room: mic diarized as S1…`, phone mode `phone: the phone's mic diarized as S1…`, a replay `file <path>`. The hidden `--call` alias uses the same header as default capture |
+| `# hark 2026-09-24 19:34 — live: mic + system audio diarized as S1…` | Header: start time and selected sources. Mic-only fallback (unavailable system tap) says `room: mic diarized as S1…`, phone mode `phone: the phone's mic diarized as S1…`, a replay `file <path>`. The hidden `--call` alias uses the same header as default capture |
 | `# S2 = Ada` | From here on, slot S2 is Ada. The latest line for a slot wins. Apply it to earlier lines from that slot too |
 | `# S2 = S2` | S2 is anonymous again |
 | `# system audio lost at 16:37:55 — no signal from the tap; nothing from the call is being transcribed` | A live source stopped delivering audio. The time is when it went quiet |
@@ -89,7 +89,18 @@ One JSON object per line. Every record has `wall`, an ISO-8601 local timestamp t
 {"wall": "...", "source": {"track": "system", "state": "back", "since": "2026-09-24T16:37:55", "cause": "no signal", "back": "2026-09-24T16:52:10"}}
 ```
 
-`cause` is `no signal` (the device delivered nothing) or `silence` (it delivered only digital silence while another track had speech).
+`cause` is `no signal` (no device samples for 90 s) or `silence` (only digital silence, peak ≤ 1e-4, for 90 s while another track produced an utterance within the last 90 s).
+For system audio, `silence` can mark loss only after the track has carried sound with peak > 1e-4 in this session.
+A system track delivering silence throughout an in-person desktop meeting stays unmarked even while mic utterances continue.
+The `no signal` rule still applies to that track if samples stop for 90 s, regardless of prior sound.
+Mic and phone tracks don't require prior sound for `silence` loss.
+Once system audio has carried sound, it follows the ordinary loss rules for the rest of the session.
+Each episode yields one `silent` record and at most one `back` record; recovery requires device sound with peak > 1e-4.
+Resumed zero samples and generated padding don't recover a source, and padding doesn't count as device delivery.
+A recovered source can have a new loss episode; a session ending with a source still lost has no `back` record.
+File replays never produce source-health records.
+
+Default desktop capture includes both mic and system audio when available, including for in-person meetings; mobile meetings use phone capture.
 
 **Microphone pause**
 

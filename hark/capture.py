@@ -84,6 +84,7 @@ class Source:
         self.delivered = 0  # samples handed to the caller, padding included
         self.last_audio = None  # wall-clock time the device last delivered
         self.last_sound = None  # ... and last delivered a block above digital silence
+        self.has_sound = False  # whether any device block exceeded SOUND this session
         self.heard = None  # (samples drained, wall time the last of them arrived)
         self.stats = _no_stats()
         self.error = None
@@ -91,6 +92,7 @@ class Source:
 
     def start(self):
         self.anchor = self.last_audio = self.last_sound = time.time()
+        self.has_sound = False
         self.heard = 0, self.anchor
         self._open()
 
@@ -100,6 +102,7 @@ class Source:
         peak = float(np.abs(samples).max()) if samples.size else 0.0
         if peak > SOUND:
             self.last_sound = now
+            self.has_sound = True
         self.stats["device"] += samples.size
         self.stats["peak"] = max(self.stats["peak"], peak)
         with self.queue_lock:
@@ -340,10 +343,11 @@ class SystemSource(PCMProcessSource):
         self.warned = False
 
     def _check_silence(self):
-        if not self.warned and self.last_sound == self.anchor and time.time() - self.anchor > 20:
-            log("system audio is pure silence after 20 s. If something is playing, grant "
-                "your terminal System Settings → Privacy & Security → Screen & System "
-                "Audio Recording → 'System Audio Recording Only', then restart the terminal.")
+        if not self.warned and not self.has_sound and time.time() - self.anchor > 20:
+            log("system audio has been silent for 20 s; this is expected if nothing is playing. "
+                "If playback is missing, check your terminal's permission in System Settings → "
+                "Privacy & Security → Screen & System Audio Recording → "
+                "'System Audio Recording Only'; after changing it, restart the terminal.")
             self.warned = True
 
     def _stderr(self, proc):

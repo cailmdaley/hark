@@ -44,15 +44,14 @@ hark listens to up to two audio sources and labels speakers within each.
   In-process WebRTC acoustic echo cancellation (AEC) uses the captured system track to suppress playback leaking into the raw mic.
   Both tracks are separated into speakers, with unique numbered slots across the session, including you.
   If the tap executable isn't available, hark logs a warning and uses the mic alone.
-- **Mic only** (`--room`) separates everyone the microphone hears into speakers.
-  Use it when you don't want computer audio captured, including a call played on speakers and heard through the room.
+  Use default capture for all desktop meetings, including in-person meetings; a system track delivering silence throughout the session isn't marked lost unless samples stop arriving for 90 seconds.
 - **With a phone as the microphone** (`--phone`), raw audio arrives on a local socket and is separated the same way.
   This is useful when the laptop is in the wrong place.
 
 The two tracks are diarized independently: the same voice heard on both can occupy two slots.
 AEC runs in software, without changing the device's processing mode, output volume or routing, and works with explicit `--mic` devices too.
 Mic audio waits two seconds for reference alignment; nearly identical overlapping mic/system utterances are deduplicated, with drops logged.
-Room capture, enrollment and mic-only fallback use raw input.
+Phone capture, enrollment and mic-only fallback use raw input.
 Echo suppression doesn't guarantee near-end speech survives simultaneous remote speech; headphones remain the most reliable option for that.
 The [device measurement and guarded probe](docs/aec.md) document measured leakage, reproduction steps and limits.
 No source is labelled `me` automatically.
@@ -87,8 +86,8 @@ Grant your terminal the **Microphone** permission, plus **Screen & System Audio 
 Without the second permission, the call side comes through as silence.
 
 ```bash
-hark                          # mic + system audio when available, both diarized
-hark --room                   # mic only, everyone diarized
+hark                          # desktop meeting, including in person: mic + system when available
+hark --phone                  # mobile meeting, phone microphone
 hark --file talk.m4a          # an existing recording
 hark name S2 Ada              # name a speaker in the live session
 hark enroll Ada --file ada.wav  # enroll a voice (≥ 5 s) for automatic naming
@@ -116,7 +115,7 @@ In Claude Code, the `Monitor` tool on that command delivers new lines to the age
 hark stands on its own, but it was built alongside [Shuttle](https://cailmdaley.github.io/felt/shuttle/), an orchestration app for running coding agents against written tasks, with a board for following their work ([source](https://github.com/cailmdaley/felt)).
 In Shuttle, a meeting is just another way to start an agent:
 
-- **Meetings from the board.** The board's Capture form has a Meeting toggle (Call, Room or Phone).
+- **Meetings from the board.** The board's Capture form has a single Meeting toggle: Call capture for all desktop meetings, including in-person meetings, and Phone capture on mobile.
   A meeting can also be attached to an existing task's card.
   Shuttle starts hark on the Mac and launches an agent with the transcript path in its instructions.
   The card shows the meeting's duration and latest lines, with a Stop button.

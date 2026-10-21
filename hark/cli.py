@@ -1,8 +1,7 @@
 """hark — capture a conversation, append one speaker-labelled line per utterance.
 
-    hark                 mic + system audio when available, both diarized as S1…
-    hark --room          mic only, diarized as S1…
-    hark --phone         in person, a phone as the mic: PCM into ~/.hark/phone.sock, diarized
+    hark                 desktop meeting (including in person): mic + system audio when available
+    hark --phone         mobile meeting: phone PCM into ~/.hark/phone.sock, diarized
     hark --file x.wav    transcribe a file through the same streaming path
 
     hark name S2 "Ada" [--session PATH]     name a diarized speaker in the live session
@@ -21,7 +20,9 @@ are kept.
 The live transcript is ~/.hark/current.txt (a symlink to the transcript file);
 follow it with `tail -F`. A JSONL sidecar sits beside it, and <stem>.log keeps
 hark's own log, timestamped, with a heartbeat per live source each minute.
-A live source that goes quiet for 90 s gets a `# … lost at …` line.
+A live source missing samples for 90 s gets a `# … lost at …` line.
+Digital silence counts only while another track speaks; system audio must first
+have carried sound in this session.
 The mic is muted while a dictation app records (--pause-for, default aquavoice,aqua-voice).
 """
 
@@ -249,7 +250,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(prog="hark", description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     mode = ap.add_mutually_exclusive_group()
-    mode.add_argument("--room", action="store_true", help="mic only, diarized")
+    mode.add_argument("--room", action="store_true", help=argparse.SUPPRESS)
     mode.add_argument("--call", action="store_true", help=argparse.SUPPRESS)
     mode.add_argument("--phone", action="store_true",
                       help="a phone as the mic: listen for s16le 16 kHz PCM on ~/.hark/phone.sock, diarized")
@@ -282,7 +283,7 @@ def main(argv=None):
     if args.ear == "gradium":
         from . import gradium
     if not _device_capture_available() and not (args.phone or args.file):
-        ap.error("call/room capture requires macOS audio devices; on Linux use --phone or --file")
+        ap.error("desktop capture requires macOS audio devices; on Linux use --phone or --file")
     if args.ear == "local" and _default_ear() != "local":
         ap.error("the local ear requires MLX on Apple Silicon; use --ear gradium")
     if args.realtime and not args.file:
@@ -557,7 +558,7 @@ def main(argv=None):
                     for track in all_tracks:
                         track.check()
                 if watch:
-                    for event in watch.check(time.time(), {src.name: (src.last_audio, src.last_sound)
+                    for event in watch.check(time.time(), {src.name: (src.last_audio, src.last_sound, src.has_sound)
                                                            for src in started_sources}, spoken):
                         sink.source(event)
                     if time.monotonic() >= beat:

@@ -3,35 +3,38 @@
 ## Modes
 
 ```bash
-hark                  # mic + system audio when available, both diarized as S1…
-hark --room           # mic only, everyone diarized
-hark --phone          # in person, a phone as the mic: PCM arrives on a socket, diarized
+hark                  # desktop meeting, including in person: mic + system audio when available
+hark --phone          # mobile meeting: phone PCM arrives on a socket, diarized
 hark --file x.m4a     # a recording through the same streaming path (about 0.15× real time)
 hark --file x.wav --realtime   # replay at real-time pace, e.g. to test an agent against it
 ```
 
 `--ear local|gradium` selects the recognition backend.
 The default is local when MLX is importable, otherwise Gradium.
-Linux supports phone and file input; call/room devices and microphone enrollment require macOS.
+Linux supports phone and file input; desktop audio devices and microphone enrollment require macOS.
 Explicit `--ear local` requires MLX.
 Gradium can use Mac audio devices too; both ears diarize every captured track.
 
-Default live capture listens to the mic and everything the Mac plays (Zoom, Meet, a video).
+Default live capture is for all desktop meetings, including in-person meetings.
+It listens to the mic and everything the Mac plays (Zoom, Meet, a video).
+The board uses Call capture for desktop meetings and Phone capture for mobile meetings.
 Every speaker gets a numbered slot, you included, with unique slots across the two tracks.
 Each track is diarized independently, so a voice heard on both tracks can occupy two slots.
 Software acoustic echo cancellation (AEC) uses the captured system track to suppress playback picked up by the microphone, including an explicit `--mic` device.
 It adds two seconds of mic buffering for alignment; residual mic copies of overlapping system utterances are dropped when their text closely matches.
 AEC doesn't change device modes or output volume, but simultaneous near-end speech can still lose words; see the [measurements and limits](aec.md).
-`--room` uses the mic alone, suitable for an in-person meeting or a call heard through the room.
+In an in-person meeting with nothing playing, the system track can stay silent for the whole session without being marked lost.
 `--call` is a hidden compatibility alias for default live capture, accepted for launchers; it doesn't change attribution or require headphones.
 
 System capture is available when macOS device capture is supported and the audiotee path is an executable file.
 If not, default capture logs a warning and uses the mic alone; build the tap with `scripts/build-audiotee.sh` or set `HARK_AUDIOTEE` to an executable.
 Permissions aren't probed by this check: a tap without System Audio Recording permission can still deliver silence.
-Check the session log and lost-source markers if system audio is missing.
+Check the session log if playback is missing; a system track that has never carried sound won't get a digital-silence lost marker.
+The one-time 20 s silence message notes that silence is expected when nothing is playing and suggests checking permissions only if playback is missing.
+This diagnostic is conditional because silence alone doesn't establish a permission failure.
 
 AEC is installed with hark through the LiveKit Python package; no mic helper needs building.
-`--room`, `--phone`, files, enrollment and mic-only fallback have no AEC or cross-track deduplication.
+Phone capture, files, enrollment and mic-only capture have no AEC or cross-track deduplication.
 The mic always uses raw PortAudio capture; processing happens inside hark before recognition and optional WAV saving.
 
 Phone mode suits a room where the laptop's mic is in the wrong place. hark listens on `~/.hark/phone.sock` for raw 16 kHz mono s16le PCM; a relay writes it there, such as the Shuttle board's phone page, which streams the phone's mic over the tailnet. Anything that produces that PCM works too, for example `ffmpeg -i talk.m4a -f s16le -ac 1 -ar 16000 - | nc -U ~/.hark/phone.sock`. One sender at a time: a new connection replaces the old one. While nothing is connected hark records silence, and after 90 s the transcript says `# phone lost at …`. The track is saved as `<stem>.phone.wav`.
@@ -112,7 +115,6 @@ The [format contract](format.md) defines the text and JSONL records.
 
 | Option | Default | |
 |---|---|---|
-| `--room` | | capture only the mic, diarized |
 | `--phone` | | capture only PCM from the phone socket, diarized |
 | `--ear local\|gradium` | local if MLX imports, otherwise Gradium | recognition and speaker attribution backend |
 | `--no-gradium-metering` | | skip credit-balance requests |
@@ -165,7 +167,7 @@ The ASR and the saved mic WAV receive the same samples, with zeros for every pau
 ## Saved audio
 
 hark keeps no audio by default: transcripts are the record. With `--keep-audio`, a live session saves each captured track beside the transcript as 16 kHz mono 16-bit WAV: `<stem>.mic.wav` and, when system audio is enabled, `<stem>.system.wav`.
-`--room` saves only the mic; `--phone` saves `<stem>.phone.wav` instead.
+Mic-only fallback saves only the mic; `--phone` saves `<stem>.phone.wav` instead.
 Each file holds the full source track from its first sample.
 The local models receive those samples directly; Gradium receives gated spans of them, while its utterance offsets still index the complete WAV. JSONL `start`/`end` times are seconds into these files. Live input is padded to hold the wall clock, so the files stay aligned with real time even when a device stalls.
 
@@ -184,7 +186,18 @@ It's the first place to look when a transcript has a gap.
 
 ## Lost sources
 
-A live source is marked lost (see [format](format.md)) after 90 s in which the device either delivered no samples at all, or delivered only digital silence (peak ≤ 1e-4) while another track produced an utterance. A quiet room or a lull in the call therefore never counts. The rule is a heuristic, since a tap that runs but delivers zeros looks like a call where nobody else speaks. The heartbeat peaks in the log settle which one it was. Replays (`--file`) are never marked.
+A live source is marked lost (see [format](format.md)) after 90 s without any device samples, even if it has never carried sound.
+Padding generated by hark doesn't count as device samples.
+Digital silence (peak ≤ 1e-4) for 90 s also counts when another track produced an utterance within the last 90 s, with one exception: system audio must first have carried sound (peak > 1e-4) in this session.
+A system track delivering silence from session start is therefore not marked lost, even while the mic continues producing utterances during an in-person meeting.
+After the system track has carried sound, the ordinary silence rule applies for the rest of the session.
+Mic and phone tracks don't require prior sound for the silence rule.
+Each loss episode produces one marker; recovery requires device sound above the same strict threshold, not just resumed samples or padding.
+A later loss can open a new episode.
+A lull with no recent utterances on another track doesn't trigger digital-silence loss.
+The rule is a heuristic: silence alone can't distinguish missing playback from an intentionally quiet source.
+Heartbeat peaks in the session log help diagnose missing playback but don't establish whether recording permissions are correct.
+Replays (`--file`) are never marked.
 
 ## Mirroring and launchers
 

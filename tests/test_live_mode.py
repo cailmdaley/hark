@@ -186,10 +186,12 @@ def test_system_availability_checks_executable_without_opening_devices(tmp_path,
     assert not cli._system_capture_available()
 
 
-def test_call_is_accepted_but_hidden_from_help(capsys):
+def test_compatibility_modes_are_hidden_from_help_but_phone_remains_public(capsys):
     with pytest.raises(SystemExit) as error:
         cli.main(["--help"])
     assert error.value.code == 0
     help_text = capsys.readouterr().out
     assert "--call" not in help_text
-    assert "--room" in help_text and "mic + system audio" in help_text
+    assert "--room" not in help_text
+    assert "--phone" in help_text and "mic + system audio" in help_text
+    assert "including in person" in help_text

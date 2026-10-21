@@ -2,7 +2,7 @@
 
 Default mic + system capture applies WebRTC AEC3 inside hark, using audiotee's system track as the far-end reference.
 The mic is captured raw through PortAudio, including with `--mic DEV`; hark doesn't enable device-wide voice processing, change routing, or adjust output volume.
-`--room`, `--phone`, file replay, enrollment and mic-only fallback have no AEC.
+Phone capture, file replay, enrollment and mic-only capture have no AEC.
 The optional saved mic WAV contains exactly the processed, pause-muted PCM the models hear.
 
 ## Library and timing
