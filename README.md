@@ -32,7 +32,7 @@ hark takes the opposite approach.
 - **Live, not after the fact.** Lines land within seconds, so an agent can act during the meeting rather than summarise it afterwards.
 - **Speakers are part of the record.** Every line says who spoke. Names can be assigned mid-meeting (`hark name S2 Ada`), or matched automatically against voices you've enrolled.
 - **Local by default.** On Apple Silicon, recognition and speaker separation run entirely on the laptop. No audio leaves the machine, and nothing costs money per minute.
-- **Honest about gaps.** If a microphone or the call audio goes silent, the transcript says so (`# system audio lost at 16:37:55`), so a reader doesn't take a gap for silence.
+- **Honest about gaps.** If a microphone or the call audio stops delivering samples for 90 seconds, the transcript says so (`# system audio lost at 16:37:55`), so a reader doesn't take a gap for silence.
 
 The format is a small, documented contract ([docs/format.md](docs/format.md)). Beside the text file sits a JSONL file carrying the same lines as structured records, with exact start and end times, speaker and audio source.
 
@@ -44,7 +44,8 @@ hark listens to up to two audio sources and labels speakers within each.
   In-process WebRTC acoustic echo cancellation (AEC) uses the captured system track to suppress playback leaking into the raw mic.
   Both tracks are separated into speakers, with unique numbered slots across the session, including you.
   If the tap executable isn't available, hark logs a warning and uses the mic alone.
-  Use default capture for all desktop meetings, including in-person meetings; a system track delivering silence throughout the session isn't marked lost unless samples stop arriving for 90 seconds.
+  Use default capture for all desktop meetings, including in-person meetings; digital silence never marks a track lost, and recovery occurs when device samples resume, including zeros.
+  A one-time warning after 20 seconds of pure system silence appears only in the session log.
 - **With a phone as the microphone** (`--phone`), raw audio arrives on a local socket and is separated the same way.
   This is useful when the laptop is in the wrong place.
 

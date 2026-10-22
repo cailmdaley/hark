@@ -10,8 +10,8 @@ a phone (or any remote mic) as s16le PCM written into a Unix socket hark listens
 Live sources are held to the wall clock: `drain` pads with silence whatever
 the device failed to deliver (a stalled tap, a vanished mic, the laptop asleep),
 so transcript times stay true and pending utterances still get flushed.
-Each live source notes when the device last delivered (`last_audio`) and when
-it last delivered sound (`last_sound`); padding never counts as either. `heard` pins the
+Each live source notes when the device last delivered samples (`last_audio`);
+padding never counts as device delivery. `heard` pins the
 newest device sample drained so far to the wall time it arrived, because a device can run
 up to `LATE_OK` behind the padded timeline.
 """
@@ -83,7 +83,6 @@ class Source:
         self.anchor = None  # wall-clock time of sample 0
         self.delivered = 0  # samples handed to the caller, padding included
         self.last_audio = None  # wall-clock time the device last delivered
-        self.last_sound = None  # ... and last delivered a block above digital silence
         self.has_sound = False  # whether any device block exceeded SOUND this session
         self.heard = None  # (samples drained, wall time the last of them arrived)
         self.stats = _no_stats()
@@ -91,17 +90,18 @@ class Source:
         self.jump = 0.0  # seconds of wall time skipped since the last `take_jump`
 
     def start(self):
-        self.anchor = self.last_audio = self.last_sound = time.time()
+        self.anchor = self.last_audio = time.time()
         self.has_sound = False
         self.heard = 0, self.anchor
         self._open()
 
     def _deliver(self, samples):
         """Queue samples the device delivered, noting when and whether they carry sound."""
+        if not samples.size:
+            return
         now = self.last_audio = time.time()
-        peak = float(np.abs(samples).max()) if samples.size else 0.0
+        peak = float(np.abs(samples).max())
         if peak > SOUND:
-            self.last_sound = now
             self.has_sound = True
         self.stats["device"] += samples.size
         self.stats["peak"] = max(self.stats["peak"], peak)

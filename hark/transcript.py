@@ -271,8 +271,7 @@ class Sink:
                   "since": since.isoformat(timespec="seconds"), "cause": event.cause}
         if event.state == "silent":
             why = (f"no signal from the {'tap' if event.track == 'system' else 'device'}; "
-                   f"nothing from {what} is being transcribed" if event.cause == "no signal"
-                   else f"only silence while others speak; {what} may not be captured")
+                   f"nothing from {what} is being transcribed")
             line = f"# {who} lost at {since:%H:%M:%S} — {why}"
         else:
             back = datetime.fromtimestamp(event.at)

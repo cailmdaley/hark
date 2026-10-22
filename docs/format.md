@@ -46,7 +46,6 @@ Every other line starts with `# `:
 | `# S2 = Ada` | From here on, slot S2 is Ada. The latest line for a slot wins. Apply it to earlier lines from that slot too |
 | `# S2 = S2` | S2 is anonymous again |
 | `# system audio lost at 16:37:55 — no signal from the tap; nothing from the call is being transcribed` | A live source stopped delivering audio. The time is when it went quiet |
-| `# mic lost at 16:37:55 — only silence while others speak; the mic may not be captured` | A source delivers only digital silence while other tracks have speech |
 | `# phone lost at 10:02:13 — no signal from the device; nothing from the phone is being transcribed` | The phone disconnected (screen locked, tab closed, network gone) |
 | `# system audio back at 16:52:10 after 14m15s lost` | The source recovered |
 | `# paused` | Manual microphone pause; the user stepped away |
@@ -89,14 +88,11 @@ One JSON object per line. Every record has `wall`, an ISO-8601 local timestamp t
 {"wall": "...", "source": {"track": "system", "state": "back", "since": "2026-09-24T16:37:55", "cause": "no signal", "back": "2026-09-24T16:52:10"}}
 ```
 
-`cause` is `no signal` (no device samples for 90 s) or `silence` (only digital silence, peak ≤ 1e-4, for 90 s while another track produced an utterance within the last 90 s).
-For system audio, `silence` can mark loss only after the track has carried sound with peak > 1e-4 in this session.
-A system track delivering silence throughout an in-person desktop meeting stays unmarked even while mic utterances continue.
-The `no signal` rule still applies to that track if samples stop for 90 s, regardless of prior sound.
-Mic and phone tracks don't require prior sound for `silence` loss.
-Once system audio has carried sound, it follows the ordinary loss rules for the rest of the session.
-Each episode yields one `silent` record and at most one `back` record; recovery requires device sound with peak > 1e-4.
-Resumed zero samples and generated padding don't recover a source, and padding doesn't count as device delivery.
+`cause` is `no signal`: no device samples for 90 s.
+Digital silence doesn't mark a source lost, regardless of speech on other tracks or prior sound.
+Recovery occurs when device samples resume, including zeros; padding doesn't count.
+The one-time 20 s pure-silence warning appears only in the session log.
+Each episode yields one `silent` record and at most one `back` record.
 A recovered source can have a new loss episode; a session ending with a source still lost has no `back` record.
 File replays never produce source-health records.
 

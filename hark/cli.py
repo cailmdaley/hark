@@ -21,8 +21,7 @@ The live transcript is ~/.hark/current.txt (a symlink to the transcript file);
 follow it with `tail -F`. A JSONL sidecar sits beside it, and <stem>.log keeps
 hark's own log, timestamped, with a heartbeat per live source each minute.
 A live source missing samples for 90 s gets a `# … lost at …` line.
-Digital silence counts only while another track speaks; system audio must first
-have carried sound in this session.
+Digital silence is valid device audio and doesn't mark a source lost.
 The mic is muted while a dictation app records (--pause-for, default aquavoice,aqua-voice).
 """
 
@@ -538,7 +537,7 @@ def main(argv=None):
             if not stop.is_set():
                 log("listening (Ctrl-C to stop)")
             watch = QuietWatch() if live else None
-            spoken, said = {}, {}  # per track: wall end of the last utterance, utterances this minute
+            said = {}  # per track: utterances this minute
             beat = time.monotonic() + 60
             while not stop.is_set():
                 sink.poll_names()
@@ -552,14 +551,13 @@ def main(argv=None):
                 busy = feed_sources()
                 for u in ready_utterances(flush_tracks(all_tracks)):
                     _emit(u, sink, matcher, tracks_by_name, failed_slots, slots)
-                    spoken[u.track] = max(spoken.get(u.track, 0.0), u.wall_span[1])
                     said[u.track] = said.get(u.track, 0) + 1
                 if args.ear == "gradium":
                     for track in all_tracks:
                         track.check()
                 if watch:
-                    for event in watch.check(time.time(), {src.name: (src.last_audio, src.last_sound, src.has_sound)
-                                                           for src in started_sources}, spoken):
+                    for event in watch.check(time.time(), {src.name: src.last_audio
+                                                           for src in started_sources}):
                         sink.source(event)
                     if time.monotonic() >= beat:
                         beat += 60

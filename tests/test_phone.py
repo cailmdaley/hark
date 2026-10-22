@@ -48,7 +48,7 @@ def test_phone_source_delivers_pcm_and_survives_a_reconnect():
         time.sleep(0.05)
         b.sendall(raw[1001:])
         assert np.array_equal(collect(src, first.size), -first)
-        assert src.last_sound is not None
+        assert src.last_audio is not None
         a.close()
         b.close()
     finally:

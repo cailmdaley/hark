@@ -1,13 +1,7 @@
-"""When a live source goes quiet and when it comes back, for markers in the transcript.
+"""Transcript markers for live sources that stop delivering device samples.
 
-A source is quiet after QUIET_SEC with either
-  - no signal: the device delivered nothing (a stalled or restarting tap, a vanished mic); or
-  - silence: it delivered only digital silence while another track produced an utterance
-    within the last QUIET_SEC, so a quiet room or a lull in the meeting never counts.
-    System audio must have carried sound in this session before silence counts as loss;
-    a tap delivering silence throughout an in-person meeting is expected.
-It is back once it delivers sound again. Each episode yields one "silent" and at most one
-"back" event; an episode still open when the session ends stays open.
+A source is lost after 90 seconds without samples and back when samples resume,
+including digital silence. Each episode yields one loss and at most one recovery.
 """
 
 from dataclasses import dataclass
@@ -19,9 +13,9 @@ QUIET_SEC = 90.0
 class Quiet:
     track: str
     state: str  # "silent" or "back"
-    since: float  # wall time the source went quiet
-    cause: str  # "no signal" or "silence"
-    at: float | None = None  # wall time sound returned, for "back"
+    since: float  # wall time of the last device samples before the gap
+    cause: str = "no signal"
+    at: float | None = None  # wall time samples resumed, for "back"
 
 
 class QuietWatch:
@@ -29,23 +23,16 @@ class QuietWatch:
         self.quiet = quiet
         self.open = {}  # track -> (since, cause)
 
-    def check(self, now, sources, spoken):
-        """`sources`: {track: (last_audio, last_sound, has_sound)}; `spoken`: {track: wall end of its last
-        utterance}. Returns the events since the previous call."""
+    def check(self, now, sources):
+        """Return new events for `sources`: {track: last device delivery wall time}."""
         events = []
-        for track, (audio, sound, has_sound) in sources.items():
+        for track, audio in sources.items():
             if track in self.open:
                 since, cause = self.open[track]
-                if has_sound and sound > since:
+                if audio > since:
                     del self.open[track]
-                    events.append(Quiet(track, "back", since, cause, sound))
-                continue
-            others = any(end > now - self.quiet for other, end in spoken.items() if other != track)
-            if now - audio >= self.quiet:
+                    events.append(Quiet(track, "back", since, cause, audio))
+            elif now - audio >= self.quiet:
                 self.open[track] = audio, "no signal"
-            elif (track != "system" or has_sound) and now - sound >= self.quiet and others:
-                self.open[track] = sound, "silence"
-            else:
-                continue
-            events.append(Quiet(track, "silent", *self.open[track]))
+                events.append(Quiet(track, "silent", audio))
         return events
