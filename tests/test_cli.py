@@ -216,7 +216,8 @@ def test_live_capture_ends_cleanly_and_records_lifecycle(tmp_path, monkeypatch):
 
     state = json.loads((tmp_path / "meeting.json").read_text())
     assert [snapshot["phase"] for snapshot in phases] == ["loading", "live", "stopping", "ended"]
-    assert set(state) == {"pid", "phase", "title", "started", "transcript", "mirror", "launch", "phone", "error", "ear"}
+    assert set(state) == {"pid", "phase", "title", "started", "transcript", "mirror", "launch", "phone", "error", "ear", "system_audio"}
+    assert state["system_audio"] is False
     assert state["ear"] == {"name": "local", "seconds": 0.0, "credits_left": None}
     assert state["launch"] == "test" and state["phone"] is None
     assert state["pid"] == os.getpid()
@@ -328,7 +329,7 @@ def test_live_capture_exception_records_one_line_failure(tmp_path, monkeypatch):
 
     state = json.loads((tmp_path / "meeting.json").read_text())
     assert [snapshot["phase"] for snapshot in phases] == ["loading", "failed"]
-    assert set(state) == {"pid", "phase", "title", "started", "transcript", "mirror", "launch", "phone", "error", "ear"}
+    assert set(state) == {"pid", "phase", "title", "started", "transcript", "mirror", "launch", "phone", "error", "ear", "system_audio"}
     assert state["launch"] == "test"
     assert state["phase"] == "failed"
     assert state["error"] == "model loading failed with details"
@@ -515,6 +516,7 @@ def test_live_saves_mic_and_system_tracks_each_with_its_own_samples(tmp_path, mo
     assert np.array_equal(read_wav(out.with_suffix(".system.wav")), np.concatenate(heard["system"]))
     assert np.array_equal(read_wav(out.with_suffix(".system.wav")), np.concatenate(system_fed))
     assert read_wav(out.with_suffix(".system.wav")).size == 5000
+    assert json.loads((tmp_path / "meeting.json").read_text())["system_audio"] is True
 
 
 def test_audio_is_not_kept_by_default(tmp_path, monkeypatch):

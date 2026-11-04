@@ -4,6 +4,7 @@
 
 ```bash
 hark                  # desktop meeting, including in person: mic + system audio when available
+hark --mic-only      # transcribe the mic alone; keep system audio as the echo-canceller reference
 hark --phone          # mobile meeting: phone PCM arrives on a socket, diarized
 hark --file x.m4a     # a recording through the same streaming path (about 0.15× real time)
 hark --file x.wav --realtime   # replay at real-time pace, e.g. to test an agent against it
@@ -140,6 +141,8 @@ hark mirror --resume LOCAL HOST:PATH        # finish a mirror that didn't comple
 hark pause                                 # manually pause mic intake
 hark resume                                # resume mic intake
 hark pause --status                        # show manual pause state
+hark pause --system                        # mute system audio in the running session
+hark resume --system                       # restore system audio
 hark processes                             # list CoreAudio process objects and input flags
 ```
 
@@ -154,6 +157,8 @@ A slot someone named by hand is never renamed automatically.
 A new session starts unpaused, clearing a pause an earlier session left behind.
 Manual pauses add `# paused` and `# resumed at … after …` lines to the `.txt` transcript.
 `--pause-for none` disables app detection but not manual pauses.
+
+`--mic-only` starts a desktop session with system audio muted from the beginning. The system tap still runs as the echo-canceller reference. Use `hark resume --system` to include call audio later; `hark pause --system` mutes it again. System pause state lives at `~/.hark/system-paused`, and a fresh session clears a pause left by an earlier session.
 
 Automatic pause detection reads CoreAudio process objects and needs no extra permission.
 The default match is `aquavoice,aqua-voice` (Aqua's audio bridge and its app); `--pause-for aqua,whisper` watches any process whose bundle ID contains either string.

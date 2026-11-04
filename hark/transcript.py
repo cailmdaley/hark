@@ -286,14 +286,19 @@ class Sink:
         """Manual pauses annotate the transcript; automatic dictation pauses stay in JSONL."""
         at, since = datetime.fromtimestamp(event.at), datetime.fromtimestamp(event.since)
         state = "paused" if event.paused else "resumed"
-        record = {"track": "mic", "reason": event.reason, "state": state,
+        record = {"track": event.track, "reason": event.reason, "state": state,
                   "since": since.isoformat(timespec="seconds"),
                   "bundles": list(event.bundles)}
         if not event.paused:
             record["duration"] = round(event.at - event.since, 3)
         if event.reason == "manual":
-            line = ("# paused" if event.paused else
-                    f"# resumed at {at:%H:%M:%S} after {_duration(event.at - event.since)}")
+            if event.track == "mic":
+                line = ("# paused" if event.paused else
+                        f"# resumed at {at:%H:%M:%S} after {_duration(event.at - event.since)}")
+            else:
+                line = ("# system audio paused" if event.paused else
+                        f"# system audio resumed at {at:%H:%M:%S} after "
+                        f"{_duration(event.at - event.since)}")
             self.txt.seek(0, 2)
             self.txt.write(line + "\n")
         self.jsonl.write(json.dumps({"wall": at.isoformat(timespec="seconds"),

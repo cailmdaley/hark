@@ -14,15 +14,18 @@ from test_cli import read_wav
 
 @pytest.mark.parametrize("room", [False, True])
 @pytest.mark.parametrize("shutdown_pause", [None, "manual", "automatic"])
-def test_live_modes_feed_and_save_identical_gated_pcm_and_leave_system_untouched(
-        room, shutdown_pause, tmp_path, monkeypatch):
+@pytest.mark.parametrize("mic_only", [False, True])
+def test_live_modes_feed_and_save_identical_gated_pcm_and_system_reference(
+        room, shutdown_pause, mic_only, tmp_path, monkeypatch):
+    if room and mic_only:
+        pytest.skip("mic-only desktop capture requires a system track")
     from hark import cli
 
     clock = [100.0]
     monkeypatch.setattr("time.time", lambda: clock[0])
     stop_ref = []
     app_running = []
-    feeds, tracks, first_feed = {}, {}, {}
+    feeds, tracks, first_feed, aec_references = {}, {}, {}, []
     blocks = [on_pcm16_grid(np.full(1600, (i + 1) / 32, np.float32)) for i in range(16)]
 
     class Signals:
@@ -94,6 +97,7 @@ def test_live_modes_feed_and_save_identical_gated_pcm_and_leave_system_untouched
             # uses the real post-join poll against the current manual/app state.
             self.reader = SimpleNamespace(read=lambda idle: [
                 AudioProcess(1, 10, "aquavoice", bool(app_running))])
+            self.system_manual.set(self.system_paused)
             self.poll()
 
         def feed(self, gate, samples, now, final=False):
@@ -112,10 +116,22 @@ def test_live_modes_feed_and_save_identical_gated_pcm_and_leave_system_untouched
     monkeypatch.setattr(cli, "SystemSource", System)
     monkeypatch.setattr(cli, "Track", Track)
     monkeypatch.setattr(cli, "PauseMonitor", ScriptedMonitor)
+    from hark import aec
+
+    class Aec:
+        def __init__(self, **kwargs):
+            pass
+
+        def feed(self, mic, system, final=False):
+            aec_references.append(system.copy())
+            return mic
+
+    monkeypatch.setattr(aec, "EchoCanceller", Aec)
     monkeypatch.setattr(cli, "load_models", lambda *_: (None, None))
     monkeypatch.setattr(cli, "flush_tracks", lambda *_, **__: [])
     out = tmp_path / "session.txt"
-    cli.main((["--room"] if room else []) + ["--ear", "local", "--launch", "test", "--keep-audio", "-o", str(out)])
+    cli.main((["--room"] if room else []) + (["--mic-only"] if mic_only and not room else []) +
+             ["--ear", "local", "--launch", "test", "--keep-audio", "-o", str(out)])
 
     original = np.concatenate(blocks)
     expected = original.copy()
@@ -131,12 +147,14 @@ def test_live_modes_feed_and_save_identical_gated_pcm_and_leave_system_untouched
         assert not heard[expected == 0].any()  # AEC tails cannot unmute a paused sample.
     assert np.array_equal(read_wav(out.with_suffix(".mic.wav")), heard)
     assert tracks["mic"].t0.timestamp() == 100 and tracks["mic"].processed == pytest.approx(1.6)
-    assert first_feed["mic"] == pytest.approx(100.4 if room else 101.6)
+    assert first_feed["mic"] == pytest.approx(100.4)
     if not room:
-        assert np.array_equal(np.concatenate(feeds["system"]), -original)
-        assert np.array_equal(read_wav(out.with_suffix(".system.wav")), -original)
+        expected_system = np.zeros_like(original) if mic_only else -original
+        assert np.array_equal(np.concatenate(feeds["system"]), expected_system)
+        assert np.array_equal(read_wav(out.with_suffix(".system.wav")), expected_system)
+        assert np.array_equal(np.concatenate(aec_references), -original)
         assert tracks["system"].t0.timestamp() == 100
-        assert first_feed["system"] == pytest.approx(100.1)
+        assert first_feed["system"] == pytest.approx(100.4)
     text = out.read_text()
     assert text.count("# paused\n") == 1 + (shutdown_pause == "manual")
     assert text.count("# resumed at ") == 1
@@ -144,9 +162,30 @@ def test_live_modes_feed_and_save_identical_gated_pcm_and_leave_system_untouched
     records = [json.loads(line)["pause"] for line in out.with_suffix(".jsonl").read_text().splitlines()]
     expected_events = [("automatic", "paused"), ("automatic", "resumed"),
                        ("manual", "paused"), ("manual", "resumed")]
+    if mic_only and not room:
+        expected_events.insert(0, ("manual", "paused"))
     if shutdown_pause:
         expected_events.append((shutdown_pause, "paused"))
     assert [(r["reason"], r["state"]) for r in records] == expected_events
     log = out.with_suffix(".log").read_text()
     assert "mic paused: automatic (aquavoice)" in log
     assert "mic resumed: automatic (aquavoice)" in log
+
+
+def test_system_pause_flag_is_independent_and_reported(tmp_path, monkeypatch, capsys):
+    from hark import cli
+
+    monkeypatch.setattr(cli, "HOME", tmp_path)
+    meeting = tmp_path / "meeting.json"
+    meeting.write_text(json.dumps({"phase": "live", "system_audio": True}))
+    assert cli.main(["pause", "--system"]) == 0
+    assert capsys.readouterr().out == "system audio manual pause: paused\n"
+    assert (tmp_path / "system-paused").exists()
+    assert not (tmp_path / "paused").exists()
+    assert json.loads(meeting.read_text())["system_audio"] is False
+    assert cli.main(["pause", "--system", "--status"]) == 0
+    assert capsys.readouterr().out == "system audio manual pause: paused\n"
+    assert cli.main(["resume", "--system"]) == 0
+    assert capsys.readouterr().out == "system audio manual pause: resumed\n"
+    assert not (tmp_path / "system-paused").exists()
+    assert json.loads(meeting.read_text())["system_audio"] is True

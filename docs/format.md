@@ -50,6 +50,7 @@ Every other line starts with `# `:
 | `# system audio back at 16:52:10 after 14m15s lost` | The source recovered |
 | `# paused` | Manual microphone pause; the user stepped away |
 | `# resumed at 16:39:58 after 2m03s` | Manual microphone pause ended |
+| `# system audio paused` / `# system audio resumed at … after …` | Manual system-audio pause and resume |
 | `# gradium lost at 16:37:55` | Cloud recognition is degraded; source capture and WAV recording continue |
 | `# gradium back at 16:52:10` | Cloud recognition recovered |
 | `# gradium missed recognition 120.00–124.00 s on phone` | Recognition backlog overflow omitted this source-relative interval; recording continues |

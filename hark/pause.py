@@ -12,7 +12,7 @@ import os
 import sys
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
@@ -153,8 +153,8 @@ def watched_bundles(processes, patterns, pid=None):
 class ManualPause:
     """`hark pause` creates a flag file that the live session polls; `hark resume` removes it."""
 
-    def __init__(self, home):
-        self.path = Path(home) / "paused"
+    def __init__(self, home, track="mic"):
+        self.path = Path(home) / ("paused" if track == "mic" else f"{track}-paused")
 
     def read(self):
         return self.path.exists()
@@ -174,6 +174,7 @@ class PauseEvent:
     at: float
     since: float
     bundles: tuple[str, ...] = ()
+    track: str = "mic"
 
 
 @dataclass
@@ -252,11 +253,14 @@ class PauseMonitor:
     """Poll on its own thread, so a pause is timed when it happens even while the main loop
     is busy with inference."""
 
-    def __init__(self, home, patterns):
+    def __init__(self, home, patterns, system_paused=False):
         self.manual = ManualPause(home)
+        self.system_manual = ManualPause(home, "system")
+        self.system_paused = system_paused
         self.patterns = patterns
         self.reader = None
         self.state = PauseState()
+        self.system_state = PauseState()
         self.events = []
         self.automatic = ()
         self.lock = threading.Lock()
@@ -274,6 +278,11 @@ class PauseMonitor:
         if self.manual.read():
             self.manual.set(False)
             log("pause: cleared a manual pause left from an earlier session")
+        if self.system_paused:
+            self.system_manual.set(True)
+        elif self.system_manual.read():
+            self.system_manual.set(False)
+            log("pause: cleared a system-audio pause left from an earlier session")
         if self.patterns:
             try:
                 self.reader = CoreAudioProcesses()
@@ -296,6 +305,8 @@ class PauseMonitor:
                 self._warn("automatic detection failed", error)
         with self.lock:
             self.events.extend(self.state.update(time.time(), manual, self.automatic))
+            self.events.extend(replace(event, track="system") for event in
+                               self.system_state.update(time.time(), self.system_manual.read()))
 
     def _watch(self):
         while not self.stopping.wait(PAUSE_POLL_SEC):
@@ -312,6 +323,10 @@ class PauseMonitor:
     def feed(self, gate, samples, now, final=False):
         with self.lock:
             return gate.feed(samples, now, self.state, final=final)
+
+    def feed_system(self, gate, samples, now, final=False):
+        with self.lock:
+            return gate.feed(samples, now, self.system_state, final=final)
 
     def stop(self):
         """Join the watcher, then poll once more so a pause that began in the last poll

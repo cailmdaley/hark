@@ -59,19 +59,27 @@ class MeetingLifecycle:
         "failed": set(),
     }
 
-    def __init__(self, *, title, started, transcript, mirror, launch=None, phone=None, ear="local"):
+    def __init__(self, *, title, started, transcript, mirror, launch=None, phone=None, ear="local",
+                 system_audio=False):
         self.path = HOME / "meeting.json"
         self.lock = threading.Lock()
         self.data = {
             "pid": os.getpid(), "phase": "loading", "title": title,
             "started": started, "transcript": transcript, "mirror": mirror,
             "launch": launch, "phone": phone, "error": None,
+            "system_audio": system_audio,
             "ear": {"name": ear, "seconds": 0.0, "credits_left": None},
         }
         self._write()
 
     def update(self, phase=None, **values):
         with self.lock:
+            try:
+                current = json.loads(self.path.read_text())
+            except (FileNotFoundError, json.JSONDecodeError):
+                current = {}
+            if "system_audio" in current and "system_audio" not in values:
+                self.data["system_audio"] = current["system_audio"]
             changed = False
             current = self.data["phase"]
             if phase and phase in self.TRANSITIONS[current]:
@@ -253,6 +261,8 @@ def main(argv=None):
     mode.add_argument("--call", action="store_true", help=argparse.SUPPRESS)
     mode.add_argument("--phone", action="store_true",
                       help="a phone as the mic: listen for s16le 16 kHz PCM on ~/.hark/phone.sock, diarized")
+    mode.add_argument("--mic-only", action="store_true",
+                      help="transcribe the mic alone while keeping system audio as the AEC reference")
     mode.add_argument("--file", help="transcribe an audio file instead of live input")
     ap.add_argument("--ear", choices=["local", "gradium"],
                     help="ASR backend (default: local when MLX is importable, otherwise gradium)")
@@ -303,6 +313,7 @@ def main(argv=None):
     out = (args.out.with_suffix(".txt").expanduser().resolve() if args.out
            else _session_path(now, args.title))
     live = not bool(args.file)
+    system_audio = not (args.room or args.phone or args.file) and _system_capture_available()
     phone_socket = HOME / "phone.sock" if args.phone else None
     if live:
         expire_audio([HOME / "meetings", HOME / "sessions"])
@@ -311,6 +322,7 @@ def main(argv=None):
         transcript=str(out),
         mirror=f"{mirror_target[0]}:{mirror_target[1]}" if mirror_target else None,
         launch=args.launch, phone=str(phone_socket) if phone_socket else None, ear=args.ear,
+        system_audio=system_audio and not args.mic_only,
     ) if _owns_meeting(args, out) else None)
     stop = threading.Event()
     watcher = None
@@ -324,11 +336,11 @@ def main(argv=None):
         for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
             signal.signal(sig, on_signal)
 
-    system_audio = not (args.room or args.phone or args.file) and _system_capture_available()
     if not (args.room or args.phone or args.file) and not system_audio:
         log("system audio unavailable; using mic only (build audiotee with scripts/build-audiotee.sh)")
     what = (f"file {args.file}" if args.file else
             "phone: the phone's mic diarized as S1…" if args.phone else
+            "live: mic only" if args.mic_only and system_audio else
             "live: mic + system audio diarized as S1…" if system_audio else
             "room: mic diarized as S1…")
     slots = SpeakerSlots() if system_audio else None
@@ -341,6 +353,7 @@ def main(argv=None):
     sink = matcher = mirror = watch = None
     recorders = {}
     mic_gates = {}
+    system_gates = {}
     aec = None
     deduper = None
     if system_audio:
@@ -389,6 +402,11 @@ def main(argv=None):
             except Exception as error:
                 errors.append(error)
                 drained["mic"] = np.zeros(0, np.float32)  # Never fall back to an uncancelled mic.
+        if pause_monitor:
+            for src, _track in started_tracks:
+                if src.name == "system" and src in system_gates:
+                    drained["system"] = pause_monitor.feed_system(
+                        system_gates[src], drained["system"], time.time(), final=final)
         for src, track in started_tracks:
             samples = drained[src.name]
             if src in recorders:
@@ -507,7 +525,8 @@ def main(argv=None):
                 install_signal_handlers()
 
             if live and not stop.is_set() and any(src.name == "mic" for src, _ in tracks):
-                pause_monitor = PauseMonitor(HOME, pause_patterns)
+                pause_monitor = PauseMonitor(HOME, pause_patterns,
+                                             system_paused=args.mic_only and system_audio)
                 pause_monitor.start()
                 _pause_events(pause_monitor, sink)
             capture_started = time.monotonic()
@@ -519,6 +538,8 @@ def main(argv=None):
                 started_tracks.append((src, track))
                 if pause_monitor and src.name == "mic":
                     mic_gates[src] = MicGate(src)
+                elif pause_monitor and src.name == "system":
+                    system_gates[src] = MicGate(src)
                 track.t0 = (datetime.combine(now.date(), datetime.min.time()) if args.file
                             else datetime.fromtimestamp(src.anchor))
             if system_audio and len(started_sources) == 2:
@@ -651,21 +672,47 @@ def main(argv=None):
 def _manual_pause(argv):
     command = argv[0]
     ap = argparse.ArgumentParser(prog=f"hark {command}")
+    ap.add_argument("--system", action="store_true", help="control system-audio capture instead of the mic")
     if command == "pause":
-        ap.add_argument("--status", action="store_true", help="show whether the mic is manually paused")
+        ap.add_argument("--status", action="store_true", help="show whether the selected track is manually paused")
     args = ap.parse_args(argv[1:])
-    state = ManualPause(HOME)
+    state = ManualPause(HOME, "system" if args.system else "mic")
     if not getattr(args, "status", False):
         state.set(command == "pause")
-    print("manual pause: " + ("paused" if state.read() else "resumed"))
+        if args.system:
+            _update_meeting_system_audio(command == "resume")
+    track = "system audio" if args.system else "mic"
+    print(f"{track} manual pause: " + ("paused" if state.read() else "resumed"))
     return 0
+
+
+def _update_meeting_system_audio(enabled):
+    path = HOME / "meeting.json"
+    try:
+        data = json.loads(path.read_text())
+    except (FileNotFoundError, json.JSONDecodeError):
+        return
+    if data.get("phase") not in {"loading", "live", "stopping"}:
+        return
+    data["system_audio"] = enabled
+    fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=".meeting-", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w") as output:
+            json.dump(data, output, indent=2)
+            output.write("\n")
+        os.replace(temporary, path)
+    finally:
+        try:
+            os.unlink(temporary)
+        except FileNotFoundError:
+            pass
 
 
 def _pause_events(monitor, sink):
     for event in monitor.take_events():
         state = "paused" if event.paused else "resumed"
         detail = f" ({', '.join(event.bundles)})" if event.bundles else ""
-        log(f"mic {state}: {event.reason}{detail} at "
+        log(f"{event.track} {state}: {event.reason}{detail} at "
             f"{datetime.fromtimestamp(event.at):%H:%M:%S}")
         sink.pause(event)
 
