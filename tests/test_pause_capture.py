@@ -174,18 +174,29 @@ def test_live_modes_feed_and_save_identical_gated_pcm_and_system_reference(
 
 def test_system_pause_flag_is_independent_and_reported(tmp_path, monkeypatch, capsys):
     from hark import cli
+    from hark.pause import PauseMonitor
 
     monkeypatch.setattr(cli, "HOME", tmp_path)
     meeting = tmp_path / "meeting.json"
-    meeting.write_text(json.dumps({"phase": "live", "system_audio": True}))
+    lifecycle = cli.MeetingLifecycle(title=None, started="now", transcript="x", mirror=None,
+                                     system_audio=True)
+    monitor = PauseMonitor(tmp_path, [])
     assert cli.main(["pause", "--system"]) == 0
     assert capsys.readouterr().out == "system audio manual pause: paused\n"
     assert (tmp_path / "system-paused").exists()
     assert not (tmp_path / "paused").exists()
+    monitor.poll()
+    lifecycle.update(system_audio=not monitor.system_manual.read())
     assert json.loads(meeting.read_text())["system_audio"] is False
     assert cli.main(["pause", "--system", "--status"]) == 0
     assert capsys.readouterr().out == "system audio manual pause: paused\n"
     assert cli.main(["resume", "--system"]) == 0
     assert capsys.readouterr().out == "system audio manual pause: resumed\n"
     assert not (tmp_path / "system-paused").exists()
+    monitor.poll()
+    lifecycle.update(system_audio=not monitor.system_manual.read())
+    lifecycle.update("live")
+    lifecycle.update("stopping")
+    lifecycle.update("ended")
     assert json.loads(meeting.read_text())["system_audio"] is True
+    assert json.loads(meeting.read_text())["phase"] == "ended"

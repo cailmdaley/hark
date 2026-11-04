@@ -23,6 +23,7 @@ def test_primary_capture_error_survives_cleanup_and_other_track_flushes(monkeypa
     class Source:
         name = 'mic'
         anchor = 0
+        heard = (0, 0)
         def __init__(self, *args): pass
         def start(self): pass
         def stop(self): pass

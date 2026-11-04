@@ -74,12 +74,6 @@ class MeetingLifecycle:
 
     def update(self, phase=None, **values):
         with self.lock:
-            try:
-                current = json.loads(self.path.read_text())
-            except (FileNotFoundError, json.JSONDecodeError):
-                current = {}
-            if "system_audio" in current and "system_audio" not in values:
-                self.data["system_audio"] = current["system_audio"]
             changed = False
             current = self.data["phase"]
             if phase and phase in self.TRANSITIONS[current]:
@@ -562,6 +556,9 @@ def main(argv=None):
             beat = time.monotonic() + 60
             while not stop.is_set():
                 sink.poll_names()
+                if lifecycle:
+                    lifecycle.update(system_audio=(system_audio and
+                                                   not pause_monitor.system_manual.read()))
                 if args.ear == "gradium":
                     ear_notices()
                     if lifecycle and time.monotonic() >= ear_beat:
@@ -679,33 +676,9 @@ def _manual_pause(argv):
     state = ManualPause(HOME, "system" if args.system else "mic")
     if not getattr(args, "status", False):
         state.set(command == "pause")
-        if args.system:
-            _update_meeting_system_audio(command == "resume")
     track = "system audio" if args.system else "mic"
     print(f"{track} manual pause: " + ("paused" if state.read() else "resumed"))
     return 0
-
-
-def _update_meeting_system_audio(enabled):
-    path = HOME / "meeting.json"
-    try:
-        data = json.loads(path.read_text())
-    except (FileNotFoundError, json.JSONDecodeError):
-        return
-    if data.get("phase") not in {"loading", "live", "stopping"}:
-        return
-    data["system_audio"] = enabled
-    fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=".meeting-", suffix=".tmp")
-    try:
-        with os.fdopen(fd, "w") as output:
-            json.dump(data, output, indent=2)
-            output.write("\n")
-        os.replace(temporary, path)
-    finally:
-        try:
-            os.unlink(temporary)
-        except FileNotFoundError:
-            pass
 
 
 def _pause_events(monitor, sink):
