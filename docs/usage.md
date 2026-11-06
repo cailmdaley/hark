@@ -48,19 +48,30 @@ Ctrl-C ends a session cleanly: hark flushes open turns, finishes writing the aud
 ## Continuous voice
 
 ```bash
-hark --voice                    # Apple Silicon, local models, microphone only
+hark --voice                    # Apple Silicon, configured voice ear, microphone only
 hark --voice -o ~/notes/voice    # voice.txt, voice.jsonl and voice.log
 hark pause                      # mute the mic
 hark resume                     # unmute it
 ```
 
-Voice capture uses the local ear, a 0.32 s diarizer lookahead (`ultra_low`), a 0.5 s turn-closing gap and a 6 s monologue threshold.
-`--gap` and `--latency` override the first two timing choices; desktop meetings keep their own defaults.
-A monologue splits at a word boundary near a late pause, so the threshold isn't an exact line-duration limit.
-In a replay of a 32 s synthesized monologue, lines arrived at 7, 14, 16, 23, 27 and 33 s.
-Through the full CLI, an isolated synthesized sentence reached the transcript 1.91–1.93 s after its last audible frame in three replay-source trials on an M3 Pro, including mic lookback and inference.
-The same sentence took 4.71 s with meeting room defaults.
-These are measurements, not a guarantee for every accent, device or competing GPU workload.
+Voice uses local Nemotron models for speaker labels, timing and raw preview, with `ultra_low` diarizer lookahead (0.32 s).
+An operator-configured external ear supplies the final words, once per physical speech run, after two seconds of quiet and the streaming model's drain or a 25 s run cap.
+`--gap` and `--latency` override quiet time and diarizer lookahead; desktop meetings keep their own defaults.
+A cap can move to a nearby quiet acoustic frame to avoid clipping a word.
+Run finalization, external recognition time and the consumer's delivery batching all contribute to latency.
+The transcript and JSONL contain only final text; `<stem>.partial` is a private, atomically replaced raw preview, never a delivery source.
+It contains one `S1: unfinished words` line per pending speaker and is empty while muted or after clean shutdown.
+
+Configure the external ear in `~/.hark/voice_ear.py`, or point `HARK_VOICE_EAR` at an operator-owned Python module.
+It exports `create(language=None)`, which runs once at startup and returns a callable accepting mono float32 audio at 16 kHz and returning finished text.
+Credentials, private service protocols and any network policy belong to that module, outside the repository.
+There is no built-in private service adapter or local batch recognizer.
+**The adapter may upload microphone audio.** Choose and authorize it before enabling voice; meeting capture's local default does not make an external voice ear local.
+A failed or empty call appends the raw Nemotron text once and logs only the exception class, never the adapter's error message or URL.
+
+Final words inherit speaker/timing anchors by alignment to Nemotron's raw words, so corrections do not duplicate overlapping slot windows.
+When Nemotron supplies no words for audible speech, the external ear still receives the run; recovered words carry the unknown label `S?` and the acoustic run's timing rather than an invented identity.
+Diarization can still mistake one person for several slots, and a mono microphone cannot separate simultaneous voices cleanly.
 
 Neither a system-audio tap nor AEC runs in this mode.
 Videos on headphones can't address the transcript, but speech or playback audible in the room can.
@@ -74,7 +85,9 @@ A -55 dBFS RMS energy gate watches 100 ms frames, retains 300 ms of pre-roll and
 Both models stop running once the mic is idle; model weights and bounded streaming caches stay resident.
 This is an energy check, not a speech classifier: steady noise above the threshold keeps inference active, and very quiet speech below it can be missed.
 Skipped silence doesn't compress the transcript or saved WAV clock, and speaker state survives it.
-`scripts/voice-bench.py` measures replay timing, memory and compute without opening a microphone.
+`scripts/voice-bench.py` measures replay timing, memory and compute without opening a microphone or calling the external service; voice mode uses a constant text stub.
+`scripts/voice-accuracy.py` builds synthetic technical-speech fixtures or evaluates a recorded manifest, measuring word edit rate and compute.
+Its `--backend external` explicitly invokes the configured adapter and may upload the manifest's audio; other backends stay local.
 
 Voice writes `~/.hark/meeting.json` even without `--launch`, with `"kind": "voice"`; owned meeting captures write `"kind": "meeting"`.
 The lifecycle phases, `--launch`, SIGINT/TERM shutdown and final `# ended` marker are shared.
@@ -162,7 +175,7 @@ The [format contract](format.md) defines the text and JSONL records.
 | Option | Default | |
 |---|---|---|
 | `--phone` | | capture only PCM from the phone socket, diarized |
-| `--voice` | | continuous local dictation, mic only, with an idle gate |
+| `--voice` | | continuous mic dictation with a configured external final-text ear and a local idle gate |
 | `--ear local\|gradium` | local if MLX imports, otherwise Gradium | recognition and speaker attribution backend |
 | `--no-gradium-metering` | | skip credit-balance requests |
 | `--title TEXT` | | appended to the session filename |
@@ -170,7 +183,7 @@ The [format contract](format.md) defines the text and JSONL records.
 | `--mic DEVICE` | system default | input device, by name or index; software AEC stays on with system capture |
 | `--lang CODE` | auto | pin the ASR language, e.g. `en-US`, `fr-FR` |
 | `--latency` | meeting `low`, voice `ultra_low` | local-ear diarizer lookahead: `low` 1.04 s, `very_low` 0.64 s, `ultra_low` 0.32 s. Shorter means faster lines and worse speaker separation |
-| `--gap SECONDS` | meeting `3`, voice `0.5` | local-ear silence that ends a turn when nobody else takes over |
+| `--gap SECONDS` | meeting `3`, voice `2` | silence that ends a meeting turn or a voice speech run, plus model drain time |
 | `--speaker-mask` | `exclusive` | local-ear speakers that hear a frame two speakers share; see [how it works](how-it-works.md#speaker-masks) |
 | `--keep-audio` | off | save each track as `<stem>.<track>.wav` |
 | `--pause-for PATTERNS` | `aquavoice,aqua-voice` | pause the mic while a matching CoreAudio process captures input; give comma-separated bundle-ID substrings or `none` |

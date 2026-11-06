@@ -3,15 +3,127 @@
 from collections import deque
 from copy import copy
 from datetime import timedelta
+import importlib.util
+import os
+from pathlib import Path
+import re
+import sys
+import tempfile
 
 import numpy as np
 
 from .capture import SAMPLE_RATE
-from .transcript import Track, _Pending
+from .transcript import Track, Utterance, _Pending
 
-VOICE_GAP = 0.5
-VOICE_MAX_LEN = 6.0
+VOICE_GAP = 5.0
+VOICE_MAX_LEN = 75.0
+VOICE_WORDS = 200
 VOICE_LATENCY = "ultra_low"
+VOICE_NAME = re.compile(r"\b(?:claude|cloud|clawed|claw|klaud|clot|clod|claud)\b", re.IGNORECASE)
+
+
+def load_refiner(language=None):
+    """Load an operator-owned external ear once, before capture starts.
+
+    The module exports create(language=None), returning a callable that accepts
+    mono float32 16 kHz PCM and returns finished text. Private credentials and
+    service protocols belong to that module, not this repository.
+    """
+    path = Path(os.environ.get("HARK_VOICE_EAR", "~/.hark/voice_ear.py")).expanduser()
+    try:
+        spec = importlib.util.spec_from_file_location("hark_external_voice_ear", path)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module.create(language=language)
+    except Exception:
+        raise RuntimeError("voice ear unavailable; check HARK_VOICE_EAR or ~/.hark/voice_ear.py") from None
+
+
+def _normalized(word):
+    return re.sub(r"[^\w']", "", word.casefold().replace("’", "'"))
+
+
+def _word_anchors(pending):
+    words = []
+    for speaker, part in pending.items():
+        text, owners = "", []
+        for token in part.tokens:
+            text += token.text
+            owners.extend([token] * len(token.text))
+        for match in re.finditer(r"\S+", text):
+            tokens = list({id(t): t for t in owners[match.start():match.end()]}.values())
+            if _normalized(match.group()):
+                words.append((speaker, tokens, match.group()))
+    return sorted(words, key=lambda word: word[1][0].start)
+
+
+def _align(text, anchors):
+    """Align final words to streaming word anchors without inventing timestamps."""
+    final = text.split()
+    raw = [_normalized(word[2]) for word in anchors]
+    rows = [list(range(len(final) + 1))]
+    paths = []
+    for i, a in enumerate(raw, 1):
+        row, path = [i], [1]
+        for j, b in enumerate(final, 1):
+            cost, operation = min((rows[-1][j - 1] + (a != _normalized(b)), 0),
+                                  (rows[-1][j] + 1, 1), (row[-1] + 1, 2))
+            row.append(cost)
+            path.append(operation)
+        rows.append(row)
+        paths.append(path)
+    i, j = len(raw), len(final)
+    indices = []
+    while j:
+        operation = paths[i - 1][j] if i else 2
+        if operation == 0:
+            indices.append(i - 1)
+            i, j = i - 1, j - 1
+        elif operation == 1:
+            i -= 1
+        else:
+            indices.append(max(0, i - 1))
+            j -= 1
+    return [(anchors[index], word) for index, word in zip(reversed(indices), final)]
+
+
+def quiet_boundary(audio, at):
+    """Place an acoustic cut in a quiet 40 ms frame near an RNNT timestamp."""
+    frame = SAMPLE_RATE // 25
+    lo = max(audio.start, at - .6)
+    samples = audio.slice(lo, at + .2)
+    count = len(samples) // frame
+    if not count:
+        return at
+    energy = np.mean(samples[:count * frame].reshape(count, frame) ** 2, axis=1)
+    if energy.min() > 10 ** (-55 / 10):
+        return at
+    quiet = np.flatnonzero(energy <= max(energy.min() * 2, 1e-7))
+    centers = lo + (quiet + .5) * frame / SAMPLE_RATE
+    return float(centers[np.argmin(abs(centers - at))])
+
+
+class Partial:
+    """Atomically replaced, private display text; never part of the transcript."""
+
+    def __init__(self, transcript):
+        self.path = Path(transcript).with_suffix(".partial")
+        self.text = None
+        self.write("")
+
+    def write(self, text):
+        if text == self.text:
+            return
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=self.path.parent,
+                                         prefix=self.path.name + ".", delete=False) as stream:
+            temporary = Path(stream.name)
+            try:
+                stream.write(text)
+                stream.close()
+                os.replace(temporary, self.path)
+            finally:
+                temporary.unlink(missing_ok=True)
+        self.text = text
 
 
 class VoiceTrack(Track):
@@ -28,11 +140,23 @@ class VoiceTrack(Track):
     tail = 3 * SAMPLE_RATE
     threshold = 10 ** (-55 / 20)
 
-    def __init__(self, *args, gate=True, **kwargs):
+    def __init__(self, *args, gate=True, refiner=None, report=None, words=VOICE_WORDS, **kwargs):
         kwargs.setdefault("gap", VOICE_GAP)
         kwargs.setdefault("max_len", VOICE_MAX_LEN)
         super().__init__(*args, **kwargs)
         self.gate = gate
+        self.refiner = refiner
+        self.words = words
+        self.report = report or (lambda message: print(message, file=sys.stderr))
+        self._run_start = None
+        self._run_end = 0.0
+        self._last_loud = 0.0
+        self._ready = []
+        if refiner is not None:
+            from .voice import AudioBuffer
+
+            self.audio = AudioBuffer(seconds=self.max_len + 15)
+            self.flush = self._flush_voice
         self._held = np.zeros(0, np.float32)
         self._tail_left = 0
         self._sent = 0
@@ -44,14 +168,28 @@ class VoiceTrack(Track):
         step = SAMPLE_RATE // 2
         for i in range(0, samples.size, step):
             self._step(samples[i:i + step])
+            if self.refiner is not None:
+                self._ready.extend(self._flush_run())
         if final:
             self._step(samples[:0], final=True)
+            if self.refiner is not None:
+                self._ready.extend(self._flush_run(force=True))
 
     def add_wall_gap(self, at, origin):
         """Anchor resumed mic samples without moving speech buffered before sleep."""
         if not self._tail_left and not any(p.tokens for p in self.pending.values()):
             self._wall_clock = deque([self._wall_clock[-1]])
         self._wall_clock.append((at, origin - self.t0.timestamp()))
+
+    @property
+    def partial(self):
+        """Raw words for display only; never a finalized transcript line."""
+        lines = []
+        for speaker, pending in self.pending.items():
+            utterance = Track._utterance(self, speaker, pending.tokens) if pending.tokens else None
+            if utterance:
+                lines.append((utterance.start, f"{utterance.speaker}: {utterance.text}"))
+        return "\n".join(text for _, text in sorted(lines))
 
     def _utterance(self, speaker, tokens):
         utterance = super()._utterance(speaker, tokens)
@@ -63,6 +201,70 @@ class VoiceTrack(Track):
                 offset = value
             utterance.wall += timedelta(seconds=offset)
         return utterance
+
+    def _flush_voice(self, force=False):
+        out, self._ready = self._ready, []
+        while self._run_start is not None:
+            before = self._run_start
+            out.extend(self._flush_run(force=force))
+            if not force or self._run_start == before:
+                break
+        return out
+
+    def _flush_run(self, force=False):
+        if self._run_start is None:
+            return []
+        start = self._run_start
+        clock = self.audio_samples / SAMPLE_RATE
+        quiet = clock - self._last_loud >= self.gap and self.processed >= self._last_loud + .5
+        preview = self.partial
+        early = len(preview.split()) >= self.words or VOICE_NAME.search(preview)
+        if not force and not quiet and not early and self.processed - start < self.max_len:
+            return []
+        end = min(clock, self.processed if not force else clock, start + self.max_len)
+        end = min(end, next((b for b, _ in self._wall_clock if start < b <= end), end))
+        if end < clock and end - start >= self.max_len - .01:
+            end = quiet_boundary(self.audio, end)
+        chosen = {speaker: _Pending([t for t in part.tokens if t.start < end])
+                  for speaker, part in self.pending.items()}
+        anchors = _word_anchors(chosen)
+        samples = self.audio.slice(start, end)
+        # Preroll can straddle a sleep boundary; an empty prefix must still advance.
+        speech = samples.size and float(np.max(samples * samples)) >= self.threshold ** 2
+        try:
+            text = self.refiner(samples).strip() if speech else ""
+            if not text:
+                raise ValueError("empty finished text")
+        except Exception as error:
+            # External adapters may carry secrets in exception messages or URLs.
+            if speech:
+                self.report(f"voice ear failed ({type(error).__name__}); writing raw recognition")
+            output = [u for speaker, part in chosen.items()
+                      if part.tokens and (u := self._utterance(speaker, part.tokens))]
+        else:
+            output, groups = [], []
+            if not anchors:
+                wall = self.t0 + timedelta(seconds=start)
+                for boundary, offset in self._wall_clock:
+                    if boundary <= start:
+                        wall = self.t0 + timedelta(seconds=start + offset)
+                output.append(Utterance(self.name, "S?", start, min(end, self._last_loud), wall, text))
+            for (speaker, tokens, _), word in _align(text, anchors) if anchors else []:
+                if not groups or groups[-1][0] != speaker:
+                    groups.append((speaker, [], []))
+                groups[-1][1].extend(tokens)
+                groups[-1][2].append(word)
+            for speaker, tokens, words in groups:
+                unique = sorted({id(t): t for t in tokens}.values(), key=lambda t: t.start)
+                utterance = self._utterance(speaker, unique)
+                utterance.text = " ".join(words)
+                output.append(utterance)
+        for part in self.pending.values():
+            part.tokens = [t for t in part.tokens if t.start >= end]
+        self._run_end = end
+        self._run_start = end if end < self._last_loud or any(p.tokens for p in self.pending.values()) else None
+        self._prune_wall_clock()
+        return output
 
     def _flush_plan(self, tracks, force, wall_times):
         cuts = super()._flush_plan(tracks, force, wall_times)
@@ -76,11 +278,14 @@ class VoiceTrack(Track):
 
     def _apply_flush(self, cuts):
         out = super()._apply_flush(cuts)
+        self._prune_wall_clock()
+        return out
+
+    def _prune_wall_clock(self):
         safe = self._mic_time(super().processed) - 1
         safe = min((token.start for p in self.pending.values() for token in p.tokens), default=safe)
         while len(self._wall_clock) > 1 and self._wall_clock[1][0] < safe:
             self._wall_clock.popleft()
-        return out
 
     def _mic_time(self, seconds, *, end=False):
         sample = round(seconds * SAMPLE_RATE)
@@ -108,7 +313,8 @@ class VoiceTrack(Track):
                 token = copy(original)
                 token.start = self._mic_time(original.start)
                 token.end = self._mic_time(original.end, end=True)
-                pending.tokens.append(token)
+                if self.refiner is None or (self._run_start is not None and token.start >= self._run_end):
+                    pending.tokens.append(token)
         # New tokens cannot precede the model's committed feature clock.
         committed = self.session._mel_offset * self.hop - SAMPLE_RATE
         while len(self._clock) > 1 and self._clock[1][0] < committed:
@@ -127,6 +333,11 @@ class VoiceTrack(Track):
             at = start + i
             loud = float(np.mean(chunk * chunk)) >= self.threshold ** 2
             if loud:
+                if self._run_start is None:
+                    if self.refiner is not None:
+                        onset = max(0, (at - self.preroll) / SAMPLE_RATE)
+                        self._run_start = max(self._run_end, self.audio.start, onset)
+                self._last_loud = (at + chunk.size) / SAMPLE_RATE
                 self._tail_left = self.tail
                 if self._held.size:
                     self._submit(self._held, at - self._held.size)

@@ -1,7 +1,7 @@
 """hark — capture a conversation, append one speaker-labelled line per utterance.
 
     hark                 desktop meeting (including in person): mic + system audio when available
-    hark --voice         continuous mic-only dictation, with low-latency local recognition
+    hark --voice         continuous mic-only dictation, with a configured external voice ear
     hark --phone         mobile meeting: phone PCM into ~/.hark/phone.sock, diarized
     hark --file x.wav    transcribe a file through the same streaming path
 
@@ -257,7 +257,7 @@ def main(argv=None):
     mode.add_argument("--phone", action="store_true",
                       help="a phone as the mic: listen for s16le 16 kHz PCM on ~/.hark/phone.sock, diarized")
     mode.add_argument("--voice", action="store_true",
-                      help="continuous mic-only dictation with low-latency local recognition")
+                      help="continuous mic dictation; local speaker timing and a configured external final-text ear")
     mode.add_argument("--mic-only", action="store_true",
                       help="transcribe the mic alone while keeping system audio as the AEC reference")
     mode.add_argument("--file", help="transcribe an audio file instead of live input")
@@ -278,7 +278,7 @@ def main(argv=None):
                     help="who hears an 80 ms frame two speakers hold: exclusive=the more "
                          "probable speaker only (default), shared=both ASR streams")
     ap.add_argument("--gap", type=float, default=None,
-                    help="seconds of silence that end a turn (meeting: 3; voice: 0.5)")
+                    help="seconds of silence that end a turn (meeting: 3; voice: 2)")
     ap.add_argument("--title", help="appended to the session filename")
     ap.add_argument("--mirror", help="append the transcript to HOST:PATH over SSH")
     ap.add_argument("-o", "--out", type=Path, help="write the transcript here instead of ~/.hark/sessions/")
@@ -287,7 +287,7 @@ def main(argv=None):
                     help="keep the live tracks as <stem>.<track>.wav beside the transcript")
     args = ap.parse_args(argv)
     args.ear = args.ear or _default_ear()
-    from .live_voice import VOICE_GAP, VOICE_LATENCY, VoiceTrack
+    from .live_voice import VOICE_GAP, VOICE_LATENCY, Partial, VoiceTrack, load_refiner
 
     args.gap = args.gap if args.gap is not None else (VOICE_GAP if args.voice else 3.0)
     args.latency = args.latency or (VOICE_LATENCY if args.voice else "low")
@@ -366,6 +366,7 @@ def main(argv=None):
 
         deduper = EchoDeduper(report=log)
     pause_monitor = None
+    partial = None
     mirror_complete = True
     tracks_by_name = {}
     failed_slots = set()
@@ -463,12 +464,14 @@ def main(argv=None):
                 "credits_left": credits}
 
     def open_sink():
-        nonlocal sink, matcher, mirror
+        nonlocal sink, matcher, mirror, partial
         out.parent.mkdir(parents=True, exist_ok=True)
         log_to(out.with_suffix(".log"))
         if live:
             _point_current(out)
         sink = Sink(out, f"hark {now:%Y-%m-%d %H:%M} — {what}")
+        if args.voice:
+            partial = Partial(out)
         if voices:
             from .voice import VoiceMatcher
 
@@ -517,15 +520,17 @@ def main(argv=None):
                 voices = ({path.stem: np.load(path) for path in (HOME / "voices").glob("*.npy")}
                           if (HOME / "voices").exists() else {})
                 mask = MaskPolicy.parse(args.speaker_mask) if args.speaker_mask != "shared" else None
+                voice_options = {"refiner": load_refiner(language=args.lang), "report": log} if args.voice else {}
                 tracks = [(src, gradium.GradiumTrack(src.name, key=key, language=args.lang,
                                              realtime=live or args.realtime, voices=voices)
                            if args.ear == "gradium" else
                            (VoiceTrack if args.voice else Track)(
                                src.name, asr, diar, speaker_label=label,
-                               language=args.lang, gap=args.gap, mask=mask, stop=stop))
+                               language=args.lang, gap=args.gap, mask=mask, stop=stop,
+                               **voice_options))
                           for src, label in sources]
                 all_tracks = [track for _, track in tracks]
-                if not voices and args.ear == "local":
+                if not voices and args.ear == "local" and not args.voice:
                     for track in all_tracks:
                         track.audio = None
                 tracks_by_name = {track.name: track for _, track in tracks}
@@ -600,6 +605,9 @@ def main(argv=None):
                 for u in ready_utterances(flush_tracks(all_tracks)):
                     _emit(u, sink, matcher, tracks_by_name, failed_slots, slots)
                     said[u.track] = said.get(u.track, 0) + 1
+                if partial:
+                    muted = pause_monitor and (pause_monitor.manual.read() or pause_monitor.automatic)
+                    partial.write("" if muted else "\n".join(getattr(t, "partial", "") for t in all_tracks))
                 if args.ear == "gradium":
                     for track in all_tracks:
                         track.check()
@@ -689,6 +697,8 @@ def main(argv=None):
             return 1
         raise
     finally:
+        if partial:
+            partial.write("")
         if pause_monitor:
             pause_monitor.stop()
         if watcher:

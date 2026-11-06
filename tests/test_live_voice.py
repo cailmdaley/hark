@@ -16,6 +16,11 @@ from hark.transcript import flush_tracks, numbered
 from test_cli import fake_live_capture, signal_when_live
 
 
+@pytest.fixture(autouse=True)
+def no_batch_model(monkeypatch):
+    monkeypatch.setattr("hark.live_voice.load_refiner", lambda **kwargs: None)
+
+
 class Session:
     def __init__(self):
         self._mel_offset = 0
@@ -134,7 +139,7 @@ def test_ungated_reference_feeds_every_sample():
 
 def test_voice_defaults_do_not_change_meeting_track_defaults():
     t = track()
-    assert (t.gap, t.max_len) == (.5, 6)
+    assert (t.gap, t.max_len) == (2, 25)
     assert t.t0.tzinfo is None  # CLI owns the source's wall anchor.
 
 
@@ -176,7 +181,7 @@ def test_voice_cli_owns_kind_mic_only_tuned_capture_and_aware_spoken_start(tmp_p
     assert state["kind"] == "voice" and state["phase"] == "ended"
     assert state["system_audio"] is False
     assert [t.name for t, _ in made] == ["mic"]
-    assert made[0][1]["gap"] == .5
+    assert made[0][1]["gap"] == 2
     assert presets == ["ultra_low"]
     assert ManualPause(tmp_path).read()
     assert made[0][0].t0.tzinfo is not None

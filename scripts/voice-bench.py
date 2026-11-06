@@ -2,7 +2,9 @@
 """Replay local audio to measure voice latency, compute and retained state.
 
 Run with uv run scripts/voice-bench.py --file speech.wav --seconds 3600.
-Mixed input repeats the clip followed by equally long digital silence.
+Mixed input repeats the clip followed by equally long digital silence, or the
+specified --silence-seconds. Voice runs use a constant external-ear stub: they
+exercise run buffering/alignment without uploading audio or measuring cloud cost.
 Use --realtime --gpu for whole-device GPU sampling while listening; those
 samples include other apps and are not Hark-attributable power measurements.
 No microphone opens, no audio is saved, and transcript text is not printed.
@@ -36,6 +38,7 @@ def main():
     ap.add_argument("--seconds", type=float, default=60)
     ap.add_argument("--pattern", choices=["mixed", "speech", "silence"], default="mixed")
     ap.add_argument("--mode", choices=["meeting", "tuned", "voice"], default="voice")
+    ap.add_argument("--silence-seconds", type=float, help="quiet time after each mixed speech clip")
     ap.add_argument("--realtime", action="store_true")
     ap.add_argument("--gpu", action="store_true", help="sample aggregate IOAccelerator utilization")
     args = ap.parse_args()
@@ -48,15 +51,18 @@ def main():
     else:
         cycle = load_audio(args.file)
         if args.pattern == "mixed":
-            cycle = np.concatenate((cycle, np.zeros_like(cycle)))
+            quiet = np.zeros_like(cycle) if args.silence_seconds is None else np.zeros(round(args.silence_seconds * SAMPLE_RATE), np.float32)
+            cycle = np.concatenate((cycle, quiet))
     if not cycle.size:
         ap.error("input clip is empty")
     preset = "low" if args.mode == "meeting" else "ultra_low"
     asr, diar = load_models(preset)
     cls = VoiceTrack if args.mode == "voice" else Track
+    options = {"refiner": lambda _: "replayed speech"} if args.mode == "voice" else {}
     track = cls("mic", asr, diar, speaker_label=numbered, mask=MaskPolicy.parse("exclusive"),
-                gap=3 if args.mode == "meeting" else .5,
-                max_len=30 if args.mode == "meeting" else 6)
+                gap=3 if args.mode == "meeting" else 2 if args.mode == "voice" else .5,
+                max_len=30 if args.mode == "meeting" else 25 if args.mode == "voice" else 6,
+                **options)
     # Keep the normal rolling voice-match audio buffer enabled.
     print(json.dumps({"configuration": vars(args), "device": mx.device_info(),
                       "platform": platform.platform(), "pid": os.getpid(),

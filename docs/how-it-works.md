@@ -168,10 +168,23 @@ The 58-second upload cap leaves two seconds of headroom below a 60-second unit, 
 
 ## Continuous voice
 
-`--voice` selects the mic alone and the local ear.
-`VoiceTrack` uses the existing speaker-streaming models and voice matching, with `ultra_low` diarizer lookahead, a 0.5 s turn gap and a 6 s monologue threshold.
-Meeting parameters are independent.
-There is no AEC alignment buffer or cross-track deduplication wait.
+`--voice` selects the mic alone, local speaker-streaming models and an operator-owned external ear for finished text.
+`VoiceTrack` uses `ultra_low` diarizer lookahead, a 2 s quiet threshold and a 25 s physical-run cap.
+The run closes only after enough streaming audio has committed to drain delayed words.
+Meeting parameters are independent; there is no AEC buffer or cross-track deduplication wait.
+
+One external call receives each bounded physical run, not each diarizer slot's overlapping audio.
+The adapter is loaded from `HARK_VOICE_EAR` or `~/.hark/voice_ear.py`; its `create(language=None)` returns a mono 16 kHz PCM-to-text callable.
+A word-edit alignment joins its final words to the local recognizer's original speaker/time anchors.
+Substitutions retain the corresponding anchor; inserted words inherit a neighboring anchor.
+If no raw word exists, recovered text uses `S?` and acoustic-run times.
+Failed or empty calls write the raw text once; errors reveal only their exception class.
+No private service protocol or credential is part of hark.
+
+The final transcript stays append-only.
+`<stem>.partial` holds raw pending words for display only, with one `S1: text` line per slot, atomic mode-0600 replacement, and no rewrite when unchanged.
+The CLI clears it while muted and on clean shutdown.
+It never enters the transcript, JSONL or delivery triggers.
 
 Before either model, a -55 dBFS RMS energy check examines 100 ms frames.
 It keeps 300 ms of pre-roll and a three-second tail, then stops submitting idle audio.
@@ -191,6 +204,7 @@ Other app detection and meeting capture keep their CoreAudio path.
 
 `uv run scripts/voice-bench.py --file speech.wav --seconds 3600` replays alternating speech and silence, recording CPU time, inference wall time, RSS, MLX allocations, pending tokens, clock boundaries and emission times once per source minute.
 `--pattern speech|silence`, `--mode meeting|tuned|voice` and `--realtime` isolate workloads and the idle gate.
+`--silence-seconds` sets a mixed replay's duty cycle; voice uses a constant external-ear stub and makes no network calls.
 `--gpu` samples whole-device GPU occupancy through IORegistry; it includes other applications and isn't per-process power.
 The script opens no microphone and prints no transcript text.
 

@@ -22,7 +22,7 @@ A few seconds after each person finishes speaking, their words are appended to t
 An agent running alongside you (Claude Code, Codex, or anything that can read a file) follows that file as it grows.
 By the time the call ends, the notes are written, the questions raised have answers, and the agreed work is already under way.
 
-`hark --voice` keeps the mic running as a local dictation channel.
+`hark --voice` keeps the mic running as a dictation channel, with local speaker timing and a configured external ear for final words.
 It writes the same files, with shorter turns and an idle gate that stops model work during quiet periods.
 There’s no system-audio capture or echo-cancellation buffer; audio played through speakers can still reach the microphone.
 [Voice capture](docs/usage.md#continuous-voice) covers timing, mute controls and limits.
@@ -36,7 +36,7 @@ hark takes the opposite approach.
 - **The file is the interface.** hark only ever appends lines, and stops at an `# ended` line. Any agent harness can follow that, with `tail -F`, a file watcher, or by re-reading every so often and remembering how many lines it has seen. hark has no plugin system, server or SDK.
 - **Live, not after the fact.** Lines land within seconds, so an agent can act during the meeting rather than summarise it afterwards.
 - **Speakers are part of the record.** Every line says who spoke. Names can be assigned mid-meeting (`hark name S2 Ada`), or matched automatically against voices you've enrolled.
-- **Local by default.** On Apple Silicon, recognition and speaker separation run entirely on the laptop. No audio leaves the machine, and nothing costs money per minute.
+- **Meetings are local by default.** On Apple Silicon, meeting recognition and speaker separation run entirely on the laptop. Voice's operator-owned external ear can send audio off-device; its privacy and billing depend on that adapter.
 - **Honest about gaps.** If a microphone or the call audio stops delivering samples for 90 seconds, the transcript says so (`# system audio lost at 16:37:55`), so a reader doesn't take a gap for silence.
 
 The format is a small, documented contract ([docs/format.md](docs/format.md)). Beside the text file sits a JSONL file carrying the same lines as structured records, with exact start and end times, speaker and audio source.
@@ -93,7 +93,7 @@ Without the second permission, the call side comes through as silence.
 
 ```bash
 hark                          # desktop meeting, including in person: mic + system when available
-hark --voice                  # continuous local dictation, microphone only
+hark --voice                  # continuous dictation, configured external ear, mic only
 hark --phone                  # mobile meeting, phone microphone
 hark --file talk.m4a          # an existing recording
 hark name S2 Ada              # name a speaker in the live session
