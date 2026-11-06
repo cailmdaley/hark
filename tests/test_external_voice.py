@@ -118,12 +118,12 @@ def test_partial_is_private_atomic_and_independent_of_transcript(tmp_path):
     partial = Partial(transcript)
     assert partial.path.read_text() == ""
     first = partial.path.stat().st_ino
-    partial.write("S1: raw provisional words")
-    assert partial.path.read_text() == "S1: raw provisional words"
+    partial.write("raw provisional words")
+    assert partial.path.read_text() == "raw provisional words"
     assert partial.path.stat().st_ino != first
     assert partial.path.stat().st_mode & 0o777 == 0o600
     stamp = partial.path.stat().st_mtime_ns
-    partial.write("S1: raw provisional words")
+    partial.write("raw provisional words")
     assert partial.path.stat().st_mtime_ns == stamp
     partial.write("")
     assert partial.path.read_text() == ""

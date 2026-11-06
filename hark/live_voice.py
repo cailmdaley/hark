@@ -217,7 +217,7 @@ class VoiceTrack(Track):
         for speaker, pending in self.pending.items():
             utterance = Track._utterance(self, speaker, pending.tokens) if pending.tokens else None
             if utterance:
-                lines.append((utterance.start, f"{utterance.speaker}: {utterance.text}"))
+                lines.append((utterance.start, utterance.text))
         return "\n".join(text for _, text in sorted(lines))
 
     def _utterance(self, speaker, tokens):
