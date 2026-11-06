@@ -169,14 +169,19 @@ The 58-second upload cap leaves two seconds of headroom below a 60-second unit, 
 ## Continuous voice
 
 `--voice` selects the mic alone, local speaker-streaming models and an operator-owned external ear for finished text.
-`VoiceTrack` uses `ultra_low` diarizer lookahead, a 2 s quiet threshold and a 25 s physical-run cap.
-The run closes only after enough streaming audio has committed to drain delayed words.
+`VoiceTrack` uses `ultra_low` diarizer lookahead, a 5 s quiet threshold, about 200 raw words per run and a hard 75 s physical-run cap.
+Raw recognition of Claude's name closes a run early.
+Quiet closure waits until enough streaming audio has committed to drain delayed words.
+The external-ear PCM ring retains 90 s, independent of session length.
+`--settings PATH` reloads `run_quiet_seconds` from the launcher's JSON on file changes; `--gap` overrides it.
 Meeting parameters are independent; there is no AEC buffer or cross-track deduplication wait.
 
 One external call receives each bounded physical run, not each diarizer slot's overlapping audio.
 The adapter is loaded from `HARK_VOICE_EAR` or `~/.hark/voice_ear.py`; its `create(language=None)` returns a mono 16 kHz PCM-to-text callable.
 A word-edit alignment joins its final words to the local recognizer's original speaker/time anchors.
 Substitutions retain the corresponding anchor; inserted words inherit a neighboring anchor.
+Closing a physical run consumes all its delayed anchors, including timestamps beyond its audio endpoint.
+Final words keep the ear's order even when diarizer anchor end times cross.
 If no raw word exists, recovered text uses `S?` and acoustic-run times.
 Failed or empty calls write the raw text once; errors reveal only their exception class.
 No private service protocol or credential is part of hark.

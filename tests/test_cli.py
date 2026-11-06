@@ -495,6 +495,9 @@ def test_phone_listens_on_the_hark_dir_socket_and_saves_a_phone_track(tmp_path, 
 
 @pytest.mark.parametrize("mode", [[], ["--call"]])
 def test_live_saves_mic_and_system_tracks_each_with_its_own_samples(tmp_path, monkeypatch, mode):
+    from hark import aec
+
+    aec.EchoCanceller()  # Load native libraries before starting the signal deadline.
     cli, Source = fake_live_capture(monkeypatch, tmp_path)
     Mic, mic_fed = feed_chunks(Source, "mic", [tone(440, 3000)])
     System, system_fed = feed_chunks(Source, "system", [tone(220, 4000), tone(330, 1000)])
@@ -502,10 +505,14 @@ def test_live_saves_mic_and_system_tracks_each_with_its_own_samples(tmp_path, mo
     monkeypatch.setattr(cli, "SystemSource", System)
     monkeypatch.setattr(cli, "_system_capture_available", lambda: True)
     heard = {"mic": [], "system": []}
+    ready = threading.Event()
     class RecordingTrack(cli.Track):
-        def feed(self, samples, **kwargs): heard[self.name].append(samples)
+        def feed(self, samples, **kwargs):
+            heard[self.name].append(samples)
+            if sum(a.size for a in heard["system"]) >= 5000:
+                ready.set()
     monkeypatch.setattr(cli, "Track", RecordingTrack)
-    signaller, _ = signal_when_live(tmp_path)
+    signaller, _ = signal_when_live(tmp_path, ready=ready)
     out = tmp_path / "meetings" / "call.txt"
 
     cli.main(mode + ["--ear", "local", "--keep-audio", "-o", str(out)])

@@ -139,7 +139,7 @@ def test_ungated_reference_feeds_every_sample():
 
 def test_voice_defaults_do_not_change_meeting_track_defaults():
     t = track()
-    assert (t.gap, t.max_len) == (2, 25)
+    assert (t.gap, t.max_len) == (5, 75)
     assert t.t0.tzinfo is None  # CLI owns the source's wall anchor.
 
 
@@ -181,7 +181,7 @@ def test_voice_cli_owns_kind_mic_only_tuned_capture_and_aware_spoken_start(tmp_p
     assert state["kind"] == "voice" and state["phase"] == "ended"
     assert state["system_audio"] is False
     assert [t.name for t, _ in made] == ["mic"]
-    assert made[0][1]["gap"] == 2
+    assert made[0][1]["gap"] == 5
     assert presets == ["ultra_low"]
     assert ManualPause(tmp_path).read()
     assert made[0][0].t0.tzinfo is not None
@@ -192,6 +192,7 @@ def test_voice_cli_owns_kind_mic_only_tuned_capture_and_aware_spoken_start(tmp_p
     assert (tmp_path / "voice.txt").read_text().splitlines()[-1].startswith("# ended ")
 
 
+@pytest.mark.parametrize("external", [False, True])
 @pytest.mark.parametrize("token_delay", [0, .64])
 @pytest.mark.parametrize("audio_on_wake", [False, True])
 @pytest.mark.parametrize("queued_before_sleep", [False, True])
@@ -199,8 +200,15 @@ def test_voice_cli_owns_kind_mic_only_tuned_capture_and_aware_spoken_start(tmp_p
 @pytest.mark.parametrize("mute_window", ["none", "prefix", "sleep"])
 def test_sleep_gap_preserves_held_and_resumed_speech_through_real_source_and_mic_gate(
         tmp_path, monkeypatch, token_delay, audio_on_wake, queued_before_sleep, resumed_blocks,
-        mute_window):
+        mute_window, external):
     from hark.capture import Source
+
+    if external:
+        def recognize(audio):
+            counts = [np.count_nonzero(audio == value) for value in (1, 2)]
+            words = [max(1, round(n / (SAMPLE_RATE / 10))) if n else 0 for n in counts]
+            return " ".join(["before"] * words[0] + ["after"] * words[1])
+        monkeypatch.setattr("hark.live_voice.load_refiner", lambda **kwargs: recognize)
 
     clock = [100.]
     signals = []

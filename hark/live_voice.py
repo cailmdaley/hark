@@ -4,6 +4,8 @@ from collections import deque
 from copy import copy
 from datetime import timedelta
 import importlib.util
+import json
+import math
 import os
 from pathlib import Path
 import re
@@ -103,6 +105,30 @@ def quiet_boundary(audio, at):
     return float(centers[np.argmin(abs(centers - at))])
 
 
+class RunQuiet:
+    """Reload a launcher's quiet setting when its JSON file changes."""
+
+    def __init__(self, path):
+        self.path = Path(path).expanduser() if path else None
+        self.stamp = None
+        self.seconds = VOICE_GAP
+
+    def read(self):
+        if self.path is None:
+            return self.seconds
+        try:
+            stamp = self.path.stat().st_mtime_ns
+            if stamp == self.stamp:
+                return self.seconds
+            value = json.loads(self.path.read_text()).get("run_quiet_seconds", VOICE_GAP)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+                raise ValueError("invalid quiet setting")
+        except (OSError, ValueError, AttributeError, OverflowError):
+            stamp, value = None, VOICE_GAP
+        self.stamp, self.seconds = stamp, float(value)
+        return self.seconds
+
+
 class Partial:
     """Atomically replaced, private display text; never part of the transcript."""
 
@@ -135,12 +161,15 @@ class VoiceTrack(Track):
     Speaker caches and identities survive idle periods.
     """
 
+    ordered_flush = True  # External word order survives overlapping diarizer anchors.
     frame = SAMPLE_RATE // 10
     preroll = 3 * frame
     tail = 3 * SAMPLE_RATE
     threshold = 10 ** (-55 / 20)
 
     def __init__(self, *args, gate=True, refiner=None, report=None, words=VOICE_WORDS, **kwargs):
+        if refiner is not None and not gate:
+            raise ValueError("an external voice ear requires the acoustic gate")
         kwargs.setdefault("gap", VOICE_GAP)
         kwargs.setdefault("max_len", VOICE_MAX_LEN)
         super().__init__(*args, **kwargs)
@@ -218,14 +247,18 @@ class VoiceTrack(Track):
         clock = self.audio_samples / SAMPLE_RATE
         quiet = clock - self._last_loud >= self.gap and self.processed >= self._last_loud + .5
         preview = self.partial
-        early = len(preview.split()) >= self.words or VOICE_NAME.search(preview)
+        word_count = sum(len("".join(t.text for t in p.tokens).split()) for p in self.pending.values())
+        early = word_count >= self.words or VOICE_NAME.search(preview)
         if not force and not quiet and not early and self.processed - start < self.max_len:
             return []
         end = min(clock, self.processed if not force else clock, start + self.max_len)
         end = min(end, next((b for b, _ in self._wall_clock if start < b <= end), end))
         if end < clock and end - start >= self.max_len - .01:
-            end = quiet_boundary(self.audio, end)
-        chosen = {speaker: _Pending([t for t in part.tokens if t.start < end])
+            end = min(end, max(start, quiet_boundary(self.audio, end)))
+        # Delayed RNNT anchors can overshoot the physical PCM endpoint. When a
+        # run closes, all its anchors belong to it, including those future times.
+        complete = end >= self._last_loud
+        chosen = {speaker: _Pending([t for t in part.tokens if complete or t.start < end])
                   for speaker, part in self.pending.items()}
         anchors = _word_anchors(chosen)
         samples = self.audio.slice(start, end)
@@ -260,9 +293,9 @@ class VoiceTrack(Track):
                 utterance.text = " ".join(words)
                 output.append(utterance)
         for part in self.pending.values():
-            part.tokens = [t for t in part.tokens if t.start >= end]
+            part.tokens = [] if complete else [t for t in part.tokens if t.start >= end]
         self._run_end = end
-        self._run_start = end if end < self._last_loud or any(p.tokens for p in self.pending.values()) else None
+        self._run_start = None if complete else end
         self._prune_wall_clock()
         return output
 

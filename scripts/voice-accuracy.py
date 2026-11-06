@@ -28,6 +28,7 @@ import re
 import numpy as np
 
 from hark.capture import SAMPLE_RATE, load_audio
+from hark.live_voice import VOICE_GAP, VOICE_MAX_LEN
 
 PARAKEET = "mlx-community/parakeet-tdt-0.6b-v2"
 WHISPER = "mlx-community/whisper-large-v3-turbo-q4"
@@ -131,8 +132,8 @@ def main():
     parser.add_argument("--backend", choices=["streaming", "external", "parakeet", "whisper"], default="streaming")
     parser.add_argument("--preset", choices=["ultra_low", "very_low", "low", "offline"], default="ultra_low")
     parser.add_argument("--lang", default=None)
-    parser.add_argument("--gap", type=float, default=.5)
-    parser.add_argument("--max-len", type=float, default=6)
+    parser.add_argument("--gap", type=float, default=VOICE_GAP)
+    parser.add_argument("--max-len", type=float, default=VOICE_MAX_LEN)
     parser.add_argument("--margin", type=float, default=.2, help="batch window edge context in seconds")
     parser.add_argument("--partition", action="store_true", help="use consecutive nonoverlapping windows, split at quiet audio near each boundary")
     parser.add_argument("--prompt", action="store_true", help="Whisper vocabulary hint")
@@ -159,7 +160,7 @@ def main():
     if args.backend in {"streaming", "external"}:
         asr, diar = load_models(args.preset)
         if args.backend == "external":
-            refiner = load_refiner()
+            refiner = load_refiner(language=args.lang)
     elif args.backend == "parakeet":
         asr = load(PARAKEET)
     else:
@@ -177,19 +178,22 @@ def main():
         samples = load_audio(case["file"])
         duration = len(samples) / SAMPLE_RATE
         begin, cpu = time.perf_counter(), time.process_time()
-        lines, calls = [], []
+        lines, calls, call_audio_seconds = [], [], []
         if args.backend in {"streaming", "external"}:
             def recognize(audio):
                 before = time.perf_counter()
-                text = refiner(audio)
-                calls.append(time.perf_counter() - before)
-                return text
+                try:
+                    return refiner(audio)
+                finally:
+                    calls.append(time.perf_counter() - before)
+                    call_audio_seconds.append(len(audio) / SAMPLE_RATE)
 
             track = VoiceTrack("mic", asr, diar, speaker_label=numbered,
                                language=args.lang, gap=args.gap, max_len=args.max_len,
                                refiner=recognize if refiner else None,
                                mask=MaskPolicy.parse("exclusive"))
-            padded = np.concatenate((samples, np.zeros(4 * SAMPLE_RATE, np.float32)))
+            padding = max(4, args.gap + 1)
+            padded = np.concatenate((samples, np.zeros(round(padding * SAMPLE_RATE), np.float32)))
             for start in range(0, len(padded), SAMPLE_RATE // 2):
                 track.feed(padded[start:start + SAMPLE_RATE // 2])
                 for u in flush_tracks([track]):
@@ -198,7 +202,7 @@ def main():
             track.feed(np.zeros(0, np.float32), final=True)
             for u in flush_tracks([track], force=True):
                 lines.append(dict(start=u.start, end=u.end, speaker=u.speaker, text=u.text,
-                                  emitted_at=duration + 4))
+                                  emitted_at=duration + padding))
             del track
         else:
             previous_end = 0
@@ -224,10 +228,11 @@ def main():
                 lines.append(dict(start=segment["start"], end=segment["end"],
                                   speaker=segment.get("speaker", segment.get("voice")), text=text))
         mx.synchronize()
-        text = " ".join(line["text"] for line in sorted(lines, key=lambda line: line["start"]))
+        text = " ".join(line["text"] for line in lines)
         result = dict(kind="case", id=case["id"], group=case["group"], duration=duration,
                       wall_seconds=time.perf_counter() - begin, cpu_seconds=time.process_time() - cpu,
                       reference=case["reference"], text=text, lines=lines, calls=calls,
+                      call_audio_seconds=call_audio_seconds,
                       **score(case["reference"], text))
         results.append(result)
         print(json.dumps(result), flush=True)

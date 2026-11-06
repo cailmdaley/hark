@@ -155,7 +155,7 @@ class AudioBuffer:
     """A rolling mono sample buffer addressed by seconds from track start."""
 
     def __init__(self, seconds=45):
-        self.limit = seconds * 16000
+        self.limit = round(seconds * 16000)
         self.start = 0
         self.samples = np.zeros(0, dtype=np.float32)
 

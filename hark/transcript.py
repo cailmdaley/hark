@@ -180,7 +180,14 @@ class Track:
 
 
 def flush_tracks(tracks, force=False):
-    out = [u for track in tracks if hasattr(track, "flush") for u in track.flush(force=force)]
+    out, ordered = [], []
+    for track in tracks:
+        if hasattr(track, "flush"):
+            batch = track.flush(force=force)
+            if batch and getattr(track, "ordered_flush", False):
+                ordered.append(batch)
+            else:
+                out.extend(batch)
     tracks = [track for track in tracks if not hasattr(track, "flush")]
     wall_times = {}
     for track in tracks:
@@ -199,7 +206,8 @@ def flush_tracks(tracks, force=False):
         plans = [track._flush_plan(tracks, True, wall_times) for track in tracks]
         out.extend(utterance for track, cuts in zip(tracks, plans)
                    for utterance in track._apply_flush(cuts))
-    return sorted(out, key=lambda u: u.wall_span[1])
+    batches = [[u] for u in out] + ordered
+    return [u for batch in sorted(batches, key=lambda batch: batch[0].wall_span[1]) for u in batch]
 
 
 def _monologue_cut(tokens):

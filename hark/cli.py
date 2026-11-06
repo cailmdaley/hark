@@ -278,7 +278,9 @@ def main(argv=None):
                     help="who hears an 80 ms frame two speakers hold: exclusive=the more "
                          "probable speaker only (default), shared=both ASR streams")
     ap.add_argument("--gap", type=float, default=None,
-                    help="seconds of silence that end a turn (meeting: 3; voice: 2)")
+                    help="seconds of silence that end a turn (meeting: 3; voice: 5); overrides --settings")
+    ap.add_argument("--settings", type=Path,
+                    help="voice settings JSON; reloads run_quiet_seconds while capturing")
     ap.add_argument("--title", help="appended to the session filename")
     ap.add_argument("--mirror", help="append the transcript to HOST:PATH over SSH")
     ap.add_argument("-o", "--out", type=Path, help="write the transcript here instead of ~/.hark/sessions/")
@@ -287,9 +289,10 @@ def main(argv=None):
                     help="keep the live tracks as <stem>.<track>.wav beside the transcript")
     args = ap.parse_args(argv)
     args.ear = args.ear or _default_ear()
-    from .live_voice import VOICE_GAP, VOICE_LATENCY, Partial, VoiceTrack, load_refiner
+    from .live_voice import VOICE_LATENCY, Partial, RunQuiet, VoiceTrack, load_refiner
 
-    args.gap = args.gap if args.gap is not None else (VOICE_GAP if args.voice else 3.0)
+    run_quiet = RunQuiet(args.settings) if args.voice and args.gap is None else None
+    args.gap = args.gap if args.gap is not None else (run_quiet.read() if run_quiet else 3.0)
     args.latency = args.latency or (VOICE_LATENCY if args.voice else "low")
     if args.voice and args.ear != "local":
         ap.error("--voice requires the local ear on Apple Silicon")
@@ -601,6 +604,10 @@ def main(argv=None):
                         ear_beat = time.monotonic() + 1
                 if pause_monitor:
                     _pause_events(pause_monitor, sink)
+                if run_quiet:
+                    gap = run_quiet.read()
+                    for track in all_tracks:
+                        track.gap = gap
                 busy = feed_sources()
                 for u in ready_utterances(flush_tracks(all_tracks)):
                     _emit(u, sink, matcher, tracks_by_name, failed_slots, slots)
@@ -649,7 +656,9 @@ def main(argv=None):
                         final_utterances.extend(flush_tracks([track], force=True))
                     except Exception as error:
                         finish_error = finish_error or error
-                for u in ready_utterances(sorted(final_utterances, key=lambda u: u.wall_span[0]), final=True):
+                if not args.voice:
+                    final_utterances.sort(key=lambda u: u.wall_span[0])
+                for u in ready_utterances(final_utterances, final=True):
                     if sink:
                         _emit(u, sink, matcher, tracks_by_name, failed_slots, slots)
                 if finish_error and capture_error is None:

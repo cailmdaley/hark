@@ -23,7 +23,7 @@ import mlx.core as mx
 import numpy as np
 
 from hark.capture import SAMPLE_RATE, load_audio
-from hark.live_voice import VoiceTrack
+from hark.live_voice import VOICE_GAP, VOICE_MAX_LEN, VoiceTrack
 from hark.masking import MaskPolicy
 from hark.transcript import Track, flush_tracks, load_models, numbered
 
@@ -60,8 +60,8 @@ def main():
     cls = VoiceTrack if args.mode == "voice" else Track
     options = {"refiner": lambda _: "replayed speech"} if args.mode == "voice" else {}
     track = cls("mic", asr, diar, speaker_label=numbered, mask=MaskPolicy.parse("exclusive"),
-                gap=3 if args.mode == "meeting" else 2 if args.mode == "voice" else .5,
-                max_len=30 if args.mode == "meeting" else 25 if args.mode == "voice" else 6,
+                gap=3 if args.mode == "meeting" else VOICE_GAP if args.mode == "voice" else .5,
+                max_len=30 if args.mode == "meeting" else VOICE_MAX_LEN if args.mode == "voice" else 6,
                 **options)
     # Keep the normal rolling voice-match audio buffer enabled.
     print(json.dumps({"configuration": vars(args), "device": mx.device_info(),

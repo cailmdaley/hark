@@ -11,6 +11,7 @@ from test_live_voice import pcm, token, track
 
 
 def finished_track(recognize, **kwargs):
+    kwargs.setdefault("gap", 2)
     t = track(refiner=recognize, **kwargs)
     t.t0 = datetime.now().astimezone()
     return t
@@ -63,7 +64,7 @@ def test_idle_never_calls_external_ear_and_memory_stays_bounded():
     for _ in range(100):
         t.feed(pcm(30))
         assert flush_tracks([t]) == []
-    assert len(t.audio.samples) == 45 * SAMPLE_RATE
+    assert len(t.audio.samples) == 90 * SAMPLE_RATE
     assert not t._ready and not t.partial and t._run_start is None
 
 
@@ -187,7 +188,7 @@ def test_sleep_preroll_without_word_anchors_advances_and_preserves_resumed_wall_
 
 def test_punctuation_only_capped_prefix_cannot_block_a_later_word():
     calls = []
-    t = finished_track(lambda audio: calls.append(len(audio)) or "finished")
+    t = finished_track(lambda audio: calls.append(len(audio)) or "finished", max_len=25)
     t.session.tokens = [token(.1, .2, ".")]
     t.feed(pcm(26, .02))
     t.session.tokens = [token(26.1, 26.2, " word")]
@@ -227,3 +228,81 @@ def test_final_flush_drains_every_cap_even_without_raw_words():
     assert len(calls) == len(out) == 4
     assert sum(calls) == 8 * SAMPLE_RATE
     assert t._run_start is None
+
+
+@pytest.mark.parametrize("failure", [False, True])
+@pytest.mark.parametrize("force", [False, True])
+def test_delayed_anchors_belong_to_finished_physical_run(failure, force):
+    calls = []
+
+    def recognize(audio):
+        calls.append(len(audio))
+        if failure:
+            raise ValueError("failed")
+        return "finished words"
+
+    t = finished_track(recognize, gap=.5, report=lambda _: None)
+    t.session.tokens = [token(.64, .72, " raw words")]
+    t.feed(pcm(.1, .02))
+    if force:
+        t.feed(pcm(0), final=True)
+    else:
+        # Quiet finalization can precede a delayed raw timestamp.
+        t.feed(pcm(.5))
+    out = flush_tracks([t], force=force)
+    assert [u.text for u in out] == ["raw words" if failure else "finished words"]
+    assert out[0].speaker == "S1"
+    assert (out[0].start, out[0].end) == (.64, .72)
+    assert out[0].wall.timestamp() == pytest.approx(t.t0.timestamp() + .64)
+    assert t._run_start is None
+    assert not any(p.tokens for p in t.pending.values())
+    t.feed(pcm(6), final=True)
+    assert not flush_tracks([t], force=True)
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("force", [False, True])
+def test_crossing_speaker_end_times_preserve_external_word_order(force):
+    t = finished_track(lambda _: "one two three four")
+    t.session.tokens = [token(.1, .3, " one"), token(.5, .7, " three")]
+    t.feed(pcm(1, .02))
+    t.pending["speaker_1"] = _Pending([token(.2, .8, " two"), token(.6, .9, " four")])
+    t.feed(pcm(0) if force else pcm(3), final=force)
+    out = flush_tracks([t], force=force)
+    assert [u.text for u in out] == ["one", "two", "three", "four"]
+    assert [u.speaker for u in out] == ["S1", "S2", "S1", "S2"]
+    assert [(u.start, u.end) for u in out] == [(.1, .3), (.2, .8), (.5, .7), (.6, .9)]
+
+
+def test_acoustic_cap_never_exceeds_selected_hard_boundary():
+    calls = []
+    t = finished_track(lambda a: calls.append(a.copy()) or "finished", max_len=2)
+    t.session.feed = lambda *args, **kwargs: []
+    samples = pcm(3, .02)
+    samples[round(2.08 * SAMPLE_RATE):round(2.16 * SAMPLE_RATE)] = 0
+    t.feed(samples, final=True)
+    flush_tracks([t], force=True)
+    assert all(len(a) <= 2 * SAMPLE_RATE for a in calls)
+    np.testing.assert_array_equal(np.concatenate(calls), samples)
+
+
+def test_external_voice_requires_acoustic_gate():
+    with pytest.raises(ValueError, match="gate"):
+        finished_track(lambda _: "finished", gate=False)
+
+
+@pytest.mark.parametrize("raw", [" hello claw", " word" * 200])
+def test_raw_name_or_word_budget_closes_a_run_before_quiet(raw):
+    calls = []
+    t = finished_track(lambda a: calls.append(len(a)) or "finished")
+    t.session.tokens = [token(.1, .2, raw)]
+    t.feed(pcm(.5, .02))
+    assert [u.text for u in flush_tracks([t])] == ["finished"]
+    assert len(calls) == 1
+
+
+def test_voice_run_defaults_and_rolling_pcm_bound():
+    t = track(refiner=lambda _: "finished")
+    assert (t.gap, t.words, t.max_len) == (5, 200, 75)
+    t.feed(pcm(100))
+    assert len(t.audio.samples) == 90 * SAMPLE_RATE

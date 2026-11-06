@@ -23,7 +23,7 @@ An agent running alongside you (Claude Code, Codex, or anything that can read a 
 By the time the call ends, the notes are written, the questions raised have answers, and the agreed work is already under way.
 
 `hark --voice` keeps the mic running as a dictation channel, with local speaker timing and a configured external ear for final words.
-It writes the same files, with shorter turns and an idle gate that stops model work during quiet periods.
+It writes the same files, finishing runs after five seconds of quiet or about 200 raw words, with an idle gate that stops model work during quiet periods.
 There’s no system-audio capture or echo-cancellation buffer; audio played through speakers can still reach the microphone.
 [Voice capture](docs/usage.md#continuous-voice) covers timing, mute controls and limits.
 

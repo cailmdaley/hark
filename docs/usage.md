@@ -55,9 +55,13 @@ hark resume                     # unmute it
 ```
 
 Voice uses local Nemotron models for speaker labels, timing and raw preview, with `ultra_low` diarizer lookahead (0.32 s).
-An operator-configured external ear supplies the final words, once per physical speech run, after two seconds of quiet and the streaming model's drain or a 25 s run cap.
+An operator-configured external ear supplies the final words, once per physical speech run, after five seconds of quiet and the streaming model's drain, about 200 raw words, or a hard 75 s run cap.
+A raw spelling of Claude's name closes the run early.
 `--gap` and `--latency` override quiet time and diarizer lookahead; desktop meetings keep their own defaults.
-A cap can move to a nearby quiet acoustic frame to avoid clipping a word.
+A cap can move to a nearby quiet acoustic frame without exceeding the hard boundary.
+A 90 s rolling PCM buffer bounds retained audio.
+A launcher can pass `--settings ~/.config/shuttle/voice.json` with a top-level `run_quiet_seconds` number.
+Hark reloads that quiet setting while running; missing or invalid settings use five seconds, and an explicit `--gap` takes precedence.
 Run finalization, external recognition time and the consumer's delivery batching all contribute to latency.
 The transcript and JSONL contain only final text; `<stem>.partial` is a private, atomically replaced raw preview, never a delivery source.
 It contains one `S1: unfinished words` line per pending speaker and is empty while muted or after clean shutdown.
@@ -70,6 +74,7 @@ There is no built-in private service adapter or local batch recognizer.
 A failed or empty call appends the raw Nemotron text once and logs only the exception class, never the adapter's error message or URL.
 
 Final words inherit speaker/timing anchors by alignment to Nemotron's raw words, so corrections do not duplicate overlapping slot windows.
+External word order is preserved even when speaker anchors overlap or delayed timestamps extend beyond the submitted audio.
 When Nemotron supplies no words for audible speech, the external ear still receives the run; recovered words carry the unknown label `S?` and the acoustic run's timing rather than an invented identity.
 Diarization can still mistake one person for several slots, and a mono microphone cannot separate simultaneous voices cleanly.
 
