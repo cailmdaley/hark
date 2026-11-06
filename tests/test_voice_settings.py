@@ -103,7 +103,7 @@ def test_fixed_capture_refines_every_track(tmp_path, monkeypatch, flags, adapter
     def recording(kind):
         class Recorded:
             def __init__(self, name, *args, **kwargs):
-                built[name] = (kind, kwargs["gap"], kwargs.get("local_words_required"))
+                built[name] = (kind, kwargs["gap"], True)
                 self.name, self.gap, self.audio, self.processed, self.pending = name, kwargs["gap"], None, 0, {}
                 self.session = None
             def feed(self, *args, **kwargs):
@@ -138,4 +138,4 @@ def test_fixed_capture_refines_every_track(tmp_path, monkeypatch, flags, adapter
     monkeypatch.setattr("hark.aec.EchoCanceller", lambda **_: type("A", (), {"feed": lambda s, m, *a, **k: m})())
     cli.main(["--settings", str(settings), "--pause-for", "none", "-o", str(tmp_path / "fixed")] + flags)
     assert {name: value[:2] for name, value in built.items()} == expected
-    assert built["mic"][2] is (True if expected["mic"][0] == "VoiceTrack" else None)
+

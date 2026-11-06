@@ -540,8 +540,7 @@ def main(argv=None):
                     shared = dict(speaker_label=label, language=args.lang, mask=mask, stop=stop)
                     if args.voice or refiner:
                         src.pad_before_jump = True
-                        return VoiceTrack(src.name, asr, diar, gap=run_gap, refiner=refiner, report=log,
-                                          local_words_required=system_audio, **shared)
+                        return VoiceTrack(src.name, asr, diar, gap=run_gap, refiner=refiner, report=log, **shared)
                     return Track(src.name, asr, diar, gap=args.gap, **shared)
 
                 tracks = [(src, gradium.GradiumTrack(src.name, key=key, language=args.lang,

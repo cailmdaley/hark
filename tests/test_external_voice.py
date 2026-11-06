@@ -153,16 +153,11 @@ def test_adapter_setup_failure_is_sanitized(tmp_path, monkeypatch):
     assert error.value.__suppress_context__
 
 
-def test_raw_empty_speech_still_reaches_external_ear_without_claiming_an_identity():
+def test_noise_above_the_gate_never_reaches_the_ear():
     calls = []
-    t = finished_track(lambda audio: calls.append(len(audio)) or "recovered phrase")
-    t.feed(pcm(1, .02))
-    t.feed(pcm(3))
-    out = flush_tracks([t], force=True)
-    assert len(calls) == 1
-    assert [u.text for u in out] == ["recovered phrase"]
-    assert out[0].speaker == "S?"
-    assert not any(p.tokens for p in t.pending.values())
+    t = finished_track(calls.append)
+    t.feed(pcm(30, .02))
+    assert flush_tracks([t], force=True) == [] and not calls
 
 
 def test_sleep_preroll_without_word_anchors_advances_and_preserves_resumed_wall_time():
@@ -196,8 +191,8 @@ def test_punctuation_only_capped_prefix_cannot_block_a_later_word():
     t.feed(pcm(3))
     t.feed(pcm(0), final=True)
     out = flush_tracks([t], force=True)
-    assert len(calls) == 2
-    assert len(out) == 2
+    assert len(calls) == 1
+    assert len(out) == 1
     assert not any(p.tokens for p in t.pending.values())
     assert t._run_start is None
 
@@ -214,20 +209,6 @@ def test_delayed_tokens_after_finished_run_do_not_call_ear_on_a_silent_tail():
     t.feed(pcm(0), final=True)
     assert not flush_tracks([t], force=True)
     assert len(calls) == 1
-
-
-def test_final_flush_drains_every_cap_even_without_raw_words():
-    calls = []
-    t = finished_track(lambda audio: calls.append(len(audio)) or "finished", max_len=2)
-    # Delay the processed clock so all eight seconds are still pending at shutdown.
-    t.session.feed = lambda *args, **kwargs: []
-    t.feed(pcm(8, .02))
-    assert not calls
-    t.feed(pcm(0), final=True)
-    out = flush_tracks([t], force=True)
-    assert len(calls) == len(out) == 4
-    assert sum(calls) == 8 * SAMPLE_RATE
-    assert t._run_start is None
 
 
 @pytest.mark.parametrize("failure", [False, True])
@@ -248,7 +229,7 @@ def test_delayed_anchors_belong_to_finished_physical_run(failure, force):
         t.feed(pcm(0), final=True)
     else:
         # Quiet finalization can precede a delayed raw timestamp.
-        t.feed(pcm(3.5))
+        t.feed(pcm(4))
     out = flush_tracks([t], force=force)
     assert [u.text for u in out] == ["raw words" if failure else "finished words"]
     assert out[0].speaker == "S1"
@@ -277,13 +258,12 @@ def test_crossing_speaker_end_times_preserve_external_word_order(force):
 def test_acoustic_cap_never_exceeds_selected_hard_boundary():
     calls = []
     t = finished_track(lambda a: calls.append(a.copy()) or "finished", max_len=2)
-    t.session.feed = lambda *args, **kwargs: []
+    t.session.tokens = [token(.1, .2), token(1.5, 1.6), token(2.5, 2.6)]
     samples = pcm(3, .02)
     samples[round(2.08 * SAMPLE_RATE):round(2.16 * SAMPLE_RATE)] = 0
     t.feed(samples, final=True)
     flush_tracks([t], force=True)
-    assert all(len(a) <= 2 * SAMPLE_RATE for a in calls)
-    np.testing.assert_array_equal(np.concatenate(calls), samples)
+    assert calls and all(len(a) <= 2 * SAMPLE_RATE for a in calls)
 
 
 def test_external_voice_requires_acoustic_gate():
@@ -310,7 +290,7 @@ def test_voice_run_defaults_and_rolling_pcm_bound():
 
 def test_echo_cancelled_mic_withholds_runs_the_local_recognizer_did_not_hear():
     calls = []
-    t = finished_track(lambda audio: calls.append(audio) or "phantom call audio", local_words_required=True)
+    t = finished_track(lambda audio: calls.append(audio) or "phantom call audio")
     t.feed(pcm(1, .02))
     t.feed(pcm(3))
     assert flush_tracks([t]) == [] and not calls
@@ -351,7 +331,7 @@ def test_a_stalled_ear_rests_on_every_track_but_an_empty_reply_does_not(monkeypa
 
 def test_residual_echo_above_the_gate_cannot_hold_a_run_open():
     calls = []
-    t = finished_track(lambda audio: calls.append(audio) or "said in the room", local_words_required=True, gap=5)
+    t = finished_track(lambda audio: calls.append(audio) or "said in the room", gap=5)
     t.session.tokens = [token(.1, .3, " hello")]
     t.feed(pcm(30, .02))  # Loud throughout, with one heard word at the start.
     out = flush_tracks([t])

@@ -75,11 +75,10 @@ A failed or empty call appends the raw Nemotron text once and logs only the exce
 
 Final words inherit speaker/timing anchors by alignment to Nemotron's raw words, so corrections do not duplicate overlapping slot windows.
 External word order is preserved even when speaker anchors overlap or delayed timestamps extend beyond the submitted audio.
-When Nemotron supplies no words for audible speech, the external ear still receives the run; recovered words carry the unknown label `S?` and the acoustic run's timing rather than an invented identity.
+A run closes on quiet since Nemotron's last word and reaches the ear only if Nemotron heard words in it, because room noise and residual call audio hold a mic above the idle gate.
 Diarization can still mistake one person for several slots, and a mono microphone cannot separate simultaneous voices cleanly.
 
 `hark --external-ear` brings the same final words to a meeting. Every track runs as voice's speech runs, on `run_quiet_seconds` from `--settings`.
-Next to system audio, a run reaches the ear only if Nemotron heard words in it, and it closes on quiet since the last word, because residual call audio keeps an echo-cancelled mic above the idle gate.
 An adapter that can't load leaves the recording on local words and says so in the log.
 **This uploads everyone's speech**: the room through the mic and the call through system audio. A paused track, and system audio under `--mic-only`, stay on the machine.
 
@@ -93,7 +92,7 @@ On one 120 s, four-speaker AMI room-microphone replay, `low` and `ultra_low` bot
 Duplicated words increased from 1.64% to 4.26% with the faster lookahead, so lower latency has an attribution trade-off even when aggregate recall is unchanged.
 This slice isn't a corpus-wide accuracy estimate; `--latency low` retains the larger lookahead when speaker separation matters more than response time.
 
-A -55 dBFS RMS energy gate watches 100 ms frames, retains 300 ms of pre-roll and runs the models for three seconds after the last above-threshold frame to drain delayed words.
+A -50 dBFS RMS energy gate watches 100 ms frames, retains 300 ms of pre-roll and runs the models for three seconds after the last above-threshold frame to drain delayed words.
 Both models stop running once the mic is idle; model weights and bounded streaming caches stay resident.
 This is an energy check, not a speech classifier: steady noise above the threshold keeps inference active, and very quiet speech below it can be missed.
 Skipped silence doesn't compress the transcript or saved WAV clock, and speaker state survives it.

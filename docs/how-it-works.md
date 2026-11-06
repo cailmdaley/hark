@@ -193,7 +193,7 @@ The final transcript stays append-only.
 The CLI clears it while muted and on clean shutdown.
 It never enters the transcript, JSONL or delivery triggers.
 
-Before either model, a -55 dBFS RMS energy check examines 100 ms frames.
+Before either model, a -50 dBFS RMS energy check examines 100 ms frames.
 It keeps 300 ms of pre-roll and a three-second tail, then stops submitting idle audio.
 Streaming speaker/decoder caches survive silence.
 The models' input clock omits discarded idle spans; a bounded list of clock boundaries translates token starts and ends back to mic-relative seconds.

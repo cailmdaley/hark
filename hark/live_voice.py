@@ -181,25 +181,23 @@ class Partial:
 class VoiceTrack(Track):
     """Keep the recognizer's state, but don't run either model on an idle mic.
 
-    A -55 dBFS RMS gate uses 100 ms frames, 300 ms pre-roll and a three-second
+    A -50 dBFS RMS gate uses 100 ms frames, 300 ms pre-roll and a three-second
     tail to drain delayed tokens. The recognizer sees a compressed audio clock;
     token timestamps are translated back to the mic clock before turn detection.
     Speaker caches and identities survive idle periods.
 
-    `local_words_required` withholds a run from the external ear until the local
-    recognizer has heard words in it, and closes runs by quiet since the last
-    word. An echo-cancelled mic needs this: its residual call audio stays above
-    the acoustic gate, so a physical run would otherwise never end.
+    A run closes on quiet since its last word, and reaches the external ear only
+    if the local recognizer heard words in it. Room noise and residual call audio
+    stay above the acoustic gate, so the gate can't say when speech has stopped.
     """
 
     ordered_flush = True  # External word order survives overlapping diarizer anchors.
     frame = SAMPLE_RATE // 10
     preroll = 3 * frame
     tail = 3 * SAMPLE_RATE
-    threshold = 10 ** (-55 / 20)
+    threshold = 10 ** (-50 / 20)
 
-    def __init__(self, *args, gate=True, refiner=None, report=None, words=VOICE_WORDS,
-                 local_words_required=False, **kwargs):
+    def __init__(self, *args, gate=True, refiner=None, report=None, words=VOICE_WORDS, **kwargs):
         if refiner is not None and not gate:
             raise ValueError("an external voice ear requires the acoustic gate")
         kwargs.setdefault("gap", VOICE_GAP)
@@ -208,7 +206,6 @@ class VoiceTrack(Track):
         self.gate = gate
         self.refiner = refiner
         self.words = words
-        self.local_words_required = local_words_required
         self.report = report or (lambda message: print(message, file=sys.stderr))
         self._run_start = None
         self._run_end = 0.0
@@ -278,9 +275,7 @@ class VoiceTrack(Track):
             return []
         start = self._run_start
         clock = self.audio_samples / SAMPLE_RATE
-        last = self._last_loud
-        if self.local_words_required:
-            last = max((t.end for p in self.pending.values() for t in p.tokens), default=start)
+        last = max((t.end for p in self.pending.values() for t in p.tokens), default=start)
         quiet = clock - last >= max(self.gap, self.tail / SAMPLE_RATE) and self.processed >= last + .5
         preview = self.partial
         word_count = sum(len("".join(t.text for t in p.tokens).split()) for p in self.pending.values())
@@ -293,7 +288,7 @@ class VoiceTrack(Track):
             end = min(end, max(start, quiet_boundary(self.audio, end)))
         # Delayed RNNT anchors can overshoot the physical PCM endpoint. When a
         # run closes, all its anchors belong to it, including those future times.
-        if self.local_words_required and not any(p.tokens for p in self.pending.values()):
+        if not any(p.tokens for p in self.pending.values()):
             end = max(start, end - 2)  # Delayed tokens for this window's tail still count.
         complete = end >= self._last_loud
         chosen = {speaker: _Pending([t for t in part.tokens if complete or t.start < end])
@@ -301,8 +296,7 @@ class VoiceTrack(Track):
         anchors = _word_anchors(chosen)
         samples = self.audio.slice(start, end)
         # Preroll can straddle a sleep boundary; an empty prefix must still advance.
-        speech = samples.size and float(np.max(samples * samples)) >= self.threshold ** 2
-        speech = speech and (anchors or not self.local_words_required)
+        speech = anchors and samples.size and float(np.max(samples * samples)) >= self.threshold ** 2
         try:
             text = self.refiner(samples).strip() if speech else ""
             if not text:
@@ -315,13 +309,7 @@ class VoiceTrack(Track):
                       if part.tokens and (u := self._utterance(speaker, part.tokens))]
         else:
             output, groups = [], []
-            if not anchors:
-                wall = self.t0 + timedelta(seconds=start)
-                for boundary, offset in self._wall_clock:
-                    if boundary <= start:
-                        wall = self.t0 + timedelta(seconds=start + offset)
-                output.append(Utterance(self.name, "S?", start, min(end, self._last_loud), wall, text))
-            for (speaker, tokens, _), word in _align(text, anchors) if anchors else []:
+            for (speaker, tokens, _), word in _align(text, anchors):
                 if not groups or groups[-1][0] != speaker:
                     groups.append((speaker, [], []))
                 groups[-1][1].extend(tokens)
