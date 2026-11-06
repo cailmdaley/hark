@@ -381,3 +381,14 @@ def test_route_cuts_read_only_rows_added_since_start(tmp_path):
     assert cuts.read() == []
     path.write_text("")
     assert cuts.read() == []
+
+
+def test_a_closing_word_ends_the_run_but_mid_sentence_it_does_not():
+    calls = []
+    t = finished_track(lambda a: calls.append(len(a)) or "finished", gap=30)
+    t.session.tokens = [token(.1, .2, " send"), token(.3, .4, " it")]
+    t.feed(pcm(2, .02))
+    assert not calls
+    t.session.tokens = [token(2.1, 2.2, " please"), token(2.3, 2.4, " send")]
+    t.feed(pcm(2, .02))
+    assert [u.text for u in flush_tracks([t])] == ["finished"] and len(calls) == 1

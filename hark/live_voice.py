@@ -25,6 +25,8 @@ VOICE_LATENCY = "ultra_low"
 CUT_DRAIN = 1.0  # delayed words before a route switch land within this much model audio
 EAR_STALL = 10.0  # a failed call this slow is a dead link, not a refused run
 EAR_REST = 60.0
+VOICE_END = re.compile(r"\bsend[.!?]*\s*$", re.IGNORECASE)
+VOICE_END_HOLD = .7  # seconds after a closing word, so "send it to Bob" keeps going
 VOICE_NAME = re.compile(r"\b(?:claude|cloud|clawed|claw|klaud|clot|clock|clod|claud)\b", re.IGNORECASE)
 
 
@@ -324,7 +326,8 @@ class VoiceTrack(Track):
         quiet = clock - last >= wait and self.processed >= last + .5
         preview = self.partial
         word_count = sum(len("".join(t.text for t in p.tokens).split()) for p in self.pending.values())
-        early = word_count >= self.words or VOICE_NAME.search(preview)
+        ended = VOICE_END.search(preview) and clock - last >= VOICE_END_HOLD
+        early = word_count >= self.words or VOICE_NAME.search(preview) or ended
         if self._cut is not None and self._cut <= start:
             self._cut = None
         cutting = self._cut is not None and self.processed >= self._cut + CUT_DRAIN
