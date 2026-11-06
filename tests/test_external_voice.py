@@ -229,7 +229,7 @@ def test_delayed_anchors_belong_to_finished_physical_run(failure, force):
         t.feed(pcm(0), final=True)
     else:
         # Quiet finalization can precede a delayed raw timestamp.
-        t.feed(pcm(4))
+        t.feed(pcm(1.5))
     out = flush_tracks([t], force=force)
     assert [u.text for u in out] == ["raw words" if failure else "finished words"]
     assert out[0].speaker == "S1"
@@ -340,14 +340,16 @@ def test_residual_echo_above_the_gate_cannot_hold_a_run_open():
 
 
 def test_short_quiet_settings_keep_a_late_word():
-    # Three seconds of the model's drain close a run, however short the quiet setting.
+    # A wordless run waits out the model's drain; a word then starts the quiet setting.
     calls = []
     t = finished_track(lambda audio: calls.append(audio) or "word", gap=1)
     t.feed(pcm(.5, .02))
     t.feed(pcm(2))
     assert not calls
-    t.pending["speaker_0"] = _Pending([token(.1, .3)])
-    t.feed(pcm(2))
+    t.pending["speaker_0"] = _Pending([token(2.1, 2.3)])
+    t.feed(pcm(.5))
+    assert not calls
+    t.feed(pcm(1))
     assert [u.text for u in flush_tracks([t])] == ["word"]
 
 

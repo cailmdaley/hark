@@ -481,7 +481,7 @@ def main(argv=None):
         if live:
             _point_current(out)
         sink = Sink(out, f"hark {now:%Y-%m-%d %H:%M} — {what}")
-        if args.voice:
+        if args.voice or args.external_ear:
             partial = Partial(out)
         if voices:
             from .voice import VoiceMatcher

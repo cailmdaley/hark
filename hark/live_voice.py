@@ -318,8 +318,10 @@ class VoiceTrack(Track):
             return []
         start = self._run_start
         clock = self.audio_samples / SAMPLE_RATE
-        last = max((t.end for p in self.pending.values() for t in p.tokens), default=start)
-        quiet = clock - last >= max(self.gap, self.tail / SAMPLE_RATE) and self.processed >= last + .5
+        words = [t.end for p in self.pending.values() for t in p.tokens]
+        # A run without words may be waiting on delayed ones, which the tail drains.
+        last, wait = (max(words), self.gap) if words else (start, max(self.gap, self.tail / SAMPLE_RATE))
+        quiet = clock - last >= wait and self.processed >= last + .5
         preview = self.partial
         word_count = sum(len("".join(t.text for t in p.tokens).split()) for p in self.pending.values())
         early = word_count >= self.words or VOICE_NAME.search(preview)

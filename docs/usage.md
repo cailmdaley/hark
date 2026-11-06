@@ -82,7 +82,7 @@ Diarization can still mistake one person for several slots, and a mono microphon
 An adapter that can't load leaves the recording on local words and says so in the log.
 **This uploads everyone's speech**: the room through the mic and the call through system audio. A paused track, and system audio under `--mic-only`, stay on the machine.
 
-An ear call blocks the capture loop. A failed call that took 10 s or more rests the ear for 60 s on every track, with raw recognition in its place, so a dead link can't back up the meeting; quick failures, including empty replies, don't. Runs need at least 3 s of quiet to close, whatever `run_quiet_seconds` says.
+An ear call blocks the capture loop. A failed call that took 10 s or more rests the ear for 60 s on every track, with raw recognition in its place, so a dead link can't back up the meeting; quick failures, including empty replies, don't.
 
 Neither a system-audio tap nor AEC runs in this mode.
 Videos on headphones can't address the transcript, but speech or playback audible in the room can.
