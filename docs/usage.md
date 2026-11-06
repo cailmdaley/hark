@@ -78,12 +78,12 @@ External word order is preserved even when speaker anchors overlap or delayed ti
 When Nemotron supplies no words for audible speech, the external ear still receives the run; recovered words carry the unknown label `S?` and the acoustic run's timing rather than an invented identity.
 Diarization can still mistake one person for several slots, and a mono microphone cannot separate simultaneous voices cleanly.
 
-`hark --external-ear` brings the same final words to a meeting. The mic or phone track runs as voice's speech runs, on `run_quiet_seconds` from `--settings`, while the system track stays local and keeps its 3 s turns.
+`hark --external-ear` brings the same final words to a meeting. Every track runs as voice's speech runs, on `run_quiet_seconds` from `--settings`.
 Next to system audio, a run reaches the ear only if Nemotron heard words in it, and it closes on quiet since the last word, because residual call audio keeps an echo-cancelled mic above the idle gate.
 An adapter that can't load leaves the recording on local words and says so in the log.
-**This uploads the room's speech**, including other people near the mic. The system track never leaves the machine, but call audio the echo canceller left in the mic goes with any run it falls inside.
+**This uploads everyone's speech**: the room through the mic and the call through system audio. A paused track, and system audio under `--mic-only`, stay on the machine.
 
-An ear call blocks the capture loop. A failed call that took 10 s or more rests the ear for 60 s, with raw recognition in its place, so a dead link can't back up the meeting; quick failures, including empty replies, don't. Runs need at least 3 s of quiet to close, whatever `run_quiet_seconds` says.
+An ear call blocks the capture loop. A failed call that took 10 s or more rests the ear for 60 s on every track, with raw recognition in its place, so a dead link can't back up the meeting; quick failures, including empty replies, don't. Runs need at least 3 s of quiet to close, whatever `run_quiet_seconds` says.
 
 Neither a system-audio tap nor AEC runs in this mode.
 Videos on headphones can't address the transcript, but speech or playback audible in the room can.
@@ -188,7 +188,7 @@ The [format contract](format.md) defines the text and JSONL records.
 |---|---|---|
 | `--phone` | | capture only PCM from the phone socket, diarized |
 | `--voice` | | continuous mic dictation with a configured external final-text ear and a local idle gate |
-| `--external-ear` | | final words for the mic or phone track of a meeting from the configured external ear; system audio stays local |
+| `--external-ear` | | final words for every track of a meeting from the configured external ear |
 | `--ear local\|gradium` | local if MLX imports, otherwise Gradium | recognition and speaker attribution backend |
 | `--no-gradium-metering` | | skip credit-balance requests |
 | `--title TEXT` | | appended to the session filename |

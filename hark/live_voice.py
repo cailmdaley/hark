@@ -23,8 +23,31 @@ VOICE_MAX_LEN = 75.0
 VOICE_WORDS = 200
 VOICE_LATENCY = "ultra_low"
 EAR_STALL = 10.0  # a failed call this slow is a dead link, not a refused run
-EAR_REST = 60.0  # the main loop can't wait on a dead link for every run
+EAR_REST = 60.0
 VOICE_NAME = re.compile(r"\b(?:claude|cloud|clawed|claw|klaud|clot|clock|clod|claud)\b", re.IGNORECASE)
+
+
+class EarResting(Exception):
+    """The ear is resting after a stall; this run keeps its raw words."""
+
+
+class RestingEar:
+    """Rest a dead link across every track, since each call blocks the capture loop."""
+
+    def __init__(self, recognize):
+        self.recognize = recognize
+        self.until = 0.0
+
+    def __call__(self, samples):
+        asked = time.monotonic()
+        if asked < self.until:
+            raise EarResting
+        try:
+            return self.recognize(samples)
+        except Exception:
+            if time.monotonic() - asked >= EAR_STALL:
+                self.until = time.monotonic() + EAR_REST
+            raise
 
 
 def load_refiner(language=None):
@@ -39,7 +62,7 @@ def load_refiner(language=None):
         spec = importlib.util.spec_from_file_location("hark_external_voice_ear", path)
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
-        return module.create(language=language)
+        return RestingEar(module.create(language=language))
     except Exception:
         raise RuntimeError("voice ear unavailable; check HARK_VOICE_EAR or ~/.hark/voice_ear.py") from None
 
@@ -189,7 +212,6 @@ class VoiceTrack(Track):
         self.report = report or (lambda message: print(message, file=sys.stderr))
         self._run_start = None
         self._run_end = 0.0
-        self._ear_retry = 0.0
         self._last_loud = 0.0
         self._ready = []
         if refiner is not None:
@@ -281,17 +303,13 @@ class VoiceTrack(Track):
         # Preroll can straddle a sleep boundary; an empty prefix must still advance.
         speech = samples.size and float(np.max(samples * samples)) >= self.threshold ** 2
         speech = speech and (anchors or not self.local_words_required)
-        asked = time.monotonic()
-        ear_open = asked >= self._ear_retry
         try:
-            text = self.refiner(samples).strip() if speech and ear_open else ""
+            text = self.refiner(samples).strip() if speech else ""
             if not text:
                 raise ValueError("empty finished text")
         except Exception as error:
             # External adapters may carry secrets in exception messages or URLs.
-            if speech and ear_open:
-                if time.monotonic() - asked >= EAR_STALL:
-                    self._ear_retry = time.monotonic() + EAR_REST
+            if speech and not isinstance(error, EarResting):
                 self.report(f"voice ear failed ({type(error).__name__}); writing raw recognition")
             output = [u for speaker, part in chosen.items()
                       if part.tokens and (u := self._utterance(speaker, part.tokens))]

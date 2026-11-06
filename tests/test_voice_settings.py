@@ -84,11 +84,11 @@ def test_running_voice_capture_reloads_settings_and_gap_overrides(tmp_path, monk
 
 
 @pytest.mark.parametrize("flags, adapter, expected", [
-    (["--external-ear"], True, {"mic": ("VoiceTrack", 8.0), "system": ("Track", 3.0)}),
+    (["--external-ear"], True, {"mic": ("VoiceTrack", 8.0), "system": ("VoiceTrack", 8.0)}),
     (["--external-ear"], False, {"mic": ("Track", 3.0), "system": ("Track", 3.0)}),
     ([], True, {"mic": ("Track", 3.0), "system": ("Track", 3.0)}),
 ])
-def test_fixed_capture_refines_the_mic_and_keeps_system_audio_local(tmp_path, monkeypatch, flags, adapter, expected):
+def test_fixed_capture_refines_every_track(tmp_path, monkeypatch, flags, adapter, expected):
     _, Mic = fake_live_capture(monkeypatch, tmp_path)
 
     class System(Mic):

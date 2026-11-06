@@ -36,7 +36,7 @@ hark takes the opposite approach.
 - **The file is the interface.** hark only ever appends lines, and stops at an `# ended` line. Any agent harness can follow that, with `tail -F`, a file watcher, or by re-reading every so often and remembering how many lines it has seen. hark has no plugin system, server or SDK.
 - **Live, not after the fact.** Lines land within seconds, so an agent can act during the meeting rather than summarise it afterwards.
 - **Speakers are part of the record.** Every line says who spoke. Names can be assigned mid-meeting (`hark name S2 Ada`), or matched automatically against voices you've enrolled.
-- **Meetings are local by default.** On Apple Silicon, meeting recognition and speaker separation run entirely on the laptop. Voice's operator-owned external ear, and `--external-ear` for a meeting's mic track, can send audio off-device; its privacy and billing depend on that adapter.
+- **Meetings are local by default.** On Apple Silicon, meeting recognition and speaker separation run entirely on the laptop. Voice's operator-owned external ear, and `--external-ear` for a meeting, send audio off-device; its privacy and billing depend on that adapter.
 - **Honest about gaps.** If a microphone or the call audio stops delivering samples for 90 seconds, the transcript says so (`# system audio lost at 16:37:55`), so a reader doesn't take a gap for silence.
 
 The format is a small, documented contract ([docs/format.md](docs/format.md)). Beside the text file sits a JSONL file carrying the same lines as structured records, with exact start and end times, speaker and audio source.

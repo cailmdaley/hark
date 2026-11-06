@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 
 from hark.capture import SAMPLE_RATE
-from hark.live_voice import Partial, _align, _word_anchors, quiet_boundary
+from hark.live_voice import Partial, RestingEar, _align, _word_anchors, quiet_boundary
 from hark.transcript import _Pending, flush_tracks
 from test_live_voice import pcm, token, track
 
@@ -320,7 +320,7 @@ def test_echo_cancelled_mic_withholds_runs_the_local_recognizer_did_not_hear():
     assert [u.text for u in flush_tracks([t])] == ["phantom call audio"] and len(calls) == 1
 
 
-def test_a_stalled_ear_rests_but_an_empty_reply_does_not(monkeypatch):
+def test_a_stalled_ear_rests_on_every_track_but_an_empty_reply_does_not(monkeypatch):
     now = [0.0]
     monkeypatch.setattr("hark.live_voice.time.monotonic", lambda: now[0])
     calls, stall = [], [False]
@@ -332,19 +332,21 @@ def test_a_stalled_ear_rests_but_an_empty_reply_does_not(monkeypatch):
             raise TimeoutError
         return ""
 
-    t = finished_track(recognize)
-    def speak():
+    ear = RestingEar(recognize)
+    tracks = finished_track(ear), finished_track(ear)
+
+    def speak(t):
         t.session.tokens.append(token(t.audio_samples / SAMPLE_RATE + .1, t.audio_samples / SAMPLE_RATE + .3))
         t.feed(pcm(1, .02))
         t.feed(pcm(3))
         return flush_tracks([t])
 
-    assert speak() and speak() and len(calls) == 2  # Empty replies leave the next run its call.
+    assert speak(tracks[0]) and speak(tracks[1]) and len(calls) == 2  # Empty replies leave the next run its call.
     stall[0] = True
-    assert speak() and len(calls) == 3
-    assert speak() and len(calls) == 3  # Rested: raw words, no call.
+    assert speak(tracks[0]) and len(calls) == 3
+    assert speak(tracks[1]) and len(calls) == 3  # Rested: raw words, no call.
     now[0] += 61
-    assert speak() and len(calls) == 4
+    assert speak(tracks[0]) and len(calls) == 4
 
 
 def test_residual_echo_above_the_gate_cannot_hold_a_run_open():

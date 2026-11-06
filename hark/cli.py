@@ -282,8 +282,8 @@ def main(argv=None):
     ap.add_argument("--settings", type=Path,
                     help="voice settings JSON; reloads run_quiet_seconds while capturing")
     ap.add_argument("--external-ear", action="store_true",
-                    help="final words for the mic or phone track from the configured external ear; "
-                         "system audio stays local, and a missing adapter leaves the mic local")
+                    help="final words for every track from the configured external ear; "
+                         "a missing adapter leaves the recording local")
     ap.add_argument("--title", help="appended to the session filename")
     ap.add_argument("--mirror", help="append the transcript to HOST:PATH over SSH")
     ap.add_argument("-o", "--out", type=Path, help="write the transcript here instead of ~/.hark/sessions/")
@@ -538,7 +538,7 @@ def main(argv=None):
 
                 def local_track(src, label):
                     shared = dict(speaker_label=label, language=args.lang, mask=mask, stop=stop)
-                    if args.voice or (refiner and src.name != "system"):
+                    if args.voice or refiner:
                         src.pad_before_jump = True
                         return VoiceTrack(src.name, asr, diar, gap=run_gap, refiner=refiner, report=log,
                                           local_words_required=system_audio, **shared)
