@@ -21,7 +21,7 @@ VOICE_GAP = 5.0
 VOICE_MAX_LEN = 75.0
 VOICE_WORDS = 200
 VOICE_LATENCY = "ultra_low"
-VOICE_NAME = re.compile(r"\b(?:claude|cloud|clawed|claw|klaud|clot|clod|claud)\b", re.IGNORECASE)
+VOICE_NAME = re.compile(r"\b(?:claude|cloud|clawed|claw|klaud|clot|clock|clod|claud)\b", re.IGNORECASE)
 
 
 def load_refiner(language=None):
