@@ -29,12 +29,20 @@ def test_startup_outage_keeps_actual_phone_wav_growing_then_recovers(monkeypatch
                 wait(lambda: (home / 'phone.sock').exists())
                 with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as conn:
                     conn.connect(str(home / 'phone.sock'))
-                    deadline = time.monotonic() + 1.7  # Longer than the finite retry window.
-                    while time.monotonic() < deadline:
-                        conn.sendall(to_pcm16(speech(.1)).tobytes())
-                        time.sleep(.03)
-                    with wave.open(str(home / 'meeting.phone.wav')) as wav:
-                        assert wav.getnframes() >= 4 * 16000
+                    def saved_speech():
+                        path = home / 'meeting.phone.wav'
+                        if path.stat().st_size < 44:
+                            return 0
+                        with wave.open(str(path)) as wav:
+                            return np.count_nonzero(np.frombuffer(wav.readframes(wav.getnframes()), dtype='<i2'))
+
+                    batch = to_pcm16(speech(2.4))
+                    conn.sendall(batch.tobytes())
+                    wait(lambda: saved_speech() >= batch.size, timeout=10)
+                    # Capture must keep saving speech beyond the ordinary retry count.
+                    wait(lambda: mock.handshakes >= 5, timeout=10)
+                    conn.sendall(batch.tobytes())
+                    wait(lambda: saved_speech() >= 2 * batch.size, timeout=10)
                     assert json.loads((home / 'meeting.json').read_text())['phase'] == 'live'
                     assert (home / 'meeting.txt').read_text().count('# gradium lost at') == 1
                     mock.error = None
