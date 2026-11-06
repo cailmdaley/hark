@@ -166,6 +166,34 @@ The [measured billing table](usage.md#gradium) fits rounding the service's audio
 Sharing a gated socket through short quiet avoids both submitted silence and repeated short-request charges; quiet lasting 60 source seconds closes it before provider expiry.
 The 58-second upload cap leaves two seconds of headroom below a 60-second unit, while the character cap bounds transcript size.
 
+## Continuous voice
+
+`--voice` selects the mic alone and the local ear.
+`VoiceTrack` uses the existing speaker-streaming models and voice matching, with `ultra_low` diarizer lookahead, a 0.5 s turn gap and a 6 s monologue threshold.
+Meeting parameters are independent.
+There is no AEC alignment buffer or cross-track deduplication wait.
+
+Before either model, a -55 dBFS RMS energy check examines 100 ms frames.
+It keeps 300 ms of pre-roll and a three-second tail, then stops submitting idle audio.
+Streaming speaker/decoder caches survive silence.
+The models' input clock omits discarded idle spans; a bounded list of clock boundaries translates token starts and ends back to mic-relative seconds.
+A token ending exactly at an omitted span uses the preceding segment, while one beginning there uses the resumed segment.
+The rolling voice-matching buffer and any saved WAV retain the full mic clock.
+A final drain also retains quiet sample offsets.
+On sleep, voice places retained gap padding before resumed device audio and flushes the mic gate's held samples using their pre-sleep arrival clock.
+A separate bounded wall-clock map anchors resumed tokens without moving words still buffered from before sleep; turns split across that boundary.
+
+Voice preserves the manual pause flag across restarts.
+Its Aqua-specific pause reader follows accepted dictation lifecycle events in Aqua's log, including log rotation, instead of relying on the bridge's input-open flag.
+Unavailable state fails open with a warning, and an unmatched lease expires after 15 minutes, so stale detection can't mute continuous capture indefinitely.
+The [usage guide](usage.md#continuous-voice) gives the privacy and timing limits.
+Other app detection and meeting capture keep their CoreAudio path.
+
+`uv run scripts/voice-bench.py --file speech.wav --seconds 3600` replays alternating speech and silence, recording CPU time, inference wall time, RSS, MLX allocations, pending tokens, clock boundaries and emission times once per source minute.
+`--pattern speech|silence`, `--mode meeting|tuned|voice` and `--realtime` isolate workloads and the idle gate.
+`--gpu` samples whole-device GPU occupancy through IORegistry; it includes other applications and isn't per-process power.
+The script opens no microphone and prints no transcript text.
+
 ## Local turns
 
 The decoders emit tokens; hark groups them into conversational turns, not pause-delimited fragments:

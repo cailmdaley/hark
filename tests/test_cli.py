@@ -216,7 +216,8 @@ def test_live_capture_ends_cleanly_and_records_lifecycle(tmp_path, monkeypatch):
 
     state = json.loads((tmp_path / "meeting.json").read_text())
     assert [snapshot["phase"] for snapshot in phases] == ["loading", "live", "stopping", "ended"]
-    assert set(state) == {"pid", "phase", "title", "started", "transcript", "mirror", "launch", "phone", "error", "ear", "system_audio"}
+    assert set(state) == {"pid", "phase", "title", "started", "transcript", "mirror", "launch", "phone", "error", "ear", "system_audio", "kind"}
+    assert state["kind"] == "meeting"
     assert state["system_audio"] is False
     assert state["ear"] == {"name": "local", "seconds": 0.0, "credits_left": None}
     assert state["launch"] == "test" and state["phone"] is None
@@ -329,7 +330,8 @@ def test_live_capture_exception_records_one_line_failure(tmp_path, monkeypatch):
 
     state = json.loads((tmp_path / "meeting.json").read_text())
     assert [snapshot["phase"] for snapshot in phases] == ["loading", "failed"]
-    assert set(state) == {"pid", "phase", "title", "started", "transcript", "mirror", "launch", "phone", "error", "ear", "system_audio"}
+    assert set(state) == {"pid", "phase", "title", "started", "transcript", "mirror", "launch", "phone", "error", "ear", "system_audio", "kind"}
+    assert state["kind"] == "meeting"
     assert state["launch"] == "test"
     assert state["phase"] == "failed"
     assert state["error"] == "model loading failed with details"

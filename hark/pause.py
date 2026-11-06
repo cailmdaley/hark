@@ -1,7 +1,8 @@
 """Mute the mic track while a dictation app records or the user has run `hark pause`.
 
-A watcher thread polls CoreAudio's per-process input flag (through ctypes) and the manual
-pause flag, and turns each pause into a wall-clock mute interval. The mic is held back by
+A watcher thread polls the manual pause flag and app activity, and turns each pause
+into a wall-clock mute interval. Meetings use CoreAudio's per-process input flag;
+continuous voice uses accepted dictation lifecycle events for Aqua Voice. The mic is held back by
 MIC_LOOKBACK_SEC, so an interval opened at detection still reaches the audio captured
 just before it. Muted samples become zeros, so the track and its WAV keep their timeline.
 """
@@ -237,9 +238,9 @@ class MicGate:
         self.emitted = 0
         self.pending = np.zeros(0, np.float32)
 
-    def feed(self, samples, now, state, final=False):
+    def feed(self, samples, now, state, final=False, heard=None):
         self.pending = np.concatenate((self.pending, samples))
-        index, arrived = self.source.heard
+        index, arrived = self.source.heard if heard is None else heard
         start = arrived - (index - self.emitted) / SAMPLE_RATE  # wall time of pending[0]
         ready = math.floor((now - MIC_LOOKBACK_SEC - start) * SAMPLE_RATE + 1e-6)
         count = self.pending.size if final else min(self.pending.size, max(0, ready))
@@ -253,11 +254,17 @@ class PauseMonitor:
     """Poll on its own thread, so a pause is timed when it happens even while the main loop
     is busy with inference."""
 
-    def __init__(self, home, patterns, system_paused=False):
+    def __init__(self, home, patterns, system_paused=False, voice=False):
         self.manual = ManualPause(home)
         self.system_manual = ManualPause(home, "system")
         self.system_paused = system_paused
         self.patterns = patterns
+        self.voice = voice
+        self.aqua = None
+        if voice and patterns:
+            from .aqua import AquaDictation
+
+            self.aqua = AquaDictation()
         self.reader = None
         self.state = PauseState()
         self.system_state = PauseState()
@@ -274,8 +281,8 @@ class PauseMonitor:
             log(f"pause: {kind}: {error}")
 
     def start(self):
-        """A session starts unpaused: a manual pause left by an earlier session is cleared."""
-        if self.manual.read():
+        """Meetings clear stale manual pauses; voice preserves mute across restarts."""
+        if self.manual.read() and not self.voice:
             self.manual.set(False)
             log("pause: cleared a manual pause left from an earlier session")
         if self.system_paused:
@@ -300,8 +307,19 @@ class PauseMonitor:
             manual = "manual" in self.state.active
         if self.reader:
             try:
-                self.automatic = watched_bundles(self.reader.read(idle=False), self.patterns)
-            except Exception as error:  # noqa: BLE001 — keep the last observation, never leak
+                if self.aqua:
+                    processes = self.reader.read()
+                    active_aqua = self.aqua.read(processes)
+                    other = [p for p in processes if not any(
+                        name in p.bundle_id.casefold() for name in ("aquavoice", "aqua-voice"))]
+                    self.automatic = tuple(sorted(set(watched_bundles(other, self.patterns)) | {
+                        bundle for bundle in active_aqua
+                        if any(pattern in bundle.casefold() for pattern in self.patterns)}))
+                else:
+                    self.automatic = watched_bundles(self.reader.read(idle=False), self.patterns)
+            except Exception as error:  # noqa: BLE001 — the watcher outlives a failed observation
+                if self.voice:
+                    self.automatic = ()  # Unknown state must not leave continuous capture muted.
                 self._warn("automatic detection failed", error)
         with self.lock:
             self.events.extend(self.state.update(time.time(), manual, self.automatic))
@@ -320,9 +338,9 @@ class PauseMonitor:
             events, self.events = self.events, []
             return events
 
-    def feed(self, gate, samples, now, final=False):
+    def feed(self, gate, samples, now, final=False, heard=None):
         with self.lock:
-            return gate.feed(samples, now, self.state, final=final)
+            return gate.feed(samples, now, self.state, final=final, heard=heard)
 
     def feed_system(self, gate, samples, now, final=False):
         with self.lock:

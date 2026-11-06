@@ -12,11 +12,12 @@ from hark.pause import AudioProcess, ManualPause, PauseMonitor
 from test_cli import read_wav
 
 
-@pytest.mark.parametrize("room", [False, True])
+@pytest.mark.parametrize("mode", ["desktop", "room", "voice"])
 @pytest.mark.parametrize("shutdown_pause", [None, "manual", "automatic"])
 @pytest.mark.parametrize("mic_only", [False, True])
 def test_live_modes_feed_and_save_identical_gated_pcm_and_system_reference(
-        room, shutdown_pause, mic_only, tmp_path, monkeypatch):
+        mode, shutdown_pause, mic_only, tmp_path, monkeypatch):
+    room = mode != "desktop"
     if room and mic_only:
         pytest.skip("mic-only desktop capture requires a system track")
     from hark import cli
@@ -95,7 +96,8 @@ def test_live_modes_feed_and_save_identical_gated_pcm_and_system_reference(
         def start(self):
             # No thread or CoreAudio: the clock supplies periodic observations, while stop
             # uses the real post-join poll against the current manual/app state.
-            self.reader = SimpleNamespace(read=lambda idle: [
+            self.aqua = None  # Scripted accepted dictation; lifecycle-log parsing has its own tests.
+            self.reader = SimpleNamespace(read=lambda idle=False: [
                 AudioProcess(1, 10, "aquavoice", bool(app_running))])
             self.system_manual.set(self.system_paused)
             self.poll()
@@ -115,6 +117,7 @@ def test_live_modes_feed_and_save_identical_gated_pcm_and_system_reference(
     monkeypatch.setattr(cli, "MicSource", Mic)
     monkeypatch.setattr(cli, "SystemSource", System)
     monkeypatch.setattr(cli, "Track", Track)
+    monkeypatch.setattr("hark.live_voice.VoiceTrack", Track)
     monkeypatch.setattr(cli, "PauseMonitor", ScriptedMonitor)
     from hark import aec
 
@@ -130,7 +133,7 @@ def test_live_modes_feed_and_save_identical_gated_pcm_and_system_reference(
     monkeypatch.setattr(cli, "load_models", lambda *_: (None, None))
     monkeypatch.setattr(cli, "flush_tracks", lambda *_, **__: [])
     out = tmp_path / "session.txt"
-    cli.main((["--room"] if room else []) + (["--mic-only"] if mic_only and not room else []) +
+    cli.main(([f"--{mode}"] if room else []) + (["--mic-only"] if mic_only and not room else []) +
              ["--ear", "local", "--launch", "test", "--keep-audio", "-o", str(out)])
 
     original = np.concatenate(blocks)

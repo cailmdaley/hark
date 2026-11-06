@@ -88,6 +88,9 @@ class Source:
         self.stats = _no_stats()
         self.error = None
         self.jump = 0.0  # seconds of wall time skipped since the last `take_jump`
+        self.pad_before_jump = False  # voice places the retained sleep gap before resumed audio
+        self.jump_clock = None  # (resumed sample index, wall origin) for voice
+        self.jump_prefix = None  # (queued pre-sleep samples, their last arrival observation)
 
     def start(self):
         self.anchor = self.last_audio = time.time()
@@ -131,6 +134,7 @@ class Source:
         if self.error and self.queue.empty():
             raise self.error
         blocks, got = [], 0
+        jumped = False
         while got < limit:
             try:
                 with self.queue_lock:
@@ -138,12 +142,28 @@ class Source:
                     self.queued_samples = max(0, self.queued_samples - block.size)
             except queue.Empty:
                 break
+            if self.pad_before_jump and arrived is not None and self.anchor is not None:
+                ahead = arrived - self.anchor - (self.delivered + got + block.size) / SAMPLE_RATE
+                if ahead > JUMP_SEC:
+                    # Device arrival times locate sleep even with old audio still queued.
+                    skipped = ahead - JUMP_PAD
+                    self.jump_prefix = got, self.heard
+                    padding = np.zeros(round(JUMP_PAD * SAMPLE_RATE), np.float32)
+                    blocks.append(padding)
+                    got += padding.size
+                    self.stats["padded"] += padding.size
+                    self.anchor += skipped
+                    self.jump += skipped
+                    jumped = True
+                    self.jump_clock = (self.delivered + got,
+                                       arrived - (self.delivered + got + block.size) / SAMPLE_RATE)
+                    log(f"{self.name}: device clock skipped {skipped:.0f} s (system sleep?)")
             blocks.append(block)
             got += block.size
             if arrived is not None:
                 self.heard = self.delivered + got, arrived
         if self.live and self.anchor is not None and not self.error:
-            if self.queue.empty():
+            if self.queue.empty() and not jumped:
                 behind = (time.time() - self.anchor) * SAMPLE_RATE - self.delivered - got
             else:
                 behind = 0
@@ -151,12 +171,19 @@ class Source:
                 skipped = behind - JUMP_PAD * SAMPLE_RATE
                 self.anchor += skipped / SAMPLE_RATE
                 self.jump += skipped / SAMPLE_RATE
+                jumped = True
                 behind -= skipped
                 log(f"{self.name}: wall clock ran {skipped / SAMPLE_RATE:.0f} s ahead of the audio "
                     "(system sleep?); skipping the gap")
             if behind > LATE_OK * SAMPLE_RATE:
-                blocks.append(np.zeros(int(behind - LATE_OK * SAMPLE_RATE / 2), np.float32))
-                self.stats["padded"] += blocks[-1].size
+                padding = np.zeros(int(behind - LATE_OK * SAMPLE_RATE / 2), np.float32)
+                blocks.append(padding)
+                if jumped and self.pad_before_jump:
+                    # No post-wake block has arrived; queued device audio is still pre-sleep.
+                    self.jump_prefix = got, self.heard
+                    end = self.delivered + got + padding.size
+                    self.jump_clock = end, time.time() - end / SAMPLE_RATE
+                self.stats["padded"] += padding.size
         out = np.concatenate(blocks) if blocks else np.zeros(0, np.float32)
         self.delivered += out.size
         return out

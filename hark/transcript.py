@@ -55,7 +55,8 @@ class Utterance:
         return f"{self.wall:%H:%M:%S}-{self.wall_end:%H:%M:%S} {label} {self.text}"
 
     def record(self):
-        record = {"wall": self.wall.isoformat(timespec="seconds"), "track": self.track,
+        precision = "microseconds" if self.wall.tzinfo is not None else "seconds"
+        record = {"wall": self.wall.isoformat(timespec=precision), "track": self.track,
                   "speaker": self.speaker, "start": round(self.start, 2),
                   "end": round(self.end, 2), "text": self.text}
         if self.name:

@@ -4,6 +4,7 @@
 
 ```bash
 hark                  # desktop meeting, including in person: mic + system audio when available
+hark --voice          # continuous local dictation, mic only
 hark --mic-only      # transcribe the mic alone; keep system audio as the echo-canceller reference
 hark --phone          # mobile meeting: phone PCM arrives on a socket, diarized
 hark --file x.m4a     # a recording through the same streaming path (about 0.15× real time)
@@ -43,6 +44,50 @@ Phone mode suits a room where the laptop's mic is in the wrong place. hark liste
 Default standalone phone capture does not publish `meeting.json`. Daemon-launched (`--launch`) meetings advertise the socket in its `phone` field; explicit output beneath the HARK home's `meetings/` directory also owns that record.
 
 Ctrl-C ends a session cleanly: hark flushes open turns, finishes writing the audio, and writes `# ended`. SIGTERM and SIGHUP do the same, so closing the terminal doesn't lose the end. A second signal quits at once without flushing.
+
+## Continuous voice
+
+```bash
+hark --voice                    # Apple Silicon, local models, microphone only
+hark --voice -o ~/notes/voice    # voice.txt, voice.jsonl and voice.log
+hark pause                      # mute the mic
+hark resume                     # unmute it
+```
+
+Voice capture uses the local ear, a 0.32 s diarizer lookahead (`ultra_low`), a 0.5 s turn-closing gap and a 6 s monologue threshold.
+`--gap` and `--latency` override the first two timing choices; desktop meetings keep their own defaults.
+A monologue splits at a word boundary near a late pause, so the threshold isn't an exact line-duration limit.
+In a replay of a 32 s synthesized monologue, lines arrived at 7, 14, 16, 23, 27 and 33 s.
+Through the full CLI, an isolated synthesized sentence reached the transcript 1.91–1.93 s after its last audible frame in three replay-source trials on an M3 Pro, including mic lookback and inference.
+The same sentence took 4.71 s with meeting room defaults.
+These are measurements, not a guarantee for every accent, device or competing GPU workload.
+
+Neither a system-audio tap nor AEC runs in this mode.
+Videos on headphones can't address the transcript, but speech or playback audible in the room can.
+Voice capture doesn't filter for an enrolled identity.
+Speaker separation, naming and optional `--keep-audio` use the ordinary mic path.
+On one 120 s, four-speaker AMI room-microphone replay, `low` and `ultra_low` both recovered 62.9% of reference words in the correct speaker slot; diarization error was 25.98% and 25.99% respectively.
+Duplicated words increased from 1.64% to 4.26% with the faster lookahead, so lower latency has an attribution trade-off even when aggregate recall is unchanged.
+This slice isn't a corpus-wide accuracy estimate; `--latency low` retains the larger lookahead when speaker separation matters more than response time.
+
+A -55 dBFS RMS energy gate watches 100 ms frames, retains 300 ms of pre-roll and runs the models for three seconds after the last above-threshold frame to drain delayed words.
+Both models stop running once the mic is idle; model weights and bounded streaming caches stay resident.
+This is an energy check, not a speech classifier: steady noise above the threshold keeps inference active, and very quiet speech below it can be missed.
+Skipped silence doesn't compress the transcript or saved WAV clock, and speaker state survives it.
+`scripts/voice-bench.py` measures replay timing, memory and compute without opening a microphone.
+
+Voice writes `~/.hark/meeting.json` even without `--launch`, with `"kind": "voice"`; owned meeting captures write `"kind": "meeting"`.
+The lifecycle phases, `--launch`, SIGINT/TERM shutdown and final `# ended` marker are shared.
+Voice utterance JSONL `wall` is the spoken-start timestamp with microseconds and a UTC offset, so a consumer can route it by when speech began, including across midnight or a target switch within one second.
+Voice keeps a manual mic pause across restarts; a new meeting clears it.
+
+For Aqua Voice, automatic voice-mode muting follows accepted dictation start/lock/completion events in `~/Library/Logs/Aqua Voice/main.log`, rather than the bridge's open microphone.
+An idle bridge cannot mute voice capture.
+Default Aqua logs expose completion rather than the precise end of recording, so muting can include finalization (about 1–1.8 s in the inspected Aqua 0.21.18 logs).
+Missing state or a CoreAudio read failure leaves voice capture unmuted and logs a warning; an unmatched Aqua lease stops muting after 15 minutes.
+Aqua dictation lasting longer than 15 minutes can therefore reach the voice transcript.
+Use `hark pause` for a strict or longer mute, or `--pause-for none` to disable automatic detection.
+Other configured apps and meeting capture use CoreAudio input activity as described below.
 
 ## Gradium
 
@@ -117,14 +162,15 @@ The [format contract](format.md) defines the text and JSONL records.
 | Option | Default | |
 |---|---|---|
 | `--phone` | | capture only PCM from the phone socket, diarized |
+| `--voice` | | continuous local dictation, mic only, with an idle gate |
 | `--ear local\|gradium` | local if MLX imports, otherwise Gradium | recognition and speaker attribution backend |
 | `--no-gradium-metering` | | skip credit-balance requests |
 | `--title TEXT` | | appended to the session filename |
 | `-o PATH` | `~/.hark/sessions/…` | write the transcript here instead |
 | `--mic DEVICE` | system default | input device, by name or index; software AEC stays on with system capture |
 | `--lang CODE` | auto | pin the ASR language, e.g. `en-US`, `fr-FR` |
-| `--latency` | `low` | local-ear diarizer lookahead: `low` 1.04 s, `very_low` 0.64 s, `ultra_low` 0.32 s. Shorter means faster lines and worse speaker separation |
-| `--gap SECONDS` | `3` | local-ear silence that ends a turn when nobody else takes over |
+| `--latency` | meeting `low`, voice `ultra_low` | local-ear diarizer lookahead: `low` 1.04 s, `very_low` 0.64 s, `ultra_low` 0.32 s. Shorter means faster lines and worse speaker separation |
+| `--gap SECONDS` | meeting `3`, voice `0.5` | local-ear silence that ends a turn when nobody else takes over |
 | `--speaker-mask` | `exclusive` | local-ear speakers that hear a frame two speakers share; see [how it works](how-it-works.md#speaker-masks) |
 | `--keep-audio` | off | save each track as `<stem>.<track>.wav` |
 | `--pause-for PATTERNS` | `aquavoice,aqua-voice` | pause the mic while a matching CoreAudio process captures input; give comma-separated bundle-ID substrings or `none` |
@@ -154,7 +200,7 @@ With voices enrolled, hark names a diarized slot on its own once enough of that 
 A slot someone named by hand is never renamed automatically.
 
 `hark pause` mutes the mic of the running session until `hark resume`; it creates `~/.hark/paused` (or `$HARK_DIR/paused`), which the session polls, and `hark pause --status` reports it.
-A new session starts unpaused, clearing a pause an earlier session left behind.
+A new meeting starts unpaused, clearing a pause an earlier session left behind; `--voice` preserves the manual mic pause across restarts.
 Manual pauses add `# paused` and `# resumed at … after …` lines to the `.txt` transcript.
 `--pause-for none` disables app detection but not manual pauses.
 

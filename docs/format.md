@@ -33,7 +33,7 @@ Mic-only, phone and file sessions retain the ear's own numbering.
 JSONL `track` identifies the audio source; a text speaker number alone doesn't encode its source.
 Phone and file matching retain their ordinary enrolled-bank behavior.
 
-The local ear writes conversational turns.
+The local ear writes conversational turns; `--voice` uses shorter turn and monologue thresholds for dictation.
 Gradium writes short phrases assembled from word-sized spans, with one speaker per phrase.
 Its final word can lack a supplied end time; hark infers it from submitted audio duration and records that inference in the log.
 Both ears use the same timestamp ranges and JSONL records.
@@ -59,7 +59,10 @@ Every other line starts with `# `:
 
 ## The JSONL file
 
-One JSON object per line. Every record has `wall`, an ISO-8601 local timestamp to the second. There are four kinds.
+One JSON object per line. Every record has `wall`, an ISO-8601 local timestamp.
+For voice utterances it includes microseconds and a UTC offset and denotes the spoken start, not the time the line was appended.
+Other record types and meeting captures use local timestamps to the second without an offset.
+There are four kinds.
 
 **Utterance**
 

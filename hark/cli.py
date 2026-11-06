@@ -1,6 +1,7 @@
 """hark — capture a conversation, append one speaker-labelled line per utterance.
 
     hark                 desktop meeting (including in person): mic + system audio when available
+    hark --voice         continuous mic-only dictation, with low-latency local recognition
     hark --phone         mobile meeting: phone PCM into ~/.hark/phone.sock, diarized
     hark --file x.wav    transcribe a file through the same streaming path
 
@@ -60,14 +61,14 @@ class MeetingLifecycle:
     }
 
     def __init__(self, *, title, started, transcript, mirror, launch=None, phone=None, ear="local",
-                 system_audio=False):
+                 system_audio=False, kind="meeting"):
         self.path = HOME / "meeting.json"
         self.lock = threading.Lock()
         self.data = {
             "pid": os.getpid(), "phase": "loading", "title": title,
             "started": started, "transcript": transcript, "mirror": mirror,
             "launch": launch, "phone": phone, "error": None,
-            "system_audio": system_audio,
+            "system_audio": system_audio, "kind": kind,
             "ear": {"name": ear, "seconds": 0.0, "credits_left": None},
         }
         self._write()
@@ -255,6 +256,8 @@ def main(argv=None):
     mode.add_argument("--call", action="store_true", help=argparse.SUPPRESS)
     mode.add_argument("--phone", action="store_true",
                       help="a phone as the mic: listen for s16le 16 kHz PCM on ~/.hark/phone.sock, diarized")
+    mode.add_argument("--voice", action="store_true",
+                      help="continuous mic-only dictation with low-latency local recognition")
     mode.add_argument("--mic-only", action="store_true",
                       help="transcribe the mic alone while keeping system audio as the AEC reference")
     mode.add_argument("--file", help="transcribe an audio file instead of live input")
@@ -268,13 +271,14 @@ def main(argv=None):
                     help="mute mic for these comma-separated bundle ID substrings "
                          "(case-insensitive; default: aquavoice,aqua-voice; none disables app detection)")
     ap.add_argument("--lang", default=None, help="ASR language, e.g. en-US, fr-FR (default: auto)")
-    ap.add_argument("--latency", default="low", choices=["low", "very_low", "ultra_low"],
-                    help="diarizer buffer: low=1.04 s (default), very_low=0.64 s, ultra_low=0.32 s")
+    ap.add_argument("--latency", default=None, choices=["low", "very_low", "ultra_low"],
+                    help="diarizer buffer: low=1.04 s (meeting default), very_low=0.64 s, "
+                         "ultra_low=0.32 s (voice default)")
     ap.add_argument("--speaker-mask", default="exclusive", choices=["shared", "exclusive"],
                     help="who hears an 80 ms frame two speakers hold: exclusive=the more "
                          "probable speaker only (default), shared=both ASR streams")
-    ap.add_argument("--gap", type=float, default=3.0,
-                    help="seconds of silence that end a turn when nobody else takes over")
+    ap.add_argument("--gap", type=float, default=None,
+                    help="seconds of silence that end a turn (meeting: 3; voice: 0.5)")
     ap.add_argument("--title", help="appended to the session filename")
     ap.add_argument("--mirror", help="append the transcript to HOST:PATH over SSH")
     ap.add_argument("-o", "--out", type=Path, help="write the transcript here instead of ~/.hark/sessions/")
@@ -283,6 +287,12 @@ def main(argv=None):
                     help="keep the live tracks as <stem>.<track>.wav beside the transcript")
     args = ap.parse_args(argv)
     args.ear = args.ear or _default_ear()
+    from .live_voice import VOICE_GAP, VOICE_LATENCY, VoiceTrack
+
+    args.gap = args.gap if args.gap is not None else (VOICE_GAP if args.voice else 3.0)
+    args.latency = args.latency or (VOICE_LATENCY if args.voice else "low")
+    if args.voice and args.ear != "local":
+        ap.error("--voice requires the local ear on Apple Silicon")
     if args.ear == "gradium":
         from . import gradium
     if not _device_capture_available() and not (args.phone or args.file):
@@ -307,7 +317,7 @@ def main(argv=None):
     out = (args.out.with_suffix(".txt").expanduser().resolve() if args.out
            else _session_path(now, args.title))
     live = not bool(args.file)
-    system_audio = not (args.room or args.phone or args.file) and _system_capture_available()
+    system_audio = not (args.voice or args.room or args.phone or args.file) and _system_capture_available()
     phone_socket = HOME / "phone.sock" if args.phone else None
     if live:
         expire_audio([HOME / "meetings", HOME / "sessions"])
@@ -316,7 +326,7 @@ def main(argv=None):
         transcript=str(out),
         mirror=f"{mirror_target[0]}:{mirror_target[1]}" if mirror_target else None,
         launch=args.launch, phone=str(phone_socket) if phone_socket else None, ear=args.ear,
-        system_audio=system_audio and not args.mic_only,
+        system_audio=system_audio and not args.mic_only, kind="voice" if args.voice else "meeting",
     ) if _owns_meeting(args, out) else None)
     stop = threading.Event()
     watcher = None
@@ -330,9 +340,10 @@ def main(argv=None):
         for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
             signal.signal(sig, on_signal)
 
-    if not (args.room or args.phone or args.file) and not system_audio:
+    if not (args.voice or args.room or args.phone or args.file) and not system_audio:
         log("system audio unavailable; using mic only (build audiotee with scripts/build-audiotee.sh)")
-    what = (f"file {args.file}" if args.file else
+    what = ("voice: mic only" if args.voice else
+            f"file {args.file}" if args.file else
             "phone: the phone's mic diarized as S1…" if args.phone else
             "live: mic only" if args.mic_only and system_audio else
             "live: mic + system audio diarized as S1…" if system_audio else
@@ -376,19 +387,34 @@ def main(argv=None):
             if deferred_jumps.get(src):
                 track.t0 += timedelta(seconds=deferred_jumps.pop(src))
             samples = np.zeros(0, np.float32)
+            heard = src.heard if args.voice else None
             try:
                 samples = src.drain(limit=float("inf") if final else SAMPLE_RATE // 2)
             except Exception as error:
                 errors.append(error)
+            jump = getattr(src, "take_jump", float)()
+            if jump:
+                if args.voice:
+                    at, origin = src.jump_clock
+                    track.add_wall_gap(at / SAMPLE_RATE, origin)
+                else:
+                    deferred_jumps[src] = jump  # applied after this audio's speech has flushed
             if src in mic_gates:
                 try:
+                    held = []
+                    if args.voice and jump:
+                        held.append(pause_monitor.feed(mic_gates[src], np.zeros(0, np.float32),
+                                                       heard[1], final=True, heard=heard))
+                        prefix, old_heard = src.jump_prefix
+                        held.append(pause_monitor.feed(mic_gates[src], samples[:prefix],
+                                                       old_heard[1], final=True, heard=old_heard))
+                        samples = samples[prefix:]
                     samples = pause_monitor.feed(mic_gates[src], samples, time.time(), final=final)
+                    samples = np.concatenate((*held, samples))
                 except Exception as error:
                     errors.append(error)
                     samples = np.zeros_like(samples)  # A broken mute gate must not expose speech.
             drained[src.name] = samples
-            if jump := getattr(src, "take_jump", float)():
-                deferred_jumps[src] = jump  # applied next call, after this audio's speech has flushed
         busy = any(samples.size for samples in drained.values())
         if aec:
             try:
@@ -469,6 +495,7 @@ def main(argv=None):
                     sources = [(PhoneSource(phone_socket), numbered)]
                 else:
                     mic = MicSource(_device(args.mic))
+                    mic.pad_before_jump = args.voice
                     sources = [(mic, numbered)]
                     if system_audio:
                         sources.append((SystemSource(), numbered))
@@ -493,8 +520,9 @@ def main(argv=None):
                 tracks = [(src, gradium.GradiumTrack(src.name, key=key, language=args.lang,
                                              realtime=live or args.realtime, voices=voices)
                            if args.ear == "gradium" else
-                           Track(src.name, asr, diar, speaker_label=label,
-                                 language=args.lang, gap=args.gap, mask=mask, stop=stop))
+                           (VoiceTrack if args.voice else Track)(
+                               src.name, asr, diar, speaker_label=label,
+                               language=args.lang, gap=args.gap, mask=mask, stop=stop))
                           for src, label in sources]
                 all_tracks = [track for _, track in tracks]
                 if not voices and args.ear == "local":
@@ -520,7 +548,8 @@ def main(argv=None):
 
             if live and not stop.is_set() and any(src.name == "mic" for src, _ in tracks):
                 pause_monitor = PauseMonitor(HOME, pause_patterns,
-                                             system_paused=args.mic_only and system_audio)
+                                             system_paused=args.mic_only and system_audio,
+                                             voice=args.voice)
                 pause_monitor.start()
                 _pause_events(pause_monitor, sink)
             capture_started = time.monotonic()
@@ -535,6 +564,7 @@ def main(argv=None):
                 elif pause_monitor and src.name == "system":
                     system_gates[src] = MicGate(src)
                 track.t0 = (datetime.combine(now.date(), datetime.min.time()) if args.file
+                            else datetime.fromtimestamp(src.anchor).astimezone() if args.voice
                             else datetime.fromtimestamp(src.anchor))
             if system_audio and len(started_sources) == 2:
                 from .aec import EchoCanceller
@@ -799,8 +829,8 @@ def _device_capture_available():
 
 
 def _owns_meeting(args, out):
-    """Only explicit live meeting invocations own the daemon's lifecycle record."""
-    return not args.file and (args.launch is not None or (
+    """Voice and explicit live meeting invocations own the daemon's lifecycle record."""
+    return not args.file and (args.voice or args.launch is not None or (
         args.out is not None and out.is_relative_to(HOME / "meetings")))
 
 
