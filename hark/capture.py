@@ -10,6 +10,9 @@ a phone (or any remote mic) as s16le PCM written into a Unix socket hark listens
 Live sources are held to the wall clock: `drain` pads with silence whatever
 the device failed to deliver (a stalled tap, a vanished mic, the laptop asleep),
 so transcript times stay true and pending utterances still get flushed.
+`LevelMeter` publishes a source's level, the peak of each device block in dBFS,
+to a JSON file a live meter can poll.
+
 Each live source notes when the device last delivered samples (`last_audio`);
 padding never counts as device delivery. `heard` pins the
 newest device sample drained so far to the wall time it arrived, because a device can run
@@ -37,6 +40,52 @@ JUMP_SEC = 30.0  # a wall-clock deficit this large is a suspend or stall, not ji
 JUMP_PAD = 8.0  # silence still fed after a skip, so pending speech closes before the timeline moves
 LATE_OK = 1.0  # a device may run this far behind the wall clock before we pad
 SOUND = 1e-4  # peak amplitude above digital silence
+
+
+def dbfs(peak):
+    """Peak amplitude in dBFS, floored at one 16-bit step (about -90.3 dBFS)."""
+    return 20 * np.log10(max(peak, 1 / 32768))
+
+
+class LevelMeter:
+    """Writes `{"<source name>": <peak dBFS>, "t": <arrival unix seconds>}` to `path`
+    each time `source` receives a new device block, until `stop` removes the file.
+
+    Runs on its own thread, keeping file I/O out of the audio callback; a stalled
+    device leaves `t` behind the wall clock rather than repeating a fresh reading."""
+
+    def __init__(self, source, path, period=BLOCK / SAMPLE_RATE / 2):
+        self.source, self.path, self.period = source, path, period
+        self.stopping = threading.Event()
+        self.thread = threading.Thread(target=self._run, daemon=True)
+
+    def start(self):
+        self.thread.start()
+        return self
+
+    def write(self, peak, t):
+        tmp = self.path.with_name(self.path.name + ".tmp")
+        tmp.write_text(json.dumps({self.source.name: round(float(dbfs(peak)), 1), "t": t}))
+        os.replace(tmp, self.path)
+
+    def _run(self):
+        written = None
+        while not self.stopping.wait(self.period):
+            heard, peak = self.source.last_audio, self.source.block_peak
+            if peak is None or heard == written:
+                continue
+            try:
+                self.write(peak, heard)
+                written = heard
+            except OSError as e:
+                log(f"{self.source.name}: level not written ({e})")
+                return
+
+    def stop(self):
+        self.stopping.set()
+        if self.thread.is_alive():
+            self.thread.join()
+        self.path.unlink(missing_ok=True)
 
 
 def to_pcm16(samples):
@@ -85,6 +134,7 @@ class Source:
         self.last_audio = None  # wall-clock time the device last delivered
         self.has_sound = False  # whether any device block exceeded SOUND this session
         self.heard = None  # (samples drained, wall time the last of them arrived)
+        self.block_peak = None  # peak amplitude of the newest device block
         self.stats = _no_stats()
         self.error = None
         self.jump = 0.0  # seconds of wall time skipped since the last `take_jump`
@@ -103,7 +153,7 @@ class Source:
         if not samples.size:
             return
         now = self.last_audio = time.time()
-        peak = float(np.abs(samples).max())
+        peak = self.block_peak = float(np.abs(samples).max())
         if peak > SOUND:
             self.has_sound = True
         self.stats["device"] += samples.size

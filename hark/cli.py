@@ -38,7 +38,7 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from .capture import (AUDIOTEE, SAMPLE_RATE, FileSource, MicSource, PhoneSource, SystemSource, WavRecorder,
+from .capture import (AUDIOTEE, SAMPLE_RATE, FileSource, LevelMeter, MicSource, PhoneSource, SystemSource, WavRecorder,
                       load_audio, log, log_to)
 from .health import QuietWatch
 from .masking import MaskPolicy
@@ -365,7 +365,7 @@ def main(argv=None):
     all_tracks = []
     started_sources = []
     started_tracks = []
-    sink = matcher = mirror = watch = None
+    sink = matcher = mirror = watch = level = None
     recorders = {}
     mic_gates = {}
     system_gates = {}
@@ -585,6 +585,8 @@ def main(argv=None):
                     break
                 src.start()
                 started_sources.append(src)
+                if live and src.name == "mic":
+                    level = LevelMeter(src, HOME / "level.json").start()
                 started_tracks.append((src, track))
                 if pause_monitor and src.name in {"mic", "phone"}:
                     mic_gates[src] = MicGate(src)
@@ -658,6 +660,8 @@ def main(argv=None):
             raise
         finally:
             try:
+                if level:
+                    level.stop()
                 for src in started_sources:
                     src.stop()
                 if pause_monitor:
