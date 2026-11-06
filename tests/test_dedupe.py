@@ -64,3 +64,9 @@ def test_recent_cache_is_bounded():
     deduper.feed([system], now)
     deduper.feed([], now + 70)
     assert not deduper.system
+
+
+def test_a_run_split_between_speakers_keeps_its_spoken_order():
+    deduper = EchoDeduper()
+    first, overlapping = utterance("mic", "first long sentence here", 0, 9), utterance("mic", "brief aside", 2, 1)
+    assert deduper.feed([first, overlapping], 0, final=True) == [first, overlapping]

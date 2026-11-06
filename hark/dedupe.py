@@ -52,4 +52,4 @@ class EchoDeduper:
                 held.append((at, mic))
         self.pending = held
         self.system = [u for u in self.system if u.wall_span[1] >= now - 60]
-        return sorted(output, key=lambda u: u.wall_span[1])
+        return sorted(output, key=lambda u: u.wall_span[0])

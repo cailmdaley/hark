@@ -54,3 +54,43 @@ def test_phone_source_delivers_pcm_and_survives_a_reconnect():
     finally:
         src.stop()
     assert not path.exists()
+
+
+def test_pause_mutes_a_phone_before_any_recognizer(tmp_path, monkeypatch):
+    from test_cli import fake_live_capture
+    from hark.pause import ManualPause
+
+    cli, Mic = fake_live_capture(monkeypatch, tmp_path)
+    gates = []
+
+    class Phone(Mic):
+        def __init__(self, path):
+            super().__init__()
+            self.name = "phone"
+
+    real_gate = cli.MicGate
+    monkeypatch.setattr(cli, "PhoneSource", Phone)
+    monkeypatch.setattr(cli, "MicGate", lambda src: gates.append(src.name) or real_gate(src))
+    stops = []
+
+    def flush(tracks, force=False):
+        ManualPause(tmp_path).set(True)
+        if len(stops) == 1:
+            stops.append(time.monotonic())
+        elif time.monotonic() - stops[1] > .3:
+            stops[0].set()
+        return []
+
+    monkeypatch.setattr(cli, "flush_tracks", flush)
+    class Signals:
+        def __init__(self, lifecycle, stop):
+            import threading
+            self.signal_written = threading.Event()
+            self.signal_written.set()
+            stops.append(stop)
+        def close(self):
+            pass
+    monkeypatch.setattr(cli, "SignalWatcher", Signals)
+    cli.main(["--phone", "-o", str(tmp_path / "phone")])
+    assert gates == ["phone"]
+    assert "# paused" in (tmp_path / "phone.txt").read_text()

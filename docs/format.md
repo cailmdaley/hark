@@ -60,8 +60,8 @@ Every other line starts with `# `:
 ## The JSONL file
 
 One JSON object per line. Every record has `wall`, an ISO-8601 local timestamp.
-For voice utterances it includes microseconds and a UTC offset and denotes the spoken start, not the time the line was appended.
-Other record types and meeting captures use local timestamps to the second without an offset.
+For utterances from a voice run, which is all of `--voice` and the mic or phone track under `--external-ear`, it includes microseconds and a UTC offset and denotes the spoken start, not the time the line was appended.
+Other records use local timestamps to the second without an offset, so one meeting can hold both forms.
 There are four kinds.
 
 **Utterance**

@@ -248,7 +248,7 @@ def test_delayed_anchors_belong_to_finished_physical_run(failure, force):
         t.feed(pcm(0), final=True)
     else:
         # Quiet finalization can precede a delayed raw timestamp.
-        t.feed(pcm(.5))
+        t.feed(pcm(3.5))
     out = flush_tracks([t], force=force)
     assert [u.text for u in out] == ["raw words" if failure else "finished words"]
     assert out[0].speaker == "S1"
@@ -318,3 +318,52 @@ def test_echo_cancelled_mic_withholds_runs_the_local_recognizer_did_not_hear():
     t.feed(pcm(1, .02))
     t.feed(pcm(3))
     assert [u.text for u in flush_tracks([t])] == ["phantom call audio"] and len(calls) == 1
+
+
+def test_a_stalled_ear_rests_but_an_empty_reply_does_not(monkeypatch):
+    now = [0.0]
+    monkeypatch.setattr("hark.live_voice.time.monotonic", lambda: now[0])
+    calls, stall = [], [False]
+
+    def recognize(audio):
+        calls.append(audio)
+        now[0] += 30 if stall[0] else 1
+        if stall[0]:
+            raise TimeoutError
+        return ""
+
+    t = finished_track(recognize)
+    def speak():
+        t.session.tokens.append(token(t.audio_samples / SAMPLE_RATE + .1, t.audio_samples / SAMPLE_RATE + .3))
+        t.feed(pcm(1, .02))
+        t.feed(pcm(3))
+        return flush_tracks([t])
+
+    assert speak() and speak() and len(calls) == 2  # Empty replies leave the next run its call.
+    stall[0] = True
+    assert speak() and len(calls) == 3
+    assert speak() and len(calls) == 3  # Rested: raw words, no call.
+    now[0] += 61
+    assert speak() and len(calls) == 4
+
+
+def test_residual_echo_above_the_gate_cannot_hold_a_run_open():
+    calls = []
+    t = finished_track(lambda audio: calls.append(audio) or "said in the room", local_words_required=True, gap=5)
+    t.session.tokens = [token(.1, .3, " hello")]
+    t.feed(pcm(30, .02))  # Loud throughout, with one heard word at the start.
+    out = flush_tracks([t])
+    assert len(calls) == 1 and len(calls[0]) < 8 * SAMPLE_RATE
+    assert [u.text for u in out] == ["said in the room"]
+
+
+def test_short_quiet_settings_keep_a_late_word():
+    # Three seconds of the model's drain close a run, however short the quiet setting.
+    calls = []
+    t = finished_track(lambda audio: calls.append(audio) or "word", gap=1)
+    t.feed(pcm(.5, .02))
+    t.feed(pcm(2))
+    assert not calls
+    t.pending["speaker_0"] = _Pending([token(.1, .3)])
+    t.feed(pcm(2))
+    assert [u.text for u in flush_tracks([t])] == ["word"]

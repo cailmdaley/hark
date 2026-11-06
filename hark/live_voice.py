@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 import sys
 import tempfile
+import time
 
 import numpy as np
 
@@ -21,6 +22,8 @@ VOICE_GAP = 5.0
 VOICE_MAX_LEN = 75.0
 VOICE_WORDS = 200
 VOICE_LATENCY = "ultra_low"
+EAR_STALL = 10.0  # a failed call this slow is a dead link, not a refused run
+EAR_REST = 60.0  # the main loop can't wait on a dead link for every run
 VOICE_NAME = re.compile(r"\b(?:claude|cloud|clawed|claw|klaud|clot|clock|clod|claud)\b", re.IGNORECASE)
 
 
@@ -161,8 +164,9 @@ class VoiceTrack(Track):
     Speaker caches and identities survive idle periods.
 
     `local_words_required` withholds a run from the external ear until the local
-    recognizer has heard words in it. An echo-cancelled mic needs this: its
-    residual call audio clears the gate without being speech in the room.
+    recognizer has heard words in it, and closes runs by quiet since the last
+    word. An echo-cancelled mic needs this: its residual call audio stays above
+    the acoustic gate, so a physical run would otherwise never end.
     """
 
     ordered_flush = True  # External word order survives overlapping diarizer anchors.
@@ -185,6 +189,7 @@ class VoiceTrack(Track):
         self.report = report or (lambda message: print(message, file=sys.stderr))
         self._run_start = None
         self._run_end = 0.0
+        self._ear_retry = 0.0
         self._last_loud = 0.0
         self._ready = []
         if refiner is not None:
@@ -251,7 +256,10 @@ class VoiceTrack(Track):
             return []
         start = self._run_start
         clock = self.audio_samples / SAMPLE_RATE
-        quiet = clock - self._last_loud >= self.gap and self.processed >= self._last_loud + .5
+        last = self._last_loud
+        if self.local_words_required:
+            last = max((t.end for p in self.pending.values() for t in p.tokens), default=start)
+        quiet = clock - last >= max(self.gap, self.tail / SAMPLE_RATE) and self.processed >= last + .5
         preview = self.partial
         word_count = sum(len("".join(t.text for t in p.tokens).split()) for p in self.pending.values())
         early = word_count >= self.words or VOICE_NAME.search(preview)
@@ -263,6 +271,8 @@ class VoiceTrack(Track):
             end = min(end, max(start, quiet_boundary(self.audio, end)))
         # Delayed RNNT anchors can overshoot the physical PCM endpoint. When a
         # run closes, all its anchors belong to it, including those future times.
+        if self.local_words_required and not any(p.tokens for p in self.pending.values()):
+            end = max(start, end - 2)  # Delayed tokens for this window's tail still count.
         complete = end >= self._last_loud
         chosen = {speaker: _Pending([t for t in part.tokens if complete or t.start < end])
                   for speaker, part in self.pending.items()}
@@ -271,13 +281,17 @@ class VoiceTrack(Track):
         # Preroll can straddle a sleep boundary; an empty prefix must still advance.
         speech = samples.size and float(np.max(samples * samples)) >= self.threshold ** 2
         speech = speech and (anchors or not self.local_words_required)
+        asked = time.monotonic()
+        ear_open = asked >= self._ear_retry
         try:
-            text = self.refiner(samples).strip() if speech else ""
+            text = self.refiner(samples).strip() if speech and ear_open else ""
             if not text:
                 raise ValueError("empty finished text")
         except Exception as error:
             # External adapters may carry secrets in exception messages or URLs.
-            if speech:
+            if speech and ear_open:
+                if time.monotonic() - asked >= EAR_STALL:
+                    self._ear_retry = time.monotonic() + EAR_REST
                 self.report(f"voice ear failed ({type(error).__name__}); writing raw recognition")
             output = [u for speaker, part in chosen.items()
                       if part.tokens and (u := self._utterance(speaker, part.tokens))]

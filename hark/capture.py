@@ -34,7 +34,7 @@ BLOCK = SAMPLE_RATE // 10  # 100 ms
 AUDIOTEE = Path(os.environ.get("HARK_AUDIOTEE", Path(__file__).parent.parent / "bin" / "audiotee"))
 STALL_SEC = 5.0
 JUMP_SEC = 30.0  # a wall-clock deficit this large is a suspend or stall, not jitter: skip it
-JUMP_PAD = 5.0  # silence still fed after a skip, so pending speech closes before the timeline moves
+JUMP_PAD = 8.0  # silence still fed after a skip, so pending speech closes before the timeline moves
 LATE_OK = 1.0  # a device may run this far behind the wall clock before we pad
 SOUND = 1e-4  # peak amplitude above digital silence
 

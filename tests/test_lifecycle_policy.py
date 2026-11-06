@@ -34,6 +34,8 @@ def capture(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "SignalWatcher", watcher)
 
     class Source:
+        heard = 0, 0.0
+
         name = "phone"
         anchor = time.time()
         last_audio = last_sound = anchor

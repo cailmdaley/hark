@@ -435,7 +435,7 @@ def main(argv=None):
             for src, _track in started_tracks:
                 if src.name == "system" and src in system_gates:
                     drained["system"] = pause_monitor.feed_system(
-                        system_gates[src], drained["system"], time.time(), final=final)
+                        system_gates[src], drained["system"], time.time(), final=final or src in deferred_jumps)
         for src, track in started_tracks:
             samples = drained[src.name]
             if src in recorders:
@@ -571,8 +571,8 @@ def main(argv=None):
             if not live:
                 install_signal_handlers()
 
-            if live and not stop.is_set() and any(src.name == "mic" for src, _ in tracks):
-                pause_monitor = PauseMonitor(HOME, pause_patterns,
+            if live and not stop.is_set() and any(src.name in {"mic", "phone"} for src, _ in tracks):
+                pause_monitor = PauseMonitor(HOME, () if args.phone else pause_patterns,
                                              system_paused=args.mic_only and system_audio,
                                              voice=args.voice)
                 pause_monitor.start()
@@ -584,7 +584,7 @@ def main(argv=None):
                 src.start()
                 started_sources.append(src)
                 started_tracks.append((src, track))
-                if pause_monitor and src.name == "mic":
+                if pause_monitor and src.name in {"mic", "phone"}:
                     mic_gates[src] = MicGate(src)
                 elif pause_monitor and src.name == "system":
                     system_gates[src] = MicGate(src)
