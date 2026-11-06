@@ -78,6 +78,11 @@ External word order is preserved even when speaker anchors overlap or delayed ti
 When Nemotron supplies no words for audible speech, the external ear still receives the run; recovered words carry the unknown label `S?` and the acoustic run's timing rather than an invented identity.
 Diarization can still mistake one person for several slots, and a mono microphone cannot separate simultaneous voices cleanly.
 
+`hark --external-ear` brings the same final words to a meeting. The mic or phone track runs as voice's speech runs, on `run_quiet_seconds` from `--settings`, while the system track stays local and keeps its 3 s turns.
+Next to system audio, a run reaches the ear only after Nemotron has heard words in it, so residual call audio left in the echo-cancelled mic is not uploaded.
+An adapter that can't load leaves the recording on local words and says so in the log.
+**This uploads the room's speech**, including other people near the mic; call audio does not leave the machine.
+
 Neither a system-audio tap nor AEC runs in this mode.
 Videos on headphones can't address the transcript, but speech or playback audible in the room can.
 Voice capture doesn't filter for an enrolled identity.
@@ -181,6 +186,7 @@ The [format contract](format.md) defines the text and JSONL records.
 |---|---|---|
 | `--phone` | | capture only PCM from the phone socket, diarized |
 | `--voice` | | continuous mic dictation with a configured external final-text ear and a local idle gate |
+| `--external-ear` | | final words for the mic or phone track of a meeting from the configured external ear; system audio stays local |
 | `--ear local\|gradium` | local if MLX imports, otherwise Gradium | recognition and speaker attribution backend |
 | `--no-gradium-metering` | | skip credit-balance requests |
 | `--title TEXT` | | appended to the session filename |

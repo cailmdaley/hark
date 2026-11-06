@@ -281,6 +281,9 @@ def main(argv=None):
                     help="seconds of silence that end a turn (meeting: 3; voice: 5); overrides --settings")
     ap.add_argument("--settings", type=Path,
                     help="voice settings JSON; reloads run_quiet_seconds while capturing")
+    ap.add_argument("--external-ear", action="store_true",
+                    help="final words for the mic or phone track from the configured external ear; "
+                         "system audio stays local, and a missing adapter leaves the mic local")
     ap.add_argument("--title", help="appended to the session filename")
     ap.add_argument("--mirror", help="append the transcript to HOST:PATH over SSH")
     ap.add_argument("-o", "--out", type=Path, help="write the transcript here instead of ~/.hark/sessions/")
@@ -291,8 +294,9 @@ def main(argv=None):
     args.ear = args.ear or _default_ear()
     from .live_voice import VOICE_LATENCY, Partial, RunQuiet, VoiceTrack, load_refiner
 
-    run_quiet = RunQuiet(args.settings) if args.voice and args.gap is None else None
-    args.gap = args.gap if args.gap is not None else (run_quiet.read() if run_quiet else 3.0)
+    run_quiet = RunQuiet(args.settings) if (args.voice or args.external_ear) and args.gap is None else None
+    run_gap = args.gap if args.gap is not None else (run_quiet.read() if run_quiet else 5.0)
+    args.gap = args.gap if args.gap is not None else 3.0
     args.latency = args.latency or (VOICE_LATENCY if args.voice else "low")
     if args.voice and args.ear != "local":
         ap.error("--voice requires the local ear on Apple Silicon")
@@ -391,14 +395,15 @@ def main(argv=None):
             if deferred_jumps.get(src):
                 track.t0 += timedelta(seconds=deferred_jumps.pop(src))
             samples = np.zeros(0, np.float32)
-            heard = src.heard if args.voice else None
+            run_clock = isinstance(track, VoiceTrack)
+            heard = src.heard if run_clock else None
             try:
                 samples = src.drain(limit=float("inf") if final else SAMPLE_RATE // 2)
             except Exception as error:
                 errors.append(error)
             jump = getattr(src, "take_jump", float)()
             if jump:
-                if args.voice:
+                if run_clock:
                     at, origin = src.jump_clock
                     track.add_wall_gap(at / SAMPLE_RATE, origin)
                 else:
@@ -406,7 +411,7 @@ def main(argv=None):
             if src in mic_gates:
                 try:
                     held = []
-                    if args.voice and jump:
+                    if run_clock and jump:
                         held.append(pause_monitor.feed(mic_gates[src], np.zeros(0, np.float32),
                                                        heard[1], final=True, heard=heard))
                         prefix, old_heard = src.jump_prefix
@@ -501,7 +506,6 @@ def main(argv=None):
                     sources = [(PhoneSource(phone_socket), numbered)]
                 else:
                     mic = MicSource(_device(args.mic))
-                    mic.pad_before_jump = args.voice
                     sources = [(mic, numbered)]
                     if system_audio:
                         sources.append((SystemSource(), numbered))
@@ -523,19 +527,32 @@ def main(argv=None):
                 voices = ({path.stem: np.load(path) for path in (HOME / "voices").glob("*.npy")}
                           if (HOME / "voices").exists() else {})
                 mask = MaskPolicy.parse(args.speaker_mask) if args.speaker_mask != "shared" else None
-                voice_options = {"refiner": load_refiner(language=args.lang), "report": log} if args.voice else {}
+                refiner = None
+                if args.voice:
+                    refiner = load_refiner(language=args.lang)
+                elif args.external_ear and args.ear == "local":
+                    try:
+                        refiner = load_refiner(language=args.lang)
+                    except RuntimeError as error:
+                        log(f"{error}; keeping local words")
+
+                def local_track(src, label):
+                    shared = dict(speaker_label=label, language=args.lang, mask=mask, stop=stop)
+                    if args.voice or (refiner and src.name != "system"):
+                        src.pad_before_jump = True
+                        return VoiceTrack(src.name, asr, diar, gap=run_gap, refiner=refiner, report=log,
+                                          local_words_required=system_audio, **shared)
+                    return Track(src.name, asr, diar, gap=args.gap, **shared)
+
                 tracks = [(src, gradium.GradiumTrack(src.name, key=key, language=args.lang,
                                              realtime=live or args.realtime, voices=voices)
-                           if args.ear == "gradium" else
-                           (VoiceTrack if args.voice else Track)(
-                               src.name, asr, diar, speaker_label=label,
-                               language=args.lang, gap=args.gap, mask=mask, stop=stop,
-                               **voice_options))
+                           if args.ear == "gradium" else local_track(src, label))
                           for src, label in sources]
                 all_tracks = [track for _, track in tracks]
-                if not voices and args.ear == "local" and not args.voice:
+                if not voices and args.ear == "local":
                     for track in all_tracks:
-                        track.audio = None
+                        if not isinstance(track, VoiceTrack):
+                            track.audio = None
                 tracks_by_name = {track.name: track for _, track in tracks}
 
             if sink is None:
@@ -572,7 +589,7 @@ def main(argv=None):
                 elif pause_monitor and src.name == "system":
                     system_gates[src] = MicGate(src)
                 track.t0 = (datetime.combine(now.date(), datetime.min.time()) if args.file
-                            else datetime.fromtimestamp(src.anchor).astimezone() if args.voice
+                            else datetime.fromtimestamp(src.anchor).astimezone() if isinstance(track, VoiceTrack)
                             else datetime.fromtimestamp(src.anchor))
             if system_audio and len(started_sources) == 2:
                 from .aec import EchoCanceller
@@ -607,7 +624,8 @@ def main(argv=None):
                 if run_quiet:
                     gap = run_quiet.read()
                     for track in all_tracks:
-                        track.gap = gap
+                        if isinstance(track, VoiceTrack):
+                            track.gap = gap
                 busy = feed_sources()
                 for u in ready_utterances(flush_tracks(all_tracks)):
                     _emit(u, sink, matcher, tracks_by_name, failed_slots, slots)

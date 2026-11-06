@@ -175,6 +175,8 @@ Quiet closure waits until enough streaming audio has committed to drain delayed 
 The external-ear PCM ring retains 90 s, independent of session length.
 `--settings PATH` reloads `run_quiet_seconds` from the launcher's JSON on file changes; `--gap` overrides it.
 Meeting parameters are independent; there is no AEC buffer or cross-track deduplication wait.
+`--external-ear` puts a `VoiceTrack` on a meeting's mic or phone source, after AEC and with the meeting's diarizer lookahead, beside an ordinary system `Track`.
+Runs and turns close independently, so a mic run no longer takes part in cross-track turn cuts; the echo deduper still compares its lines with the system track's.
 
 One external call receives each bounded physical run, not each diarizer slot's overlapping audio.
 The adapter is loaded from `HARK_VOICE_EAR` or `~/.hark/voice_ear.py`; its `create(language=None)` returns a mono 16 kHz PCM-to-text callable.

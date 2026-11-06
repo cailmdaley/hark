@@ -81,3 +81,61 @@ def test_running_voice_capture_reloads_settings_and_gap_overrides(tmp_path, monk
     cli.main(argv + (["--gap", override] if override else []))
     assert initial == ([3] if override else [1.5])
     assert gaps == ([3, 3] if override else [1.5, 8])
+
+
+@pytest.mark.parametrize("flags, adapter, expected", [
+    (["--external-ear"], True, {"mic": ("VoiceTrack", 8.0), "system": ("Track", 3.0)}),
+    (["--external-ear"], False, {"mic": ("Track", 3.0), "system": ("Track", 3.0)}),
+    ([], True, {"mic": ("Track", 3.0), "system": ("Track", 3.0)}),
+])
+def test_fixed_capture_refines_the_mic_and_keeps_system_audio_local(tmp_path, monkeypatch, flags, adapter, expected):
+    _, Mic = fake_live_capture(monkeypatch, tmp_path)
+
+    class System(Mic):
+        def __init__(self):
+            super().__init__()
+            self.name = "system"
+
+    settings = tmp_path / "voice.json"
+    settings.write_text(json.dumps({"run_quiet_seconds": 8}))
+    built = {}
+
+    def recording(kind):
+        class Recorded:
+            def __init__(self, name, *args, **kwargs):
+                built[name] = (kind, kwargs["gap"], kwargs.get("local_words_required"))
+                self.name, self.gap, self.audio, self.processed, self.pending = name, kwargs["gap"], None, 0, {}
+                self.session = None
+            def feed(self, *args, **kwargs):
+                pass
+        return Recorded
+
+    def load(**_):
+        if not adapter:
+            raise RuntimeError("voice ear unavailable")
+        return lambda _: "finished"
+
+    stops = []
+    class Signals:
+        def __init__(self, lifecycle, stop):
+            self.stop, self.signal_written = stop, threading.Event()
+            self.signal_written.set()
+            stops.append(stop)
+        def close(self):
+            pass
+
+    def flush(tracks, force=False):
+        stops[0].set()
+        return []
+
+    monkeypatch.setattr(cli, "SignalWatcher", Signals)
+    monkeypatch.setattr(cli, "Track", recording("Track"))
+    monkeypatch.setattr("hark.live_voice.VoiceTrack", recording("VoiceTrack"))
+    monkeypatch.setattr("hark.live_voice.load_refiner", load)
+    monkeypatch.setattr(cli, "flush_tracks", flush)
+    monkeypatch.setattr(cli, "_system_capture_available", lambda: True)
+    monkeypatch.setattr(cli, "SystemSource", System)
+    monkeypatch.setattr("hark.aec.EchoCanceller", lambda **_: type("A", (), {"feed": lambda s, m, *a, **k: m})())
+    cli.main(["--settings", str(settings), "--pause-for", "none", "-o", str(tmp_path / "fixed")] + flags)
+    assert {name: value[:2] for name, value in built.items()} == expected
+    assert built["mic"][2] is (True if expected["mic"][0] == "VoiceTrack" else None)

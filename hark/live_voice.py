@@ -159,6 +159,10 @@ class VoiceTrack(Track):
     tail to drain delayed tokens. The recognizer sees a compressed audio clock;
     token timestamps are translated back to the mic clock before turn detection.
     Speaker caches and identities survive idle periods.
+
+    `local_words_required` withholds a run from the external ear until the local
+    recognizer has heard words in it. An echo-cancelled mic needs this: its
+    residual call audio clears the gate without being speech in the room.
     """
 
     ordered_flush = True  # External word order survives overlapping diarizer anchors.
@@ -167,7 +171,8 @@ class VoiceTrack(Track):
     tail = 3 * SAMPLE_RATE
     threshold = 10 ** (-55 / 20)
 
-    def __init__(self, *args, gate=True, refiner=None, report=None, words=VOICE_WORDS, **kwargs):
+    def __init__(self, *args, gate=True, refiner=None, report=None, words=VOICE_WORDS,
+                 local_words_required=False, **kwargs):
         if refiner is not None and not gate:
             raise ValueError("an external voice ear requires the acoustic gate")
         kwargs.setdefault("gap", VOICE_GAP)
@@ -176,6 +181,7 @@ class VoiceTrack(Track):
         self.gate = gate
         self.refiner = refiner
         self.words = words
+        self.local_words_required = local_words_required
         self.report = report or (lambda message: print(message, file=sys.stderr))
         self._run_start = None
         self._run_end = 0.0
@@ -264,6 +270,7 @@ class VoiceTrack(Track):
         samples = self.audio.slice(start, end)
         # Preroll can straddle a sleep boundary; an empty prefix must still advance.
         speech = samples.size and float(np.max(samples * samples)) >= self.threshold ** 2
+        speech = speech and (anchors or not self.local_words_required)
         try:
             text = self.refiner(samples).strip() if speech else ""
             if not text:

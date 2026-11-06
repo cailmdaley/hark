@@ -306,3 +306,15 @@ def test_voice_run_defaults_and_rolling_pcm_bound():
     assert (t.gap, t.words, t.max_len) == (5, 200, 75)
     t.feed(pcm(100))
     assert len(t.audio.samples) == 90 * SAMPLE_RATE
+
+
+def test_echo_cancelled_mic_withholds_runs_the_local_recognizer_did_not_hear():
+    calls = []
+    t = finished_track(lambda audio: calls.append(audio) or "phantom call audio", local_words_required=True)
+    t.feed(pcm(1, .02))
+    t.feed(pcm(3))
+    assert flush_tracks([t]) == [] and not calls
+    t.session.tokens = [token(4.1, 4.3, " hello")]
+    t.feed(pcm(1, .02))
+    t.feed(pcm(3))
+    assert [u.text for u in flush_tracks([t])] == ["phantom call audio"] and len(calls) == 1
