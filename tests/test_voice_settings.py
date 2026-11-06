@@ -14,13 +14,13 @@ def test_missing_invalid_or_removed_settings_use_default(tmp_path):
     setting = RunQuiet(path)
     assert setting.read() == 5
     for value in (None, True, 0, -1, "3", 10**400, float("inf"), float("nan")):
-        path.write_text(json.dumps({"run_quiet_seconds": value}))
+        path.write_text(json.dumps({"quiet_seconds": value}))
         assert setting.read() == 5
     path.write_text("{")
     assert setting.read() == 5
     path.write_text("[]")
     assert setting.read() == 5
-    path.write_text(json.dumps({"run_quiet_seconds": 1.5}))
+    path.write_text(json.dumps({"quiet_seconds": 1.5}))
     assert setting.read() == 1.5
     path.unlink()
     assert setting.read() == 5
@@ -29,11 +29,11 @@ def test_missing_invalid_or_removed_settings_use_default(tmp_path):
 
 def test_settings_cache_changes_and_missing_key(tmp_path):
     path = tmp_path / "voice.json"
-    path.write_text(json.dumps({"run_quiet_seconds": 2}))
+    path.write_text(json.dumps({"quiet_seconds": 2}))
     setting = RunQuiet(path)
     assert setting.read() == setting.read() == 2
     replacement = tmp_path / "replacement"
-    replacement.write_text(json.dumps({"run_quiet_seconds": 7, "unrelated": True}))
+    replacement.write_text(json.dumps({"quiet_seconds": 7, "unrelated": True}))
     replacement.replace(path)
     assert setting.read() == 7
     path.write_text("{}")
@@ -44,7 +44,7 @@ def test_settings_cache_changes_and_missing_key(tmp_path):
 def test_running_voice_capture_reloads_settings_and_gap_overrides(tmp_path, monkeypatch, override):
     fake_live_capture(monkeypatch, tmp_path)
     path = tmp_path / "voice.json"
-    path.write_text(json.dumps({"run_quiet_seconds": 1.5}))
+    path.write_text(json.dumps({"quiet_seconds": 1.5}))
     signals, gaps, initial = [], [], []
 
     class Signals:
@@ -68,7 +68,7 @@ def test_running_voice_capture_reloads_settings_and_gap_overrides(tmp_path, monk
     def flush(tracks, force=False):
         if not force:
             gaps.append(tracks[0].gap)
-            path.write_text(json.dumps({"run_quiet_seconds": 8}))
+            path.write_text(json.dumps({"quiet_seconds": 8}))
             if len(gaps) == 2:
                 signals[0].stop.set()
         return []
@@ -97,7 +97,7 @@ def test_fixed_capture_refines_every_track(tmp_path, monkeypatch, flags, adapter
             self.name = "system"
 
     settings = tmp_path / "voice.json"
-    settings.write_text(json.dumps({"run_quiet_seconds": 8}))
+    settings.write_text(json.dumps({"quiet_seconds": 8}))
     built = {}
 
     def recording(kind):

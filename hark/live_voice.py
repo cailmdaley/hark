@@ -150,7 +150,7 @@ class RunQuiet:
             stamp = self.path.stat().st_mtime_ns
             if stamp == self.stamp:
                 return self.seconds
-            value = json.loads(self.path.read_text()).get("run_quiet_seconds", VOICE_GAP)
+            value = json.loads(self.path.read_text()).get("quiet_seconds", VOICE_GAP)
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
                 raise ValueError("invalid quiet setting")
         except (OSError, ValueError, AttributeError, OverflowError):

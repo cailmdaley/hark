@@ -173,7 +173,7 @@ The 58-second upload cap leaves two seconds of headroom below a 60-second unit, 
 Raw recognition of Claude's name closes a run early.
 Quiet closure waits until enough streaming audio has committed to drain delayed words.
 The external-ear PCM ring retains 90 s, independent of session length.
-`--settings PATH` reloads `run_quiet_seconds` from the launcher's JSON on file changes; `--gap` overrides it.
+`--settings PATH` reloads `quiet_seconds` from the launcher's JSON on file changes; `--gap` overrides it.
 Meeting parameters are independent; there is no AEC buffer or cross-track deduplication wait.
 `--external-ear` puts a `VoiceTrack` on every source of a meeting, after AEC and with the meeting's diarizer lookahead.
 Runs close independently on each track, with no cross-track turn cuts; the echo deduper still compares mic lines with the system track's.

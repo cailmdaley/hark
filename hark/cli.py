@@ -280,7 +280,7 @@ def main(argv=None):
     ap.add_argument("--gap", type=float, default=None,
                     help="seconds of silence that end a turn (meeting: 3; voice: 5); overrides --settings")
     ap.add_argument("--settings", type=Path,
-                    help="voice settings JSON; reloads run_quiet_seconds while capturing")
+                    help="voice settings JSON; reloads quiet_seconds while capturing")
     ap.add_argument("--routes", type=Path,
                     help="voice route journal; each new row closes the running speech at its time")
     ap.add_argument("--external-ear", action="store_true",

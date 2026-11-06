@@ -60,7 +60,7 @@ A run under 12 words waits twice the quiet time, because the ear needs context. 
 `--gap` and `--latency` override quiet time and diarizer lookahead; desktop meetings keep their own defaults.
 A cap can move to a nearby quiet acoustic frame without exceeding the hard boundary.
 A 90 s rolling PCM buffer bounds retained audio.
-A launcher can pass `--settings ~/.config/shuttle/voice.json` with a top-level `run_quiet_seconds` number.
+A launcher can pass `--settings ~/.config/shuttle/voice.json` with a top-level `quiet_seconds` number, the same pause after which Shuttle delivers the words.
 Hark reloads that quiet setting while running; missing or invalid settings use five seconds, and an explicit `--gap` takes precedence.
 Run finalization, external recognition time and the consumer's delivery batching all contribute to latency.
 The transcript and JSONL contain only final text; `<stem>.partial` is a private, atomically replaced raw preview, never a delivery source.
@@ -78,7 +78,7 @@ External word order is preserved even when speaker anchors overlap or delayed ti
 A run closes on quiet since Nemotron's last word and reaches the ear only if Nemotron heard words in it, because room noise and residual call audio hold a mic above the idle gate.
 Diarization can still mistake one person for several slots, and a mono microphone cannot separate simultaneous voices cleanly.
 
-`hark --external-ear` brings the same final words to a meeting. Every track runs as voice's speech runs, on `run_quiet_seconds` from `--settings`.
+`hark --external-ear` brings the same final words to a meeting. Every track runs as voice's speech runs, on `quiet_seconds` from `--settings`.
 An adapter that can't load leaves the recording on local words and says so in the log.
 **This uploads everyone's speech**: the room through the mic and the call through system audio. A paused track, and system audio under `--mic-only`, stay on the machine.
 
