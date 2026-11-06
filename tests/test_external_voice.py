@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 
 from hark.capture import SAMPLE_RATE
-from hark.live_voice import Partial, RestingEar, _align, _word_anchors, quiet_boundary
+from hark.live_voice import Partial, RestingEar, RouteCuts, _align, _word_anchors, quiet_boundary
 from hark.transcript import _Pending, flush_tracks
 from test_live_voice import pcm, token, track
 
@@ -349,3 +349,33 @@ def test_short_quiet_settings_keep_a_late_word():
     t.pending["speaker_0"] = _Pending([token(.1, .3)])
     t.feed(pcm(2))
     assert [u.text for u in flush_tracks([t])] == ["word"]
+
+
+def test_a_route_switch_splits_unbroken_speech_at_its_time():
+    calls = []
+    t = finished_track(lambda audio: calls.append(len(audio)) or "words here")
+    t.session.tokens = [token(.5, 1), token(2, 2.5), token(3.2, 3.6), token(4, 4.5)]
+    t.feed(pcm(3, .02))
+    t.cut(t.t0.timestamp() + 3)
+    t.feed(pcm(3, .02))
+    out = flush_tracks([t])
+    assert len(calls) == 1 and calls[0] == 3 * SAMPLE_RATE
+    assert out and all(u.end <= 3 for u in out)
+    t.feed(pcm(4))
+    later = flush_tracks([t], force=True)
+    assert len(calls) == 2 and later and all(u.start >= 3 for u in later)
+
+
+def test_route_cuts_read_only_rows_added_since_start(tmp_path):
+    path = tmp_path / "routes.jsonl"
+    path.write_text('{"t":"2026-11-06T10:00:00Z"}\n')
+    cuts = RouteCuts(path)
+    assert cuts.read() == []
+    with path.open("a") as stream:
+        stream.write('{"t":"2026-11-06T10:00:05Z"}\n{"t":"partial')
+    assert cuts.read() == [datetime.fromisoformat("2026-11-06T10:00:05+00:00").timestamp()]
+    with path.open("a") as stream:
+        stream.write('"}\n')
+    assert cuts.read() == []
+    path.write_text("")
+    assert cuts.read() == []

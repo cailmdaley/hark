@@ -281,6 +281,8 @@ def main(argv=None):
                     help="seconds of silence that end a turn (meeting: 3; voice: 5); overrides --settings")
     ap.add_argument("--settings", type=Path,
                     help="voice settings JSON; reloads run_quiet_seconds while capturing")
+    ap.add_argument("--routes", type=Path,
+                    help="voice route journal; each new row closes the running speech at its time")
     ap.add_argument("--external-ear", action="store_true",
                     help="final words for every track from the configured external ear; "
                          "a missing adapter leaves the recording local")
@@ -292,8 +294,9 @@ def main(argv=None):
                     help="keep the live tracks as <stem>.<track>.wav beside the transcript")
     args = ap.parse_args(argv)
     args.ear = args.ear or _default_ear()
-    from .live_voice import VOICE_LATENCY, Partial, RunQuiet, VoiceTrack, load_refiner
+    from .live_voice import VOICE_LATENCY, Partial, RouteCuts, RunQuiet, VoiceTrack, load_refiner
 
+    route_cuts = RouteCuts(args.routes) if args.voice else None
     run_quiet = RunQuiet(args.settings) if (args.voice or args.external_ear) and args.gap is None else None
     run_gap = args.gap if args.gap is not None else (run_quiet.read() if run_quiet else 5.0)
     args.gap = args.gap if args.gap is not None else 3.0
@@ -625,6 +628,9 @@ def main(argv=None):
                     for track in all_tracks:
                         if isinstance(track, VoiceTrack):
                             track.gap = gap
+                for at in route_cuts.read() if route_cuts else ():
+                    for track in all_tracks:
+                        track.cut(at)
                 busy = feed_sources()
                 for u in ready_utterances(flush_tracks(all_tracks)):
                     _emit(u, sink, matcher, tracks_by_name, failed_slots, slots)

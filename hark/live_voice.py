@@ -2,7 +2,7 @@
 
 from collections import deque
 from copy import copy
-from datetime import timedelta
+from datetime import datetime, timedelta
 import importlib.util
 import json
 import math
@@ -22,6 +22,7 @@ VOICE_GAP = 5.0
 VOICE_MAX_LEN = 75.0
 VOICE_WORDS = 200
 VOICE_LATENCY = "ultra_low"
+CUT_DRAIN = 1.0  # delayed words before a route switch land within this much model audio
 EAR_STALL = 10.0  # a failed call this slow is a dead link, not a refused run
 EAR_REST = 60.0
 VOICE_NAME = re.compile(r"\b(?:claude|cloud|clawed|claw|klaud|clot|clock|clod|claud)\b", re.IGNORECASE)
@@ -155,6 +156,43 @@ class RunQuiet:
         return self.seconds
 
 
+class RouteCuts:
+    """New switch times from the launcher's route journal, an append-only JSONL.
+
+    Each row's `t` is an ISO timestamp. A journal that shrinks is read from its
+    new start.
+    """
+
+    def __init__(self, path):
+        self.path = Path(path).expanduser() if path else None
+        self.offset = self._size()
+
+    def _size(self):
+        try:
+            return self.path.stat().st_size if self.path else 0
+        except OSError:
+            return 0
+
+    def read(self):
+        size = self._size()
+        if size == self.offset:
+            return []
+        self.offset = min(self.offset, size) if size >= self.offset else 0
+        with open(self.path, "rb") as stream:
+            stream.seek(self.offset)
+            lines = stream.read().splitlines(keepends=True)
+        cuts = []
+        for line in lines:
+            if not line.endswith(b"\n"):
+                break
+            self.offset += len(line)
+            try:
+                cuts.append(datetime.fromisoformat(json.loads(line)["t"]).timestamp())
+            except (ValueError, KeyError, TypeError):
+                pass
+        return cuts
+
+
 class Partial:
     """Atomically replaced, private display text; never part of the transcript."""
 
@@ -209,6 +247,7 @@ class VoiceTrack(Track):
         self.report = report or (lambda message: print(message, file=sys.stderr))
         self._run_start = None
         self._run_end = 0.0
+        self._cut = None
         self._last_loud = 0.0
         self._ready = []
         if refiner is not None:
@@ -233,6 +272,10 @@ class VoiceTrack(Track):
             self._step(samples[:0], final=True)
             if self.refiner is not None:
                 self._ready.extend(self._flush_run(force=True))
+
+    def cut(self, at):
+        """Close the running speech at wall time `at`, so each side keeps its words."""
+        self._cut = at - self.t0.timestamp() - self._wall_clock[-1][1]
 
     def add_wall_gap(self, at, origin):
         """Anchor resumed mic samples without moving speech buffered before sleep."""
@@ -280,10 +323,15 @@ class VoiceTrack(Track):
         preview = self.partial
         word_count = sum(len("".join(t.text for t in p.tokens).split()) for p in self.pending.values())
         early = word_count >= self.words or VOICE_NAME.search(preview)
-        if not force and not quiet and not early and self.processed - start < self.max_len:
+        if self._cut is not None and self._cut <= start:
+            self._cut = None
+        cutting = self._cut is not None and self.processed >= self._cut + CUT_DRAIN
+        if not force and not quiet and not early and not cutting and self.processed - start < self.max_len:
             return []
         end = min(clock, self.processed if not force else clock, start + self.max_len)
         end = min(end, next((b for b, _ in self._wall_clock if start < b <= end), end))
+        if cutting:
+            end, self._cut = min(end, self._cut), None
         if end < clock and end - start >= self.max_len - .01:
             end = min(end, max(start, quiet_boundary(self.audio, end)))
         # Delayed RNNT anchors can overshoot the physical PCM endpoint. When a
