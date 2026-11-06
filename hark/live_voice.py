@@ -21,6 +21,7 @@ from .transcript import Track, Utterance, _Pending
 VOICE_GAP = 5.0
 VOICE_MAX_LEN = 75.0
 VOICE_WORDS = 200
+VOICE_MIN_WORDS = 12
 VOICE_LATENCY = "ultra_low"
 CUT_DRAIN = 1.0  # delayed words before a route switch land within this much model audio
 EAR_STALL = 10.0  # a failed call this slow is a dead link, not a refused run
@@ -320,12 +321,14 @@ class VoiceTrack(Track):
             return []
         start = self._run_start
         clock = self.audio_samples / SAMPLE_RATE
-        words = [t.end for p in self.pending.values() for t in p.tokens]
+        ends = [t.end for p in self.pending.values() for t in p.tokens]
+        word_count = sum(len("".join(t.text for t in p.tokens).split()) for p in self.pending.values())
         # A run without words may be waiting on delayed ones, which the tail drains.
-        last, wait = (max(words), self.gap) if words else (start, max(self.gap, self.tail / SAMPLE_RATE))
+        # A short run waits longer, so the ear hears enough context to be accurate.
+        last, wait = ((max(ends), self.gap if word_count >= VOICE_MIN_WORDS else 2 * self.gap) if ends
+                      else (start, max(self.gap, self.tail / SAMPLE_RATE)))
         quiet = clock - last >= wait and self.processed >= last + .5
         preview = self.partial
-        word_count = sum(len("".join(t.text for t in p.tokens).split()) for p in self.pending.values())
         ended = VOICE_END.search(preview) and clock - last >= VOICE_END_HOLD
         early = word_count >= self.words or VOICE_NAME.search(preview) or ended
         if self._cut is not None and self._cut <= start:

@@ -10,6 +10,11 @@ from hark.transcript import _Pending, flush_tracks
 from test_live_voice import pcm, token, track
 
 
+@pytest.fixture(autouse=True)
+def short_runs_close_on_quiet(monkeypatch):
+    monkeypatch.setattr("hark.live_voice.VOICE_MIN_WORDS", 0)
+
+
 def finished_track(recognize, **kwargs):
     kwargs.setdefault("gap", 2)
     t = track(refiner=recognize, **kwargs)
@@ -392,3 +397,15 @@ def test_a_closing_word_ends_the_run_but_mid_sentence_it_does_not():
     t.session.tokens = [token(2.1, 2.2, " please"), token(2.3, 2.4, " send")]
     t.feed(pcm(2, .02))
     assert [u.text for u in flush_tracks([t])] == ["finished"] and len(calls) == 1
+
+
+def test_a_short_run_waits_twice_the_quiet_for_context(monkeypatch):
+    monkeypatch.setattr("hark.live_voice.VOICE_MIN_WORDS", 3)
+    calls = []
+    t = finished_track(lambda a: calls.append(len(a)) or "finished", gap=2)
+    t.session.tokens = [token(.1, .2)]
+    t.feed(pcm(.5, .02))
+    t.feed(pcm(3))
+    assert not flush_tracks([t]) and not calls
+    t.feed(pcm(1))
+    assert flush_tracks([t]) and len(calls) == 1

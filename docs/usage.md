@@ -56,7 +56,7 @@ hark resume                     # unmute it
 
 Voice uses local Nemotron models for speaker labels, timing and raw preview, with `ultra_low` diarizer lookahead (0.32 s).
 An operator-configured external ear supplies the final words, once per physical speech run, after five seconds of quiet and the streaming model's drain, about 200 raw words, or a hard 75 s run cap.
-A raw spelling of Claude's name closes the run early, as does `send` at the end of what you said, and with `--routes PATH` each new row in the launcher's route journal closes it at that row's `t`, so speech either side of a switch reaches its own target.
+A run under 12 words waits twice the quiet time, because the ear needs context. A raw spelling of Claude's name closes the run early, as does `send` at the end of what you said, and with `--routes PATH` each new row in the launcher's route journal closes it at that row's `t`, so speech either side of a switch reaches its own target.
 `--gap` and `--latency` override quiet time and diarizer lookahead; desktop meetings keep their own defaults.
 A cap can move to a nearby quiet acoustic frame without exceeding the hard boundary.
 A 90 s rolling PCM buffer bounds retained audio.
