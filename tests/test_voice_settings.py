@@ -43,6 +43,7 @@ def test_settings_cache_changes_and_missing_key(tmp_path):
 @pytest.mark.parametrize("override", [None, "3"])
 def test_running_voice_capture_reloads_settings_and_gap_overrides(tmp_path, monkeypatch, override):
     fake_live_capture(monkeypatch, tmp_path)
+    monkeypatch.setattr(cli, "_system_capture_available", lambda: False)
     path = tmp_path / "voice.json"
     path.write_text(json.dumps({"quiet_seconds": 1.5}))
     signals, gaps, initial = [], [], []

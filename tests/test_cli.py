@@ -456,8 +456,18 @@ def test_room_keeps_the_mic_track_sample_for_sample(tmp_path, monkeypatch):
     cli, Source = fake_live_capture(monkeypatch, tmp_path)
     mic = tone(440, 8000)
     Mic, fed = feed_chunks(Source, "mic", [mic[:5000], mic[5000:]])
+    ready = threading.Event()
+    drain = Mic.drain
+
+    def drain_all(self, limit):
+        samples = drain(self, limit)
+        if sum(chunk.size for chunk in fed) >= mic.size:
+            ready.set()
+        return samples
+
+    monkeypatch.setattr(Mic, "drain", drain_all)
     monkeypatch.setattr(cli, "MicSource", Mic)
-    signaller, _ = signal_when_live(tmp_path)
+    signaller, _ = signal_when_live(tmp_path, ready=ready)
     out = tmp_path / "sessions" / "phrase.txt"
 
     cli.main(["--ear", "local", "--launch", "test", "--room", "--keep-audio", "-o", str(out)])

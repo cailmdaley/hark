@@ -324,6 +324,7 @@ def test_sleep_gap_preserves_held_and_resumed_speech_through_real_source_and_mic
     monkeypatch.setattr(cli, "HOME", tmp_path)
     monkeypatch.setattr(cli, "_default_ear", lambda: "local")
     monkeypatch.setattr(cli, "_device_capture_available", lambda: True)
+    monkeypatch.setattr(cli, "_system_capture_available", lambda: False)
 
     class Signals:
         def __init__(self, lifecycle, stop):
