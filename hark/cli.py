@@ -1,7 +1,7 @@
 """hark — capture a conversation, append one speaker-labelled line per utterance.
 
     hark                 desktop meeting (including in person): mic + system audio when available
-    hark --voice         continuous mic-only dictation, with a configured external voice ear
+    hark --voice         continuous voice capture with a configured external voice ear
     hark --phone         mobile meeting: phone PCM into ~/.hark/phone.sock, diarized
     hark --file x.wav    transcribe a file through the same streaming path
 
@@ -256,11 +256,13 @@ def main(argv=None):
     mode.add_argument("--call", action="store_true", help=argparse.SUPPRESS)
     mode.add_argument("--phone", action="store_true",
                       help="a phone as the mic: listen for s16le 16 kHz PCM on ~/.hark/phone.sock, diarized")
-    mode.add_argument("--voice", action="store_true",
-                      help="continuous mic dictation; local speaker timing and a configured external final-text ear")
     mode.add_argument("--mic-only", action="store_true",
                       help="transcribe the mic alone while keeping system audio as the AEC reference")
     mode.add_argument("--file", help="transcribe an audio file instead of live input")
+    ap.add_argument("--voice", action="store_true",
+                    help="continuous voice capture with a configured external final-text ear")
+    ap.add_argument("--system-audio", action="store_true",
+                    help="with --voice, transcribe system audio as well as using it for echo cancellation")
     ap.add_argument("--ear", choices=["local", "gradium"],
                     help="ASR backend (default: local when MLX is importable, otherwise gradium)")
     ap.add_argument("--no-gradium-metering", dest="gradium_metering", action="store_false",
@@ -293,6 +295,10 @@ def main(argv=None):
     ap.add_argument("--keep-audio", dest="save_audio", action="store_true",
                     help="keep the live tracks as <stem>.<track>.wav beside the transcript")
     args = ap.parse_args(argv)
+    if args.voice and (args.room or args.call or args.mic_only or args.file):
+        ap.error("--voice can only be combined with --phone, not another capture mode")
+    if args.system_audio and not args.voice:
+        ap.error("--system-audio requires --voice")
     args.ear = args.ear or _default_ear()
     from .live_voice import VOICE_LATENCY, Partial, RouteCuts, RunQuiet, VoiceTrack, load_refiner
 
@@ -327,7 +333,8 @@ def main(argv=None):
     out = (args.out.with_suffix(".txt").expanduser().resolve() if args.out
            else _session_path(now, args.title))
     live = not bool(args.file)
-    system_audio = not (args.voice or args.room or args.phone or args.file) and _system_capture_available()
+    system_audio = not (args.room or args.phone or args.file) and _system_capture_available()
+    system_paused = system_audio and (args.mic_only or (args.voice and not args.system_audio))
     phone_socket = HOME / "phone.sock" if args.phone else None
     if live:
         expire_audio([HOME / "meetings", HOME / "sessions"])
@@ -336,7 +343,7 @@ def main(argv=None):
         transcript=str(out),
         mirror=f"{mirror_target[0]}:{mirror_target[1]}" if mirror_target else None,
         launch=args.launch, phone=str(phone_socket) if phone_socket else None, ear=args.ear,
-        system_audio=system_audio and not args.mic_only, kind="voice" if args.voice else "meeting",
+        system_audio=system_audio and not system_paused, kind="voice" if args.voice else "meeting",
     ) if _owns_meeting(args, out) else None)
     stop = threading.Event()
     watcher = None
@@ -350,9 +357,10 @@ def main(argv=None):
         for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
             signal.signal(sig, on_signal)
 
-    if not (args.voice or args.room or args.phone or args.file) and not system_audio:
-        log("system audio unavailable; using mic only (build audiotee with scripts/build-audiotee.sh)")
-    what = ("voice: mic only" if args.voice else
+    what = ("voice: phone" if args.voice and args.phone else
+            "voice: mic + system audio" if args.voice and system_audio and not system_paused else
+            "voice: mic (system audio reference)" if args.voice and system_audio else
+            "voice: mic only" if args.voice else
             f"file {args.file}" if args.file else
             "phone: the phone's mic diarized as S1…" if args.phone else
             "live: mic only" if args.mic_only and system_audio else
@@ -488,6 +496,8 @@ def main(argv=None):
 
             matcher = VoiceMatcher(voices, sink, name_tracks=name_tracks)
         log(f"transcript → {out}")
+        if not (args.room or args.phone or args.file) and not system_audio:
+            log("system audio unavailable; using mic only (build audiotee with scripts/build-audiotee.sh)")
         if args.ear == "gradium" and mirror_target:
             mirror = TranscriptMirror(out, *mirror_target)
             mirror.start()
@@ -575,7 +585,7 @@ def main(argv=None):
 
             if live and not stop.is_set() and any(src.name in {"mic", "phone"} for src, _ in tracks):
                 pause_monitor = PauseMonitor(HOME, () if args.phone else pause_patterns,
-                                             system_paused=args.mic_only and system_audio,
+                                             system_paused=system_paused,
                                              voice=args.voice)
                 pause_monitor.start()
                 _pause_events(pause_monitor, sink)
@@ -585,6 +595,7 @@ def main(argv=None):
                     break
                 src.start()
                 started_sources.append(src)
+                log(f"{src.name}: source started")
                 if live and src.name == "mic":
                     level = LevelMeter(src, HOME / "level.json").start()
                 started_tracks.append((src, track))

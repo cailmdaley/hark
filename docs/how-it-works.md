@@ -168,15 +168,18 @@ The 58-second upload cap leaves two seconds of headroom below a 60-second unit, 
 
 ## Continuous voice
 
-`--voice` selects the mic alone, local speaker-streaming models and an operator-owned external ear for finished text.
+`--voice` uses local speaker-streaming models and an operator-owned external ear for finished text.
+On desktop it captures the mic and, when available, system audio; `--voice --phone` uses the phone instead.
+The system track is an AEC reference even while its transcription is paused, which is the default unless `--system-audio` is passed.
 `VoiceTrack` uses `ultra_low` diarizer lookahead, a 5 s quiet threshold, about 200 raw words per run and a hard 75 s physical-run cap.
 Raw recognition of Claude's name closes a run early.
 Quiet closure waits until enough streaming audio has committed to drain delayed words.
 The external-ear PCM ring retains 90 s, independent of session length.
 `--settings PATH` reloads `quiet_seconds` from the launcher's JSON on file changes; `--gap` overrides it.
-Meeting parameters are independent; there is no AEC buffer or cross-track deduplication wait.
+Desktop voice uses the same AEC buffer and cross-track deduplication as meetings.
+Every voice track uses `VoiceTrack`, and route changes cut both tracks.
 `--external-ear` puts a `VoiceTrack` on every source of a meeting, after AEC and with the meeting's diarizer lookahead.
-Runs close independently on each track, with no cross-track turn cuts; the echo deduper still compares mic lines with the system track's.
+Runs close independently on each track; the echo deduper compares mic lines with the system track's.
 
 One external call receives each bounded physical run, not each diarizer slot's overlapping audio.
 The adapter is loaded from `HARK_VOICE_EAR` or `~/.hark/voice_ear.py`; its `create(language=None)` returns a mono 16 kHz PCM-to-text callable.

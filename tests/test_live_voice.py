@@ -13,7 +13,7 @@ from hark.capture import SAMPLE_RATE
 from hark.live_voice import VoiceTrack
 from hark.pause import AudioProcess, ManualPause, PauseMonitor
 from hark.transcript import flush_tracks, numbered
-from test_cli import fake_live_capture, signal_when_live
+from test_cli import fake_live_capture, record_lifecycle_phases, signal_when_live
 
 
 @pytest.fixture(autouse=True)
@@ -143,13 +143,22 @@ def test_voice_defaults_do_not_change_meeting_track_defaults():
     assert t.t0.tzinfo is None  # CLI owns the source's wall anchor.
 
 
-def test_voice_cli_owns_kind_mic_only_tuned_capture_and_aware_spoken_start(tmp_path, monkeypatch):
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("echo", [False, True])
+def test_voice_desktop_starts_two_voice_tracks_aec_dedupe_and_route_cuts(tmp_path, monkeypatch, enabled, echo):
     _, Source = fake_live_capture(monkeypatch, tmp_path)
-    from hark import live_voice, aec
+    from hark import live_voice, aec, dedupe, voice
     from hark.transcript import Utterance
 
-    made = []
-    presets = []
+    made, presets, cancellers, cuts = [], [], [], []
+    ready = threading.Event()
+    refiner = object()
+    monkeypatch.setattr(live_voice, "load_refiner", lambda **kwargs: refiner)
+
+    class System(Source):
+        def __init__(self):
+            super().__init__()
+            self.name = "system"
 
     class FakeTrack:
         def __init__(self, name, *args, **kwargs):
@@ -158,38 +167,137 @@ def test_voice_cli_owns_kind_mic_only_tuned_capture_and_aware_spoken_start(tmp_p
             self.pending = True
             made.append((self, kwargs))
         def feed(self, *args, **kwargs): pass
+        def cut(self, at):
+            cuts.append((self.name, at))
+            if len(cuts) == 2:
+                ready.set()
+
+    class Routes:
+        def __init__(self, path): self.sent = False
+        def read(self):
+            if self.sent: return []
+            self.sent = True
+            return [123.0]
+
+    class Aec:
+        def __init__(self, **kwargs): cancellers.append(kwargs)
+        def feed(self, mic, system, final=False): return mic
+
+    calls = []
+    real_deduper = dedupe.EchoDeduper
+    class Deduper(real_deduper):
+        def feed(self, utterances, now, final=False):
+            calls.append([u.track for u in utterances])
+            return super().feed(utterances, now, final=final)
 
     def flush(tracks, force=False):
         result = []
         for t in tracks:
             if t.pending:
                 t.pending = False
-                result.append(Utterance(t.name, "S1", 0, 1, t.t0, "voice test"))
+                text = "matching echo sentence" if echo else f"{t.name} distinct words"
+                result.append(Utterance(t.name, "S1", 0, 1, t.t0, text))
         return result
 
     monkeypatch.setattr(live_voice, "VoiceTrack", FakeTrack)
+    monkeypatch.setattr(live_voice, "RouteCuts", Routes)
     monkeypatch.setattr(cli, "load_models", lambda p: (presets.append(p), None))
     monkeypatch.setattr(cli, "flush_tracks", flush)
-    monkeypatch.setattr(cli, "_system_capture_available", lambda: pytest.fail("voice probes system audio"))
-    monkeypatch.setattr(cli, "SystemSource", lambda: pytest.fail("voice captures system audio"))
-    monkeypatch.setattr(aec, "EchoCanceller", lambda **kw: pytest.fail("voice starts AEC"))
+    monkeypatch.setattr(cli, "_system_capture_available", lambda: True)
+    monkeypatch.setattr(cli, "SystemSource", System)
+    monkeypatch.setattr(aec, "EchoCanceller", Aec)
+    monkeypatch.setattr(dedupe, "EchoDeduper", Deduper)
+    matched = []
+    class Matcher:
+        def __init__(self, voices, sink, name_tracks):
+            assert name_tracks == {"me": {"mic"}}
+        def finished(self, track, utterance):
+            matched.append(utterance.track)
+    monkeypatch.setattr(voice, "VoiceMatcher", Matcher)
+    (tmp_path / "voices").mkdir()
+    np.save(tmp_path / "voices" / "me.npy", np.ones(2))
+    phases = record_lifecycle_phases(monkeypatch, cli, tmp_path)
     ManualPause(tmp_path).set(True)
-    signaller, _ = signal_when_live(tmp_path)
-    cli.main(["--voice", "--pause-for", "none", "-o", str(tmp_path / "voice")])
+    signaller, _ = signal_when_live(tmp_path, ready=ready)
+    cli.main(["--voice", "--pause-for", "none", "-o", str(tmp_path / "voice")]
+             + (["--system-audio"] if enabled else []))
     signaller.join(2)
     state = json.loads((tmp_path / "meeting.json").read_text())
     assert state["kind"] == "voice" and state["phase"] == "ended"
-    assert state["system_audio"] is False
-    assert [t.name for t, _ in made] == ["mic"]
-    assert made[0][1]["gap"] == 5
-    assert presets == ["ultra_low"]
+    assert all(p["system_audio"] is enabled for p in phases)
+    assert ManualPause(tmp_path, "system").read() is not enabled
+    assert [t.name for t, _ in made] == ["mic", "system"]
+    assert all(kw["gap"] == 5 and kw["refiner"] is refiner for _, kw in made)
+    assert presets == ["ultra_low"] and len(cancellers) == 1
+    assert calls and ["mic", "system"] in calls
+    assert cuts == [("mic", 123.0), ("system", 123.0)]
     assert ManualPause(tmp_path).read()
-    assert made[0][0].t0.tzinfo is not None
     records = [json.loads(line) for line in (tmp_path / "voice.jsonl").read_text().splitlines()]
-    spoken = next(r for r in records if "speaker" in r)
-    assert datetime.fromisoformat(spoken["wall"]).tzinfo is not None
-    assert spoken["wall"] == made[0][0].t0.isoformat(timespec="microseconds")
+    spoken = [r for r in records if "speaker" in r]
+    assert {r["track"] for r in spoken} == ({"system"} if echo else {"mic", "system"})
+    assert {r["speaker"] for r in spoken} == ({"S1"} if echo else {"S1", "S2"})
+    assert set(matched) == {r["track"] for r in spoken}
+    for r in spoken:
+        t = next(t for t, _ in made if t.name == r["track"])
+        assert datetime.fromisoformat(r["wall"]).tzinfo is not None
+        assert r["wall"] == t.t0.isoformat(timespec="microseconds")
     assert (tmp_path / "voice.txt").read_text().splitlines()[-1].startswith("# ended ")
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_voice_without_system_capture_logs_fallback(tmp_path, monkeypatch, enabled):
+    _, Source = fake_live_capture(monkeypatch, tmp_path)
+    from hark import live_voice, aec
+
+    class FakeTrack:
+        def __init__(self, name, *args, **kwargs):
+            self.name, self.processed, self.audio = name, 0, None
+        def feed(self, *args, **kwargs): pass
+
+    monkeypatch.setattr(live_voice, "VoiceTrack", FakeTrack)
+    monkeypatch.setattr(cli, "_system_capture_available", lambda: False)
+    monkeypatch.setattr(cli, "SystemSource", lambda: pytest.fail("unexpected system source"))
+    monkeypatch.setattr(aec, "EchoCanceller", lambda **kw: pytest.fail("unexpected AEC"))
+    signaller, _ = signal_when_live(tmp_path)
+    cli.main(["--voice", "--pause-for", "none", "-o", str(tmp_path / "voice")]
+             + (["--system-audio"] if enabled else []))
+    signaller.join(2)
+    assert json.loads((tmp_path / "meeting.json").read_text())["system_audio"] is False
+    assert "system audio unavailable; using mic only" in (tmp_path / "voice.log").read_text()
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_voice_phone_uses_phone_voice_track_without_desktop_sources(tmp_path, monkeypatch, enabled):
+    _, Source = fake_live_capture(monkeypatch, tmp_path)
+    from hark import live_voice, aec
+
+    made = []
+    class Phone(Source):
+        def __init__(self, path):
+            super().__init__()
+            self.name = "phone"
+            made.append(path)
+
+    class FakeTrack:
+        def __init__(self, name, *args, **kwargs):
+            self.name, self.processed, self.audio = name, 0, None
+            made.append(name)
+        def feed(self, *args, **kwargs): pass
+
+    monkeypatch.setattr(live_voice, "VoiceTrack", FakeTrack)
+    monkeypatch.setattr(cli, "_device_capture_available", lambda: False)
+    monkeypatch.setattr(cli, "_system_capture_available", lambda: pytest.fail("unexpected system probe"))
+    monkeypatch.setattr(cli, "MicSource", lambda *a: pytest.fail("unexpected mic source"))
+    monkeypatch.setattr(cli, "PhoneSource", Phone)
+    monkeypatch.setattr(aec, "EchoCanceller", lambda **kw: pytest.fail("unexpected AEC"))
+    signaller, _ = signal_when_live(tmp_path)
+    cli.main(["--voice", "--phone", "--pause-for", "none", "-o", str(tmp_path / "voice")]
+             + (["--system-audio"] if enabled else []))
+    signaller.join(2)
+    state = json.loads((tmp_path / "meeting.json").read_text())
+    assert state["kind"] == "voice" and state["phone"] == str(tmp_path / "phone.sock")
+    assert state["system_audio"] is False and made == [tmp_path / "phone.sock", "phone"]
+    assert "voice: phone" in (tmp_path / "voice.txt").read_text()
 
 
 @pytest.mark.parametrize("external", [False, True])
@@ -322,9 +430,11 @@ def test_short_voice_lines_keep_distinct_slots_and_accumulate_enrolled_name_evid
     sink.close("ended")
 
 
-def test_voice_mode_is_exclusive_and_requires_local_ear(monkeypatch):
+def test_voice_mode_rejects_other_modes_and_requires_local_ear(monkeypatch):
     monkeypatch.setattr(cli, "_default_ear", lambda: "local")
-    for options in [["--voice", "--phone"], ["--voice", "--file", "x.wav"],
+    for options in [["--voice", "--file", "x.wav"], ["--voice", "--mic-only"],
+                    ["--voice", "--call"], ["--voice", "--room"],
+                    ["--phone", "--file", "x.wav"], ["--system-audio"],
                     ["--voice", "--ear", "gradium"]]:
         with pytest.raises(SystemExit) as error:
             cli.main(options)

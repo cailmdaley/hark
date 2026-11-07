@@ -22,9 +22,10 @@ A few seconds after each person finishes speaking, their words are appended to t
 An agent running alongside you (Claude Code, Codex, or anything that can read a file) follows that file as it grows.
 By the time the call ends, the notes are written, the questions raised have answers, and the agreed work is already under way.
 
-`hark --voice` keeps the mic running as a dictation channel, with local speaker timing and a configured external ear for final words.
+`hark --voice` keeps the mic running with local speaker timing and a configured external ear for final words.
+On desktop, it captures system audio as an echo-cancellation reference when available, but doesn't transcribe it unless you pass `--system-audio` or run `hark resume --system`.
 It writes the same files, finishing runs after five seconds of quiet or about 200 raw words, with an idle gate that stops model work during quiet periods.
-There’s no system-audio capture or echo-cancellation buffer; audio played through speakers can still reach the microphone.
+Use `--voice --phone` to capture a phone instead, without a system reference.
 [Voice capture](docs/usage.md#continuous-voice) covers timing, mute controls and limits.
 
 ## Why a file
@@ -93,7 +94,9 @@ Without the second permission, the call side comes through as silence.
 
 ```bash
 hark                          # desktop meeting, including in person: mic + system when available
-hark --voice                  # continuous dictation, configured external ear, mic only
+hark --voice                  # continuous voice, system audio as echo reference only
+hark --voice --system-audio   # also transcribe system audio
+hark --voice --phone          # continuous voice from the phone socket
 hark --phone                  # mobile meeting, phone microphone
 hark --file talk.m4a          # an existing recording
 hark name S2 Ada              # name a speaker in the live session

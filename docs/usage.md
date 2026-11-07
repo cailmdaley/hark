@@ -4,8 +4,10 @@
 
 ```bash
 hark                  # desktop meeting, including in person: mic + system audio when available
-hark --voice          # continuous local dictation, mic only
-hark --mic-only      # transcribe the mic alone; keep system audio as the echo-canceller reference
+hark --voice          # continuous voice, system audio as echo reference only
+hark --voice --system-audio  # also transcribe system audio
+hark --voice --phone  # continuous voice from the phone socket
+hark --mic-only       # transcribe the mic alone; keep system audio as the echo-canceller reference
 hark --phone          # mobile meeting: phone PCM arrives on a socket, diarized
 hark --file x.m4a     # a recording through the same streaming path (about 0.15× real time)
 hark --file x.wav --realtime   # replay at real-time pace, e.g. to test an agent against it
@@ -29,29 +31,35 @@ In an in-person meeting with nothing playing, the system track can stay silent f
 `--call` is a hidden compatibility alias for default live capture, accepted for launchers; it doesn't change attribution or require headphones.
 
 System capture is available when macOS device capture is supported and the audiotee path is an executable file.
-If not, default capture logs a warning and uses the mic alone; build the tap with `scripts/build-audiotee.sh` or set `HARK_AUDIOTEE` to an executable.
+If not, desktop meeting and voice capture log a warning and use the mic alone, without AEC; build the tap with `scripts/build-audiotee.sh` or set `HARK_AUDIOTEE` to an executable.
 Permissions aren't probed by this check: a tap without System Audio Recording permission can still deliver silence.
 Check the session log if playback is missing; digital silence doesn't produce a lost marker.
 The one-time 20 s silence message notes that silence is expected when nothing is playing and suggests checking permissions only if playback is missing.
 This diagnostic is conditional because silence alone doesn't establish a permission failure.
 
 AEC is installed with hark through the LiveKit Python package; no mic helper needs building.
-Phone capture, files, enrollment and mic-only capture have no AEC or cross-track deduplication.
+Phone capture, files, enrollment and the mic-only fallback have no AEC or cross-track deduplication.
+`--mic-only` retains both when system capture is available.
 The mic always uses raw PortAudio capture; processing happens inside hark before recognition and optional WAV saving.
 
 Phone mode suits a room where the laptop's mic is in the wrong place. hark listens on `~/.hark/phone.sock` for raw 16 kHz mono s16le PCM; a relay writes it there, such as the Shuttle board's phone page, which streams the phone's mic over the tailnet. Anything that produces that PCM works too, for example `ffmpeg -i talk.m4a -f s16le -ac 1 -ar 16000 - | nc -U ~/.hark/phone.sock`. One sender at a time: a new connection replaces the old one. While nothing is connected hark records silence, and after 90 s the transcript says `# phone lost at …`. The track is saved as `<stem>.phone.wav`.
 
-Default standalone phone capture does not publish `meeting.json`. Daemon-launched (`--launch`) meetings advertise the socket in its `phone` field; explicit output beneath the HARK home's `meetings/` directory also owns that record.
+Standalone phone meetings do not publish `meeting.json` unless launched with `--launch` or an explicit output beneath the HARK home's `meetings/` directory.
+Voice capture always publishes it, including with `--phone`; the `phone` field advertises the socket.
 
 Ctrl-C ends a session cleanly: hark flushes open turns, finishes writing the audio, and writes `# ended`. SIGTERM and SIGHUP do the same, so closing the terminal doesn't lose the end. A second signal quits at once without flushing.
 
 ## Continuous voice
 
 ```bash
-hark --voice                    # Apple Silicon, configured voice ear, microphone only
+hark --voice                    # Apple Silicon, configured voice ear, system reference when available
+hark --voice --system-audio     # transcribe the system track too
+hark --voice --phone            # phone source, without system audio
 hark --voice -o ~/notes/voice    # voice.txt, voice.jsonl and voice.log
-hark pause                      # mute the mic
+hark pause                      # mute the mic or phone
 hark resume                     # unmute it
+hark pause --system             # stop transcribing system audio
+hark resume --system            # transcribe system audio
 ```
 
 Voice uses local Nemotron models for speaker labels, timing and raw preview, with `ultra_low` diarizer lookahead (0.32 s).
@@ -70,7 +78,7 @@ Configure the external ear in `~/.hark/voice_ear.py`, or point `HARK_VOICE_EAR` 
 It exports `create(language=None)`, which runs once at startup and returns a callable accepting mono float32 audio at 16 kHz and returning finished text.
 Credentials, private service protocols and any network policy belong to that module, outside the repository.
 There is no built-in private service adapter or local batch recognizer.
-**The adapter may upload microphone audio.** Choose and authorize it before enabling voice; meeting capture's local default does not make an external voice ear local.
+**The adapter may upload microphone, phone and unpaused system audio.** Choose and authorize it before enabling voice; meeting capture's local default does not make an external voice ear local.
 A failed or empty call appends the raw Nemotron text once and logs only the exception class, never the adapter's error message or URL.
 
 Final words inherit speaker/timing anchors by alignment to Nemotron's raw words, so corrections do not duplicate overlapping slot windows.
@@ -84,16 +92,18 @@ An adapter that can't load leaves the recording on local words and says so in th
 
 An ear call blocks the capture loop. A failed call that took 10 s or more rests the ear for 60 s on every track, with raw recognition in its place, so a dead link can't back up the meeting; quick failures, including empty replies, don't.
 
-Neither a system-audio tap nor AEC runs in this mode.
-Videos on headphones can't address the transcript, but speech or playback audible in the room can.
+Desktop voice captures system audio for AEC whenever the tap is available, even when system transcription is paused.
+The system track uses the same speech runs, route cuts and external ear as the mic; both tracks share numbered speaker slots and overlapping echo copies are deduplicated.
+Voice starts with system transcription paused unless `--system-audio` is passed; `hark pause --system` and `hark resume --system` change it live without stopping the AEC reference.
+The tap can deliver silence without permission, and AEC cannot guarantee that all playback is suppressed; see the [measurements and limits](aec.md).
+`--voice --phone` uses the phone socket instead of desktop devices, without AEC or system audio, even if `--system-audio` is passed.
 Voice capture doesn't filter for an enrolled identity.
-Speaker separation, naming and optional `--keep-audio` use the ordinary mic path.
 On one 120 s, four-speaker AMI room-microphone replay, `low` and `ultra_low` both recovered 62.9% of reference words in the correct speaker slot; diarization error was 25.98% and 25.99% respectively.
 Duplicated words increased from 1.64% to 4.26% with the faster lookahead, so lower latency has an attribution trade-off even when aggregate recall is unchanged.
 This slice isn't a corpus-wide accuracy estimate; `--latency low` retains the larger lookahead when speaker separation matters more than response time.
 
 A -50 dBFS RMS energy gate watches 100 ms frames, retains 300 ms of pre-roll and runs the models for three seconds after the last above-threshold frame to drain delayed words.
-Both models stop running once the mic is idle; model weights and bounded streaming caches stay resident.
+Both models stop running on a track once it is idle; model weights and bounded streaming caches stay resident.
 This is an energy check, not a speech classifier: steady noise above the threshold keeps inference active, and very quiet speech below it can be missed.
 Skipped silence doesn't compress the transcript or saved WAV clock, and speaker state survives it.
 `scripts/voice-bench.py` measures replay timing, memory and compute without opening a microphone or calling the external service; voice mode uses a constant text stub.
@@ -102,6 +112,7 @@ Its `--backend external` explicitly invokes the configured adapter and may uploa
 
 Voice writes `~/.hark/meeting.json` even without `--launch`, with `"kind": "voice"`; owned meeting captures write `"kind": "meeting"`.
 The lifecycle phases, `--launch`, SIGINT/TERM shutdown and final `# ended` marker are shared.
+Its `system_audio` field reports whether the available system track is being transcribed, and `phone` holds the socket path or `null`.
 Voice utterance JSONL `wall` is the spoken-start timestamp with microseconds and a UTC offset, so a consumer can route it by when speech began, including across midnight or a target switch within one second.
 Voice keeps a manual mic pause across restarts; a new meeting clears it.
 
@@ -186,7 +197,8 @@ The [format contract](format.md) defines the text and JSONL records.
 | Option | Default | |
 |---|---|---|
 | `--phone` | | capture only PCM from the phone socket, diarized |
-| `--voice` | | continuous mic dictation with a configured external final-text ear and a local idle gate |
+| `--voice` | | continuous capture with a configured external final-text ear and a local idle gate |
+| `--system-audio` | off | with `--voice`, start transcribing system audio when available |
 | `--external-ear` | | final words for every track of a meeting from the configured external ear |
 | `--ear local\|gradium` | local if MLX imports, otherwise Gradium | recognition and speaker attribution backend |
 | `--no-gradium-metering` | | skip credit-balance requests |
@@ -195,7 +207,7 @@ The [format contract](format.md) defines the text and JSONL records.
 | `--mic DEVICE` | system default | input device, by name or index; software AEC stays on with system capture |
 | `--lang CODE` | auto | pin the ASR language, e.g. `en-US`, `fr-FR` |
 | `--latency` | meeting `low`, voice `ultra_low` | local-ear diarizer lookahead: `low` 1.04 s, `very_low` 0.64 s, `ultra_low` 0.32 s. Shorter means faster lines and worse speaker separation |
-| `--gap SECONDS` | meeting `3`, voice `2` | silence that ends a meeting turn or a voice speech run, plus model drain time |
+| `--gap SECONDS` | meeting `3`, voice `5` | silence that ends a meeting turn or a voice speech run, plus model drain time |
 | `--speaker-mask` | `exclusive` | local-ear speakers that hear a frame two speakers share; see [how it works](how-it-works.md#speaker-masks) |
 | `--keep-audio` | off | save each track as `<stem>.<track>.wav` |
 | `--pause-for PATTERNS` | `aquavoice,aqua-voice` | pause the mic while a matching CoreAudio process captures input; give comma-separated bundle-ID substrings or `none` |
@@ -224,21 +236,25 @@ Phone and file voice matching use their enrolled banks as usual.
 With voices enrolled, hark names a diarized slot on its own once enough of that slot's speech matches one voice clearly; see [how it works](how-it-works.md#voice-matching).
 A slot someone named by hand is never renamed automatically.
 
-`hark pause` mutes the mic of the running session until `hark resume`; it creates `~/.hark/paused` (or `$HARK_DIR/paused`), which the session polls, and `hark pause --status` reports it.
+`hark pause` mutes the mic or phone of the running session until `hark resume`; it creates `~/.hark/paused` (or `$HARK_DIR/paused`), which the session polls, and `hark pause --status` reports it.
 A new meeting starts unpaused, clearing a pause an earlier session left behind; `--voice` preserves the manual mic pause across restarts.
 Manual pauses add `# paused` and `# resumed at … after …` lines to the `.txt` transcript.
 `--pause-for none` disables app detection but not manual pauses.
 
-`--mic-only` starts a desktop session with system audio muted from the beginning. The system tap still runs as the echo-canceller reference. Use `hark resume --system` to include call audio later; `hark pause --system` mutes it again. System pause state lives at `~/.hark/system-paused`, and a fresh session clears a pause left by an earlier session.
+`--mic-only` and `--voice` without `--system-audio` start a desktop session with system audio muted from transcription.
+The system tap still runs as the echo-canceller reference.
+Use `hark resume --system` to include system audio; `hark pause --system` mutes it again.
+System pause state lives at `~/.hark/system-paused`; each fresh desktop session sets it according to its startup flags.
 
 Automatic pause detection reads CoreAudio process objects and needs no extra permission.
 The default match is `aquavoice,aqua-voice` (Aqua's audio bridge and its app); `--pause-for aqua,whisper` watches any process whose bundle ID contains either string.
 `hark processes` prints each process object's PID, bundle ID and input-capture flag, idle apps included, so you can find what to match.
 Dictation pauses appear in the session log and JSONL, not as `.txt` lines.
 
-Pauses apply to the mic track only (not to `--phone`); system audio keeps flowing, so the call still reaches hark.
+Manual mic pause also applies to the phone track; automatic app detection applies only to desktop mic capture.
+Mic and phone pauses don't pause system transcription.
 A 300 ms lookback mutes speech that began before the watcher noticed, and a 300 ms tail keeps out the last words after a dictation app stops.
-The ASR and the saved mic WAV receive the same samples, with zeros for every pause.
+The ASR and saved WAV receive the same samples, with zeros for every pause.
 
 ## Saved audio
 
@@ -248,7 +264,7 @@ Each file holds the full source track from its first sample.
 The local models receive those samples directly; Gradium receives gated spans of them, while its utterance offsets still index the complete WAV. JSONL `start`/`end` times are seconds into these files. Live input is padded to hold the wall clock, so the files stay aligned with real time even when a device stalls.
 
 The saved mic is the echo-cancelled, pause-muted, 16-bit PCM that the models hear, so `hark --file <stem>.mic.wav` replays it with identical samples and no second AEC pass.
-Paused mic spans contain digital silence in the WAV; system audio remains untouched.
+Paused mic and system spans contain digital silence in their respective WAVs; the system reference still reaches AEC before the transcription gate.
 This is how diarization changes get tested against real meetings.
 
 Kept audio is temporary. Each live start deletes `.wav` files under `~/.hark/sessions/` and `~/.hark/meetings/` that are older than 14 days (`AUDIO_RETENTION_DAYS` in `hark/cli.py`). Transcripts are never deleted. If writing audio fails (a full disk, say), the recording stops and the transcript carries on.
@@ -285,8 +301,9 @@ Connection and keepalive timeouts, plus the mirror's progress watchdog, bound br
 Mirroring is best-effort: if the connection drops, local capture continues, and `hark mirror --resume` finishes the copy afterwards. The remote needs GNU `dd` (Linux; macOS's `dd` lacks `oflag=seek_bytes`), and hark refuses to mirror onto a remote file that already has content, except with `--resume`.
 
 Launcher-owned live recordings publish `$HARK_DIR/meeting.json` (`~/.hark/meeting.json` when `HARK_DIR` is unset).
-Ownership requires `--launch` or explicit `-o` physically beneath that home's `meetings/` directory.
-Standalone capture without such a claim, arbitrary output paths and file transcription leave an existing record untouched.
+Voice capture always owns the record.
+For meetings, ownership requires `--launch` or explicit `-o` physically beneath that home's `meetings/` directory.
+Standalone meetings without such a claim and file transcription leave an existing record untouched.
 A launcher such as [Shuttle](https://github.com/cailmdaley/felt) can watch its record rather than scraping output.
 It holds the process id, phase (`loading`, `live`, `stopping`, `ended` or `failed`), title, start time, transcript path, mirror target, the `--launch` id, and any error.
 A Gradium recording also includes `ear: {"name": "gradium", "seconds": 48.32, "credits_left": 44854}`.
