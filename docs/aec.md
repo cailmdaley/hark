@@ -16,6 +16,8 @@ The wrapper needs no LiveKit account, connection or server.
 Each track's `drain()` pads its own sample timeline, which can lag sample arrival by up to a second.
 Start anchors alone therefore don't align echo.
 The pure `hark/aec.py` stage buffers at least two seconds of mic audio, waits for the reference window, and estimates coarse mic/reference lag once per second by waveform correlation over ±1.5 seconds.
+A mic that leads the reference by more than 0.3 s is hearing the room before the call returns it (another laptop in the room on the same call), so that lag is logged and ignored rather than cancelled; cancelling it would erase the near-end speaker.
+In two live calls on 10 Nov 2026 the estimates split into a speaker-echo cluster near 0 s and a call-return cluster at −0.5 to −0.9 s, with almost nothing between −0.4 and −0.2 s.
 It retains the last confident estimate during silence or unrelated near-end speech.
 The reference is fed 50 ms ahead of the estimated echo, then the mic is processed in 10 ms frames; AEC3 handles finer delay and drift.
 Shutdown preserves the exact mic length, including a short last frame.

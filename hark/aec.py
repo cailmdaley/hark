@@ -3,6 +3,11 @@
 A bounded lookahead admits a late system reference before the corresponding mic
 frame. Waveform correlation removes coarse capture/padding offsets; WebRTC AEC3
 tracks the remaining acoustic delay and clock drift in 10 ms frames.
+
+An echo reaches the mic after the system track plays it. A mic that leads the
+reference by more than capture timing slack is hearing the room first and the
+call returning it later, as when another laptop in the room is on the same call;
+cancelling that copy would erase the near-end speaker, so alignment ignores it.
 """
 
 import numpy as np
@@ -14,6 +19,7 @@ FRAME = SAMPLE_RATE // 100
 SEARCH = int(1.5 * SAMPLE_RATE)
 LOOKAHEAD = 2 * SAMPLE_RATE
 HISTORY = 4 * SAMPLE_RATE
+MIN_LAG = -int(0.3 * SAMPLE_RATE)
 
 
 def aligned_slice(audio, base, start, size):
@@ -51,7 +57,8 @@ class EchoCanceller:
 
     system_offset is the system track's start relative to the mic, in samples.
     feed() preserves the mic's length and indices, including a short final frame.
-    A two-second mic hold covers reference arrivals and ±1.5 s timeline offsets.
+    A two-second mic hold covers reference arrivals and timeline offsets; the
+    correlation search spans ±1.5 s, and lags below MIN_LAG are call returns.
     Buffers retain only four seconds of history plus the pending input.
     """
 
@@ -67,6 +74,7 @@ class EchoCanceller:
         self.mic_base, self.reference_base = 0, system_offset
         self.position = 0
         self.delay = 0
+        self.returned = None
         self.next_estimate = 0
 
     def feed(self, mic=(), system=(), *, final=False):
@@ -113,8 +121,16 @@ class EchoCanceller:
         if estimate is None:
             return
         delay, confidence = estimate
+        if confidence < 0.15:
+            return
+        if delay < MIN_LAG:
+            if self.returned is None or abs(delay - self.returned) >= 320:
+                self.returned = delay
+                self.report(f"aec: ignoring call return of near-end sound at "
+                            f"{delay / SAMPLE_RATE:+.3f} s (correlation {confidence:.3f})")
+            return
         # Don't chase near-end speech or jitter; AEC3 handles the fine adjustment.
-        if confidence >= 0.15 and abs(delay - self.delay) >= 320:
+        if abs(delay - self.delay) >= 320:
             self.delay = delay
             self.report(f"aec: mic/reference lag {delay / SAMPLE_RATE:+.3f} s "
                         f"(correlation {confidence:.3f})")

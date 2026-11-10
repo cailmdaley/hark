@@ -21,7 +21,7 @@ Both sources are padded to hold the wall clock when a device falls behind.
 With both tracks enabled, `hark/aec.py` processes the pause-muted mic before WAV saving, diarization and ASR.
 [LiveKit's AudioProcessingModule](https://docs.livekit.io/reference/python/livekit/rtc/apm.html) supplies WebRTC AEC3 on 10 ms, 16 kHz mono frames, with gain control and noise suppression disabled.
 The system reference is never replayed or modified downstream.
-A two-second mic buffer admits late reference frames; waveform correlation over a bounded ±1.5 s search removes coarse timeline offsets once per second.
+A two-second mic buffer admits late reference frames; waveform correlation over a bounded ±1.5 s search removes coarse timeline offsets once per second; a mic leading the reference by more than 0.3 s is the call returning the room's own speech, and is not cancelled.
 The system start anchor is expressed on the mic's sample clock; the reference is then fed 50 ms ahead of its estimated echo, before each mic frame.
 AEC3 handles the remaining fine delay and clock drift.
 Four seconds of history cover correlation; processing preserves mic sample count and index, including partial final frames.

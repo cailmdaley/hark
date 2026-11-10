@@ -86,7 +86,7 @@ def test_muted_samples_stay_silent_with_filter_tail():
     assert not clean[173:].any()
 
 
-@pytest.mark.parametrize("lag", [-16000, 4000, 16000])
+@pytest.mark.parametrize("lag", [-3200, 4000, 16000])
 def test_real_webrtc_cancels_echo_and_preserves_double_talk(lag):
     # Band-limited echo plus a pulsed near-end tone exercises the native library.
     # Intelligible double-talk is measured separately with speech clips.
@@ -119,3 +119,24 @@ def test_real_webrtc_cancels_echo_and_preserves_double_talk(lag):
     assert similarity > .5
     assert np.linalg.norm(clean[mixed]) / np.linalg.norm(near[mixed]) > .4
     assert abs(aec.delay - lag) < 320
+
+
+def test_call_return_of_near_end_speech_is_not_cancelled():
+    # The room reaches the mic first; another laptop on the call plays it back 0.6 s later.
+    from scipy.signal import butter, sosfilt
+
+    rng = np.random.default_rng(17)
+    n = 10 * 16000
+    near = sosfilt(butter(3, [150, 3000], fs=16000, btype="bandpass", output="sos"),
+                   rng.normal(0, .08, n)).astype(np.float32)
+    returned = np.zeros(n, np.float32)
+    returned[9600:] = .6 * near[:-9600]
+    reports = []
+    aec = EchoCanceller(report=reports.append)
+    output = [aec.feed(near[i:i + 1600], returned[i:i + 1600]) for i in range(0, n, 1600)]
+    output.append(aec.feed(final=True))
+    clean = np.concatenate(output)
+    steady = slice(4 * 16000, 9 * 16000)
+    assert np.linalg.norm(clean[steady]) / np.linalg.norm(near[steady]) > .5
+    assert aec.delay == 0
+    assert any("call return" in r for r in reports)
