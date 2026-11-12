@@ -49,6 +49,7 @@ from .transcript import Sink, Track, flush_tracks, load_models, numbered
 
 HOME = Path(os.environ.get("HARK_DIR", Path.home() / ".hark")).expanduser().resolve()
 AUDIO_RETENTION_DAYS = 14
+OWN_TRACKS = {"mic", "phone"}  # the user speaks here; system audio is everyone else
 
 
 class MeetingLifecycle:
@@ -195,6 +196,11 @@ class SpeakerSlots:
         if key not in self.slots:
             self.slots[key] = f"S{len(self.slots) + 1}"
         return self.slots[key]
+
+
+def own_partial(tracks):
+    """The user's pending words: the mic or phone tracks, never system audio."""
+    return "\n".join(text for t in tracks if t.name in OWN_TRACKS and (text := getattr(t, "partial", "")))
 
 
 def _system_capture_available():
@@ -650,7 +656,7 @@ def main(argv=None):
                     said[u.track] = said.get(u.track, 0) + 1
                 if partial:
                     muted = pause_monitor and (pause_monitor.manual.read() or pause_monitor.automatic)
-                    partial.write("" if muted else "\n".join(getattr(t, "partial", "") for t in all_tracks))
+                    partial.write("" if muted else own_partial(all_tracks))
                 if args.ear == "gradium":
                     for track in all_tracks:
                         track.check()

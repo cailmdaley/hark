@@ -192,7 +192,7 @@ Failed or empty calls write the raw text once; errors reveal only their exceptio
 No private service protocol or credential is part of hark.
 
 The final transcript stays append-only.
-`<stem>.partial` holds raw pending words for display only, with one line of words per slot, atomic mode-0600 replacement, and no rewrite when unchanged.
+`<stem>.partial` holds the user's raw pending words (mic or phone tracks, never system audio) for display only, with one line of words per slot, atomic mode-0600 replacement, and no rewrite when unchanged.
 The CLI clears it while muted and on clean shutdown.
 It never enters the transcript, JSONL or delivery triggers.
 

@@ -409,3 +409,13 @@ def test_a_short_run_waits_twice_the_quiet_for_context(monkeypatch):
     assert not flush_tracks([t]) and not calls
     t.feed(pcm(1))
     assert flush_tracks([t]) and len(calls) == 1
+
+
+def test_partial_holds_only_the_users_tracks():
+    from types import SimpleNamespace
+    from hark.cli import own_partial
+
+    tracks = [SimpleNamespace(name="mic", partial="my words"),
+              SimpleNamespace(name="system", partial="the television"),
+              SimpleNamespace(name="phone", partial="")]
+    assert own_partial(tracks) == "my words"
