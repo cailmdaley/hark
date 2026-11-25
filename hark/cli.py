@@ -10,7 +10,8 @@
     hark mirror --resume [--follow] LOCAL HOST:PATH
                                             finish (or keep following) a mirror that didn't complete
     hark pause [--status] | hark resume     mute the live session's mic, and unmute it
-    hark recover [--status]                 transcribe the speech said while the mic was paused
+    hark recover [--status] [--session PATH]
+                                            transcribe the speech said while the mic was paused
     hark processes                          list CoreAudio processes and their input flags
 
 Live capture keeps no audio by default; --keep-audio saves each track beside the
@@ -25,7 +26,7 @@ hark's own log, timestamped, with a heartbeat per live source each minute.
 A live source missing samples for 90 s gets a `# … lost at …` line.
 Digital silence is valid device audio and doesn't mark a source lost.
 The mic is muted while a dictation app records (--pause-for, default aquavoice,aqua-voice).
-Speech said while the mic is paused by hand is held on disk (<stem>.held.pcm) until
+Speech said while the mic is paused by hand is held on disk (<stem>.held/) until
 `hark recover` transcribes it into the transcript or the session stops.
 """
 
@@ -661,6 +662,8 @@ def main(argv=None):
                 for at in route_cuts.read() if route_cuts else ():
                     for track in all_tracks:
                         track.cut(at)
+                    if held:
+                        held.cut(at)
                 busy = feed_sources()
                 for u in ready_utterances(flush_tracks(all_tracks)):
                     _emit(u, sink, matcher, tracks_by_name, failed_slots, slots)
@@ -790,22 +793,30 @@ def _manual_pause(argv):
 
 
 def _recover(argv):
+    from .held import registry
+
     ap = argparse.ArgumentParser(prog="hark recover", description=(
-        "Transcribe the speech the live session holds from while its mic was paused by hand. "
+        "Transcribe the speech a live session holds from while its mic was paused by hand. "
         "The words join the transcript as recovered, at the times they were said."))
-    ap.add_argument("--status", action="store_true", help="only show what the live session holds")
+    ap.add_argument("--session", type=Path, help="the session's transcript (default: the current one)")
+    ap.add_argument("--status", action="store_true", help="only show what the session holds")
     args = ap.parse_args(argv[1:])
-    try:
-        held = json.loads((HOME / "held.json").read_text())
-    except (OSError, ValueError):
-        held = None
-    if held is None:
-        print("no live session is holding muted speech")
+    transcript = (args.session.expanduser() if args.session else HOME / "current.txt").resolve()
+    for status in registry(HOME).glob("*.json"):
+        try:
+            held = json.loads(status.read_text())
+        except (OSError, ValueError):
+            continue
+        if Path(held.get("transcript", "")).resolve() == transcript:
+            break
+    else:
+        print(f"no live session holds muted speech for {transcript}")
         return 0 if args.status else 1
-    if not args.status:
-        (HOME / "recover").touch()
-    state = ("recovering" if held.get("recovering") else
-             "recovery requested" if (HOME / "recover").exists() else "held")
+    request = status.with_suffix(".recover")
+    busy = held.get("recovering") or request.exists()
+    if not (args.status or busy):
+        request.touch()
+    state = "recovering" if busy else "held" if args.status else "recovery requested"
     print(f"{held.get('seconds', 0):.0f} s of muted speech: {state}")
     return 0
 

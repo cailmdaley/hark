@@ -212,10 +212,11 @@ class PauseState:
                 self.active[reason] = since, interval, bundles
         return events
 
-    def gate(self, samples, start, hold=None):
+    def gate(self, samples, start, hold=None, index=0):
         """Preserve the PCM grid and timeline, replacing samples in mute intervals with zeros.
 
-        `hold(wall_start, samples)` receives each run of original samples a manual pause zeroed.
+        `hold(track_index, wall_start, samples)` receives each run of original samples a manual
+        pause zeroed, `samples[0]` being sample `index` of the track.
         """
         out = samples.copy()
         manual = np.zeros(out.size, bool)
@@ -229,7 +230,7 @@ class PauseState:
         if hold and manual.any():
             edges = np.flatnonzero(np.diff(np.concatenate(([0], manual.view(np.int8), [0]))))
             for first, last in zip(edges[::2], edges[1::2]):
-                hold(start + first / SAMPLE_RATE, samples[first:last])
+                hold(index + first, start + first / SAMPLE_RATE, samples[first:last])
         end = start + samples.size / SAMPLE_RATE
         self.intervals = [i for i in self.intervals if i.end is None or i.end > end]
         return out
@@ -257,7 +258,7 @@ class MicGate:
         start = arrived - (index - self.emitted) / SAMPLE_RATE  # wall time of pending[0]
         ready = math.floor((now - MIC_LOOKBACK_SEC - start) * SAMPLE_RATE + 1e-6)
         count = self.pending.size if final else min(self.pending.size, max(0, ready))
-        out = state.gate(self.pending[:count], start, self.hold)
+        out = state.gate(self.pending[:count], start, self.hold, self.emitted)
         self.pending = self.pending[count:]
         self.emitted += count
         return out

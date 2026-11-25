@@ -38,7 +38,7 @@ Each pause becomes a wall-clock mute interval: from 300 ms before it was detecte
 The mic gate holds the newest 300 ms of mic audio before passing it on, so an interval can still reach the first words captured before detection.
 Samples are timed by when the device delivered them, not by their position in the padded track, because a mic can run up to a second behind that timeline after a stall.
 Muted samples become zeros for both the ASR and the saved WAV, so the track keeps its length and timeline.
-The original samples a manual pause zeroed go to `hark/held.py`, which keeps the speech among them on disk until `hark recover` replays it through a separate `--file` process or the session stops.
+The original samples a manual pause zeroed go to `hark/held.py` with their index on the track's timeline, which keeps the speech among them on disk until `hark recover` replays it through a separate `--file` process or the session stops; a held span is contiguous on that timeline, and its wall-clock start is taken once, when it opens.
 System and phone audio are neither delayed nor muted, and the lost-source watch reads the device's own signal, so a pause never looks like a lost mic.
 
 Default live capture opens the mic and system audio when the audiotee path is an executable file on a supported macOS host.

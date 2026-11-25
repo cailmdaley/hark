@@ -4,6 +4,7 @@ Synthetic PCM, a scripted clock and a fake replay process stand in for the mic a
 
 import json
 import os
+import subprocess
 import threading
 import wave
 from datetime import datetime
@@ -12,9 +13,11 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
+from hark import held as held_module
 from hark.capture import SAMPLE_RATE, Source
-from hark.held import HeldSpeech
-from hark.pause import ManualPause, PauseMonitor, PauseState
+from hark.held import GAP_SEC, HeldSpeech, build_replay
+from hark.pause import ManualPause, MicGate, PauseMonitor, PauseState
+from hark.transcript import Sink
 
 LOUD, QUIET = 0.25, 1e-4
 
@@ -23,38 +26,80 @@ def tone(seconds, level):
     return np.full(round(seconds * SAMPLE_RATE), level, np.float32)
 
 
+def request(home):
+    return home / "held" / f"{os.getpid()}.recover"
+
+
+def status(home):
+    return json.loads((home / "held" / f"{os.getpid()}.json").read_text())
+
+
+def finished():
+    return SimpleNamespace(poll=lambda: 0, kill=lambda: None, wait=lambda: 0)
+
+
 class Replay:
-    """Stands in for `hark --file`: one utterance per loud stretch of the replayed audio."""
+    """Stands in for the replay process: one utterance per loud stretch of the replayed audio."""
 
     def __init__(self):
         self.calls = []
 
-    def __call__(self, audio, out):
-        with wave.open(str(audio), "rb") as wav:
+    def __call__(self, manifest, out):
+        with wave.open(str(build_replay(manifest)), "rb") as wav:
             samples = np.frombuffer(wav.readframes(wav.getnframes()), "<i2").astype(np.float32) / 32768
         loud = np.abs(samples) > 0.1
         edges = np.flatnonzero(np.diff(np.concatenate(([0], loud.view(np.int8), [0]))))
-        rows = [{"wall": "00:00", "track": audio.stem, "speaker": "S1", "start": first / SAMPLE_RATE,
+        rows = [{"wall": "00:00", "track": "replay", "speaker": "S1", "start": first / SAMPLE_RATE,
                  "end": last / SAMPLE_RATE, "text": f"words {i}"}
                 for i, (first, last) in enumerate(zip(edges[::2], edges[1::2]))]
         out.with_suffix(".jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows))
         self.calls.append(samples)
-        return SimpleNamespace(poll=lambda: 0, kill=lambda: None, wait=lambda: 0)
+        return finished()
+
+
+class Muted:
+    """A mic muted by hand from wall time 1000 on, through the real gate, its blocks arriving with jitter."""
+
+    def __init__(self, held, jitter=0.0, seed=0):
+        self.state = PauseState()
+        self.state.update(1000.0 + 0.3, manual=True)  # muted from 1000.0
+        self.gate = MicGate(SimpleNamespace(heard=(0, 1000.0)), hold=held.add)
+        self.delivered = 0
+        self.rng = np.random.default_rng(seed)
+        self.jitter = jitter
+
+    def say(self, samples, block=1600):
+        for i in range(0, samples.size, block):
+            chunk = samples[i:i + block]
+            self.delivered += chunk.size
+            true = 1000.0 + self.delivered / SAMPLE_RATE
+            arrived = true + self.rng.uniform(-self.jitter, self.jitter)
+            self.gate.feed(chunk, true + 0.5, self.state, heard=(self.delivered, arrived))
+
+
+def recover(held, sink, home):
+    request(home).touch()
+    held.poll(sink)  # starts the replay
+    held.poll(sink)  # reads its result
+
+
+def recovered_walls(transcript):
+    return [datetime.fromisoformat(json.loads(line)["wall"]).timestamp()
+            for line in transcript.with_suffix(".jsonl").read_text().splitlines() if "recovered" in line]
 
 
 def test_only_speech_with_its_padding_is_held_and_indexed_by_wall_time(tmp_path):
     held = HeldSpeech(tmp_path / "s.txt", tmp_path, Replay())
     audio = np.concatenate((tone(2, QUIET), tone(.5, LOUD), tone(5, QUIET), tone(.2, LOUD), tone(1, QUIET)))
     for i in range(0, audio.size, 1600):
-        held.add(1000 + i / SAMPLE_RATE, audio[i:i + 1600])
-    spans = [json.loads(line) for line in (tmp_path / "s.held.jsonl").read_text().splitlines()]
+        held.add(i, 1000 + i / SAMPLE_RATE, audio[i:i + 1600])
+    spans = [json.loads(line) for line in (tmp_path / "s.held" / "index.jsonl").read_text().splitlines()]
     assert [row["t"] for row in spans] == pytest.approx([1001.7, 1007.2])
     # 300 ms before each loud stretch, one second after it
     assert held.seconds == pytest.approx(.3 + .5 + 1 + .3 + .2 + 1)
-    assert os.path.getsize(tmp_path / "s.held.pcm") == held.samples * 2
+    assert os.path.getsize(tmp_path / "s.held" / "000000.pcm") == held.samples * 2
     assert spans[1]["at"] == round(1.8 * SAMPLE_RATE)
-    status = json.loads((tmp_path / "held.json").read_text())
-    assert status["pid"] == os.getpid() and status["recovering"] is False
+    assert status(tmp_path)["pid"] == os.getpid() and status(tmp_path)["recovering"] is False
 
 
 @pytest.mark.parametrize("chunk", [777, 1234, 4000, 16000])
@@ -62,17 +107,17 @@ def test_any_gate_chunking_keeps_every_loud_sample_and_little_else(chunk, tmp_pa
     held = HeldSpeech(tmp_path / "s.txt", tmp_path, Replay())
     audio = np.concatenate((tone(2, QUIET), tone(.5, LOUD), tone(5, QUIET), tone(.2, LOUD), tone(1, QUIET)))
     for i in range(0, audio.size, chunk):
-        held.add(1000 + i / SAMPLE_RATE, audio[i:i + chunk])
+        held.add(i, 1000 + i / SAMPLE_RATE, audio[i:i + chunk])
     starts = [span[0] for span in held.spans]
     assert 1001.6 < starts[0] <= 1001.7 and 1007.1 < starts[1] <= 1007.2
-    assert all(start + n / SAMPLE_RATE >= end for (start, _, n), end in zip(held.spans, (1003.5, 1008.4)))
+    assert all(start + n / SAMPLE_RATE >= end for (start, _, _, n, *_), end in zip(held.spans, (1003.5, 1008.4)))
     assert held.seconds < 3.3 + 2 * .2
 
 
-def test_a_gap_in_the_mute_starts_a_new_span(tmp_path):
+def test_a_gap_on_the_track_starts_a_new_span(tmp_path):
     held = HeldSpeech(tmp_path / "s.txt", tmp_path, Replay())
-    held.add(10, tone(.4, LOUD))
-    held.add(20, tone(.4, LOUD))  # unmuted in between: no tail or preroll carries over
+    held.add(0, 10, tone(.4, LOUD))
+    held.add(160000, 20, tone(.4, LOUD))  # unmuted in between: no tail or preroll carries over
     assert [span[0] for span in held.spans] == [10, 20]
     assert held.seconds == pytest.approx(.8)
 
@@ -84,29 +129,44 @@ def test_gate_holds_exactly_what_a_manual_pause_zeroes():
     state.update(11.0, manual=False, automatic=())
     samples = np.arange(1, 2 * SAMPLE_RATE + 1, dtype=np.float32)
     kept = []
-    out = state.gate(samples, 9.5, hold=lambda t, part: kept.append((t, part)))
+    out = state.gate(samples, 9.5, hold=lambda i, t, part: kept.append((i, t, part)), index=500)
     manual = (samples > (9.7 - 9.5) * SAMPLE_RATE) & (samples <= SAMPLE_RATE)  # [9.7, 10.5)
-    assert [t for t, _ in kept] == pytest.approx([9.7])
-    assert np.array_equal(np.concatenate([part for _, part in kept]), samples[manual])
+    assert [(i, t) for i, t, _ in kept] == [(500 + round(.2 * SAMPLE_RATE), pytest.approx(9.7))]
+    assert np.array_equal(np.concatenate([part for *_, part in kept]), samples[manual])
     assert not out[manual].any()
 
 
 def test_a_dead_sessions_hold_is_deleted_at_the_next_start(tmp_path):
-    left = tmp_path / "old.held.pcm"
-    for path in (left, tmp_path / "old.held.jsonl", tmp_path / "old.recovering.wav"):
-        path.write_bytes(b"x")
-    (tmp_path / "held.json").write_text(json.dumps({"pid": 2 ** 22 + 1, "audio": str(left)}))
+    (tmp_path / "held").mkdir()
+    for pid, started in ((2 ** 22 + 1, "Mon Jan  1 00:00:00 2024"),  # no such process
+                         (os.getppid(), "Mon Jan  1 00:00:00 2024")):  # a running process, but a reused pid
+        audio = tmp_path / f"old-{pid}.held"
+        audio.mkdir()
+        (audio / "000000.pcm").write_bytes(b"x")
+        (tmp_path / "held" / f"{pid}.json").write_text(json.dumps({"pid": pid, "started": started, "audio": str(audio)}))
+        (tmp_path / "held" / f"{pid}.recover").touch()
     HeldSpeech(tmp_path / "new.txt", tmp_path, Replay())
-    assert sorted(p.name for p in tmp_path.iterdir()) == ["held.json", "new.held.pcm"]
-    assert json.loads((tmp_path / "held.json").read_text())["audio"] == str(tmp_path / "new.held.pcm")
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["held", "new.held"]
+    assert sorted(p.name for p in (tmp_path / "held").iterdir()) == [f"{os.getpid()}.json"]
 
 
-def test_a_live_sessions_hold_is_left_alone(tmp_path):
-    other = tmp_path / "other.held.pcm"
-    other.write_bytes(b"x")
-    (tmp_path / "held.json").write_text(json.dumps({"pid": os.getppid(), "audio": str(other)}))
-    HeldSpeech(tmp_path / "new.txt", tmp_path, Replay())
-    assert other.exists()
+def test_a_second_session_leaves_the_first_ones_hold_and_status_alone(tmp_path, monkeypatch):
+    sink = Sink(tmp_path / "voice.txt", "voice")
+    voice = HeldSpeech(tmp_path / "voice.txt", tmp_path, Replay(), launch="voice-1")
+    voice.add(0, 50, tone(1, LOUD))
+    voice.poll(sink)
+    other = subprocess.Popen(["sleep", "30"])
+    try:
+        monkeypatch.setattr(held_module.os, "getpid", lambda: other.pid)
+        meeting = HeldSpeech(tmp_path / "meeting.txt", tmp_path, Replay())
+        meeting.close()
+    finally:
+        monkeypatch.undo()
+        other.kill()
+        other.wait()
+    assert status(tmp_path)["launch"] == "voice-1" and status(tmp_path)["seconds"] == pytest.approx(1)
+    assert voice.seconds == pytest.approx(1) and (tmp_path / "voice.held" / "000000.pcm").exists()
+    assert not (tmp_path / "held" / f"{other.pid}.json").exists()
 
 
 @pytest.mark.parametrize("mode", [["--room"], ["--voice"]])
@@ -150,11 +210,11 @@ def test_speech_said_while_paused_is_recovered_at_its_time_then_dropped_and_gone
             if step == 34:
                 cli.main(["resume"])
             if step == 38:
-                seen["held"] = json.loads((tmp_path / "held.json").read_text())
+                seen["held"] = status(tmp_path)
                 seen["files"] = sorted(p.name for p in (tmp_path / "out").iterdir())
                 cli.main(["recover"])
             if step == 45:
-                seen["after"] = json.loads((tmp_path / "held.json").read_text())
+                seen["after"] = status(tmp_path)
             self.index += 1
             clock[0] = self.anchor + self.index / 10
             self.last_audio = clock[0]
@@ -193,8 +253,8 @@ def test_speech_said_while_paused_is_recovered_at_its_time_then_dropped_and_gone
     cli.main(mode + ["--ear", "local", "--pause-for", "none", "--launch", "voice-test", "-o", str(out)])
 
     assert seen["held"]["launch"] == "voice-test" and seen["held"]["seconds"] >= 1
-    assert seen["files"] == sorted(["session.held.jsonl", "session.held.pcm", "session.jsonl",
-                                    "session.log", "session.txt"] + (["session.partial"] if mode == ["--voice"] else []))
+    assert seen["files"] == sorted(["session.held", "session.jsonl", "session.log", "session.txt"]
+                                   + (["session.partial"] if mode == ["--voice"] else []))
     assert len(replay.calls) == 1
     assert seen["after"]["seconds"] == 0 and not seen["after"]["recovering"]
 
@@ -202,8 +262,8 @@ def test_speech_said_while_paused_is_recovered_at_its_time_then_dropped_and_gone
     header = next(i for i, line in enumerate(lines) if line.startswith("# recovered from mute at "))
     at = lambda seconds: datetime.fromtimestamp(100 + seconds)
     assert lines[header + 1:header + 3] == [
-        f"{at(1.0):%H:%M:%S}-{at(1.3):%H:%M:%S} S1   [muted] words 0",
-        f"{at(2.8):%H:%M:%S}-{at(3.1):%H:%M:%S} S1   [muted] words 1"]
+        f"{at(1.0):%H:%M:%S}-{at(1.3):%H:%M:%S} mic  [muted] words 0",
+        f"{at(2.8):%H:%M:%S}-{at(3.1):%H:%M:%S} mic  [muted] words 1"]
     records = [json.loads(line) for line in out.with_suffix(".jsonl").read_text().splitlines()]
     recovered = [r for r in records if "recovered" in r]
     assert [datetime.fromisoformat(r["wall"]).timestamp() for r in recovered] == pytest.approx([101.0, 102.8])
@@ -214,31 +274,194 @@ def test_speech_said_while_paused_is_recovered_at_its_time_then_dropped_and_gone
 
     assert sorted(p.name for p in out.parent.iterdir()) == sorted(
         ["session.jsonl", "session.log", "session.txt"] + (["session.partial"] if mode == ["--voice"] else []))
-    assert not (tmp_path / "held.json").exists() and not (tmp_path / "recover").exists()
+    assert list((tmp_path / "held").iterdir()) == []
 
 
 def test_a_failed_recovery_keeps_the_speech_for_the_next_request(tmp_path):
-    from hark.transcript import Sink
-
     sink = Sink(tmp_path / "s.txt", "test")
     replay = Replay()
     exits = [1, 0]
 
-    def flaky(audio, out):
-        process = replay(audio, out)
+    def flaky(manifest, out):
+        process = replay(manifest, out)
         code = exits.pop(0)
         process.poll = lambda: code
         return process
 
     held = HeldSpeech(tmp_path / "s.txt", tmp_path, flaky)
-    held.add(50, tone(3, LOUD))
-    for _ in range(2):
-        (tmp_path / "recover").touch()
-        held.poll(sink)  # starts the replay
-        held.poll(sink)  # reads its result
+    held.add(0, 50, tone(3, LOUD))
+    recover(held, sink, tmp_path)
+    recover(held, sink, tmp_path)
     assert "recovery from mute failed; 3 s of muted speech still held" in (tmp_path / "s.txt").read_text()
     assert len(replay.calls) == 2 and np.array_equal(replay.calls[0], replay.calls[1])
-    assert held.seconds == 0 and (tmp_path / "s.held.pcm").stat().st_size == 0
-    assert [p.name for p in tmp_path.glob("s.recovering.*")] == []
+    assert held.seconds == 0 and held.spans == []
+    assert sorted(p.name for p in (tmp_path / "s.held").iterdir()) == ["000002.pcm", "index.jsonl"]
+    request(tmp_path).touch()
     held.close()
-    assert sorted(p.name for p in tmp_path.iterdir()) == ["s.jsonl", "s.txt"]
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["held", "s.jsonl", "s.txt"]
+    assert list((tmp_path / "held").iterdir()) == []
+
+
+def test_a_replay_that_writes_nothing_is_stopped_and_the_speech_kept(tmp_path):
+    sink = Sink(tmp_path / "s.txt", "test")
+    killed = []
+    stuck = lambda manifest, out: SimpleNamespace(poll=lambda: None, kill=lambda: killed.append(1), wait=lambda: -9)
+    held = HeldSpeech(tmp_path / "s.txt", tmp_path, stuck)
+    held.add(0, 50, tone(3, LOUD))
+    request(tmp_path).touch()
+    held.poll(sink)
+    request(tmp_path).touch()  # a second request while one runs is dropped
+    held.poll(sink)
+    assert held.job and not request(tmp_path).exists() and status(tmp_path)["recovering"]
+    old = held.job["since"] - held_module.STALL_SEC - 1
+    for path in (tmp_path / "s.held").glob("replay.*"):
+        os.utime(path, (old, old))
+    held.job["since"], held.job["checked"] = old, held.job["checked"] - 2
+    held.poll(sink)
+    assert killed and held.job is None
+    assert "recovery from mute failed; 3 s of muted speech still held" in (tmp_path / "s.txt").read_text()
+    assert held.seconds == pytest.approx(3) and not status(tmp_path)["recovering"]
+
+
+def test_the_oldest_segments_go_past_the_cap(tmp_path, monkeypatch):
+    monkeypatch.setattr(held_module, "SEGMENT_SEC", 1)
+    monkeypatch.setattr(held_module, "CAP_SEC", 2.5)
+    sink = Sink(tmp_path / "s.txt", "test")
+    held = HeldSpeech(tmp_path / "s.txt", tmp_path, Replay())
+    held.add(0, 100, tone(5, LOUD))
+    held.poll(sink)
+    assert held.seconds <= 2.5 and held.spans[0][0] == pytest.approx(103)
+    assert sorted(p.name for p in (tmp_path / "s.held").glob("*.pcm")) == ["000003.pcm", "000004.pcm", "000005.pcm"]
+
+
+def test_a_disk_error_ends_the_hold_and_never_the_caller(tmp_path):
+    class Full:
+        def write(self, data):
+            raise OSError(28, "No space left on device")
+
+        def close(self):
+            raise OSError(28, "No space left on device")
+
+    sink = Sink(tmp_path / "s.txt", "test")
+    held = HeldSpeech(tmp_path / "s.txt", tmp_path, Replay())
+    held.add(0, 50, tone(1, LOUD))
+    held.file = Full()
+    held.add(16000, 51, tone(1, LOUD))
+    held.add(32000, 52, tone(1, LOUD))
+    held.poll(sink)
+    held.close()
+    assert not (tmp_path / "s.held").exists() and list((tmp_path / "held").iterdir()) == []
+
+
+def test_a_route_switch_mid_speech_splits_the_span_and_the_replay_holds_them_apart(tmp_path):
+    sink = Sink(tmp_path / "s.txt", "test")
+    replay = Replay()
+    held = HeldSpeech(tmp_path / "s.txt", tmp_path, replay)
+    held.cut(51.0)
+    held.add(0, 50, tone(2, LOUD))
+    assert [span[0] for span in held.spans] == [50, 51] and held.spans[1][5]
+    recover(held, sink, tmp_path)
+    assert replay.calls[0].size == round((.5 + 1 + GAP_SEC + 1) * SAMPLE_RATE)
+    assert recovered_walls(tmp_path / "s.txt") == pytest.approx([50, 51])
+
+
+# ── Review 1 reproductions ────────────────────────────────────────────────────
+
+def test_jittered_arrival_keeps_one_span_with_its_preroll_and_tail(tmp_path):
+    held = HeldSpeech(tmp_path / "s.txt", tmp_path, Replay())
+    mic = Muted(held, jitter=0.005)
+    mic.say(np.concatenate((tone(.5, QUIET), tone(.3, LOUD), tone(.2, QUIET), tone(.3, LOUD), tone(.5, QUIET))))
+    assert len(held.spans) == 1
+    assert held.spans[0][0] == pytest.approx(1000.2, abs=0.006)
+    assert held.seconds == pytest.approx(1.6)
+
+
+class Pending:
+    """A replay that runs until released."""
+
+    def __init__(self):
+        self.replay, self.done = Replay(), False
+
+    def __call__(self, *args):
+        process = self.replay(*args)
+        process.poll = lambda: 0 if self.done else None
+        return process
+
+
+def test_speech_said_during_a_recovery_is_kept_for_the_next(tmp_path):
+    from hark.transcript import Sink
+
+    sink = Sink(tmp_path / "s.txt", "test")
+    replay = Pending()
+    held = HeldSpeech(tmp_path / "s.txt", tmp_path, replay)
+    mic = Muted(held)
+    mic.say(tone(1, LOUD))
+    request(tmp_path).touch()
+    held.poll(sink)
+    mic.say(tone(5, LOUD))  # still muted, still talking
+    replay.done = True
+    held.poll(sink)
+    assert held.seconds >= 5 and len(replay.replay.calls) == 1
+    assert replay.replay.calls[0].size == round((.5 + 1) * SAMPLE_RATE)
+
+
+def test_an_early_word_maps_to_its_own_span_not_the_one_before(tmp_path):
+    from hark.transcript import Sink
+
+    class Early(Replay):
+        def __call__(self, manifest, out):
+            process = super().__call__(manifest, out)
+            rows = [json.loads(line) for line in out.with_suffix(".jsonl").read_text().splitlines()]
+            rows[1]["start"] -= 0.35  # 50 ms before the span's 300 ms preroll
+            out.with_suffix(".jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows))
+            return process
+
+    sink = Sink(tmp_path / "s.txt", "test")
+    held = HeldSpeech(tmp_path / "s.txt", tmp_path, Early())
+    mic = Muted(held)
+    mic.say(np.concatenate((tone(1, QUIET), tone(.5, LOUD), tone(60, QUIET), tone(.5, LOUD), tone(2, QUIET))))
+    recover(held, sink, tmp_path)
+    assert recovered_walls(tmp_path / "s.txt")[1] == pytest.approx(1000 + 61.5 - 0.3, abs=0.1)
+
+
+def test_short_remarks_minutes_apart_replay_as_separate_utterances(tmp_path):
+    """The real voice track, on the replayed audio, ends one remark before the next begins."""
+    from hark.capture import load_audio
+    from hark.transcript import Sink, flush_tracks, numbered
+    from hark.live_voice import VoiceTrack
+
+    class Recognizer:
+        def __init__(self):
+            self._mel_offset = 0
+
+        def feed(self, samples, final=False):
+            start = self._mel_offset * .01
+            self._mel_offset += len(samples) // 160
+            if samples.size and np.abs(samples).max() > .1:
+                return [SimpleNamespace(speaker="speaker_0",
+                                        tokens=[SimpleNamespace(start=start, end=start + .08, text=" word")])]
+            return []
+
+    def voice_replay(manifest, out):
+        session = Recognizer()
+        asr = SimpleNamespace(preprocessor_config=SimpleNamespace(hop_length=160),
+                              create_speaker_streaming_session=lambda *a, **kw: session)
+        track = VoiceTrack("replay", asr, None, speaker_label=numbered, refiner=lambda s: "a short remark")
+        track.t0 = datetime(2026, 1, 1).astimezone()
+        samples = load_audio(build_replay(manifest))
+        said = []
+        for i in range(0, samples.size, 8000):
+            track.feed(samples[i:i + 8000])
+            said += flush_tracks([track])
+        track.feed(samples[:0], final=True)
+        said += flush_tracks([track], force=True)
+        out.with_suffix(".jsonl").write_text("".join(json.dumps(u.record()) + "\n" for u in said))
+        return finished()
+
+    sink = Sink(tmp_path / "s.txt", "test")
+    held = HeldSpeech(tmp_path / "s.txt", tmp_path, voice_replay)
+    mic = Muted(held)
+    mic.say(np.concatenate((tone(1, QUIET), tone(.5, LOUD), tone(60, QUIET), tone(.5, LOUD), tone(2, QUIET))))
+    recover(held, sink, tmp_path)
+    recovered = [line for line in (tmp_path / "s.jsonl").read_text().splitlines() if "recovered" in line]
+    assert len(recovered) == 2

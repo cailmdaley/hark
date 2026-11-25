@@ -316,6 +316,9 @@ class Sink:
     def recovered(self, utterances, seconds):
         """Words recovered from `seconds` of speech said during a manual pause.
 
+        Each utterance's speaker is its track (`mic`, `phone`), named only when the replay matched
+        an enrolled voice: the live session's slots belong to other speakers.
+
         The text file gets a `# recovered from mute …` line, then each utterance at its
         original time with `[muted]` before its words. JSONL rows carry the utterance under
         `recovered` rather than as a top-level `text`, so a reader of live utterances
@@ -324,9 +327,7 @@ class Sink:
         ends = [u.wall_end.astimezone() for u in utterances]
         said = f"said {utterances[0].wall:%H:%M:%S}–{max(ends):%H:%M:%S}" if utterances else "no words"
         self.comment(f"recovered from mute at {now:%H:%M:%S}: {_duration(seconds)} held, {said}")
-        self.poll_names()
         for u in utterances:
-            u.name = u.name or self.names.get(u.speaker)
             label = u.name or f"{u.speaker:<4}"
             self.txt.write(f"{u.wall:%H:%M:%S}-{u.wall_end:%H:%M:%S} {label} [muted] {u.text}\n")
             record = {"track": u.track, "speaker": u.speaker, "seconds": round(u.end - u.start, 2),
