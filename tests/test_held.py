@@ -465,3 +465,10 @@ def test_short_remarks_minutes_apart_replay_as_separate_utterances(tmp_path):
     recover(held, sink, tmp_path)
     recovered = [line for line in (tmp_path / "s.jsonl").read_text().splitlines() if "recovered" in line]
     assert len(recovered) == 2
+
+
+def test_a_fraction_of_a_second_held_is_published(tmp_path):
+    held = HeldSpeech(tmp_path / "s.txt", tmp_path, Replay())
+    held.add(0, 50, tone(.3, LOUD))
+    held.poll(Sink(tmp_path / "s.txt", "test"))
+    assert status(tmp_path)["seconds"] == pytest.approx(.3)
