@@ -532,13 +532,28 @@ def test_a_large_hold_recovers_in_bounded_replays_as_one_recovery(tmp_path, monk
     assert held.seconds == 0 and not status(tmp_path)["recovering"]
 
 
-@pytest.mark.parametrize("after", [0.2, 0.0])
-def test_a_route_switch_splits_held_speech_at_its_sample(tmp_path, after):
-    held = HeldSpeech(tmp_path / "s.txt", tmp_path, Replay())
-    held.cut(50.05)
-    held.add(0, 50.0, tone(0.1 + after, LOUD))  # the switch falls inside the first frame, the last one held when after = 0
-    assert [span[0] for span in held.spans][:2] == pytest.approx([50.0, 50.05])
-    assert held.spans[0][3] == round(.05 * SAMPLE_RATE)
+def cut_times():
+    """Microsecond switch times across three 100 ms frames from 50.0: random ones, and ones just
+    beside a sample, a frame edge and the last held sample."""
+    rng = np.random.default_rng(7)
+    edges = [50 + k / SAMPLE_RATE + d for k in (1, 799, 800, 1599, 1600, 1601, 3199, 4799)
+             for d in (-1e-6, 0, 1e-6)]
+    return [round(t, 6) for t in [*rng.uniform(50.000001, 50.3, 300), *edges] if 50 < round(t, 6) < 50.3]
+
+
+@pytest.mark.parametrize("seconds", [0.3, 0.1])
+def test_a_route_switch_anywhere_in_held_speech_starts_a_span_at_or_after_it(tmp_path, seconds):
+    for i, at in enumerate(cut_times()):
+        if at > 50 + (round(seconds * SAMPLE_RATE) - 1) / SAMPLE_RATE:
+            continue  # after the last held sample: nothing held follows it
+        held = HeldSpeech(tmp_path / f"s{i}.txt", tmp_path, Replay())
+        held.cut(at)
+        held.add(0, 50.0, tone(seconds, LOUD))
+        starts = [span[0] for span in held.spans]
+        assert len(starts) == 2, at
+        assert starts[1] >= at - 1e-9 and starts[1] - at < 1 / SAMPLE_RATE, at
+        assert held.spans[1][5] and held.samples == round(seconds * SAMPLE_RATE)
+        held.close()
 
 
 def test_speech_held_after_a_short_first_reading_is_published(tmp_path, monkeypatch):
@@ -569,7 +584,7 @@ def test_the_cap_holds_during_a_recovery_without_touching_the_batch_being_replay
     assert held.seconds <= 2.5
     assert held.spans[:len(replaying)] == replaying
     assert all(held._segment(span[1]).exists() for span in replaying)
-    assert "muted speech said before" in (tmp_path / "s.txt").read_text()
+    assert "dropped: over the" in (tmp_path / "s.txt").read_text()
     replay.done = True
     held.poll(sink)
     assert recovered_walls(tmp_path / "s.txt")
@@ -603,3 +618,111 @@ def test_a_status_that_could_not_be_put_in_place_is_gone_after_close(tmp_path, m
     assert (tmp_path / "held" / f"{os.getpid()}.json.tmp").exists()
     held.close()
     assert list((tmp_path / "held").iterdir()) == []
+
+
+def test_a_batch_cut_short_by_an_error_leaves_nothing_behind_for_the_retry(tmp_path, monkeypatch):
+    sink = Sink(tmp_path / "s.txt", "test")
+    reaped = []
+
+    class Half:
+        """A replay that wrote one utterance, then is still running."""
+
+        def __call__(self, manifest, out):
+            Replay()(manifest, out)
+            return SimpleNamespace(poll=lambda: None, kill=lambda: None, wait=lambda: reaped.append(1) or -9)
+
+    held = HeldSpeech(tmp_path / "s.txt", tmp_path, Half())
+    held.add(0, 50, tone(1, LOUD))
+    request(tmp_path).touch()
+    held.poll(sink)
+    refuse = lambda *args: (_ for _ in ()).throw(OSError(28, "No space left on device"))
+    monkeypatch.setattr(held_module.os, "replace", refuse)
+    held.add(16000, 51, tone(.5, LOUD))  # changes what publish writes
+    held.publish_at -= 2
+    held.poll(sink)
+    monkeypatch.undo()
+    assert reaped and held.job is None and held.run is None
+    assert list((tmp_path / "s.held").glob("replay.*")) == []
+    assert held.file is not None  # a failed publish is no failure to hold
+    held.transcribe = Replay()
+    recover(held, sink, tmp_path)
+    assert len(recovered_walls(tmp_path / "s.txt")) == 1
+
+
+def test_a_replay_file_vanishing_mid_check_is_no_error(tmp_path, monkeypatch):
+    sink = Sink(tmp_path / "s.txt", "test")
+    running = lambda manifest, out: SimpleNamespace(poll=lambda: None, kill=lambda: None, wait=lambda: 0)
+    held = HeldSpeech(tmp_path / "s.txt", tmp_path, running)
+    held.add(0, 50, tone(1, LOUD))
+    request(tmp_path).touch()
+    held.poll(sink)
+    gone = tmp_path / "s.held" / "replay.partial.tmp1234"
+    real_glob = type(tmp_path).glob
+    monkeypatch.setattr(type(tmp_path), "glob", lambda self, pattern: [*real_glob(self, pattern), gone]
+                        if pattern == "replay.*" else real_glob(self, pattern))
+    held.job["checked"] -= 2
+    held.poll(sink)
+    monkeypatch.undo()
+    assert held.job and held.run and held.file is not None
+
+
+def test_stopping_mid_recovery_closes_it_with_what_was_already_recovered(tmp_path, monkeypatch):
+    monkeypatch.setattr(held_module, "BATCH_SEC", 10)
+    sink = Sink(tmp_path / "s.txt", "test")
+    replays = []
+
+    def first_finishes(manifest, out):
+        process = Replay()(manifest, out)
+        if replays:
+            process.poll = lambda: None
+        replays.append(1)
+        return process
+
+    held = HeldSpeech(tmp_path / "s.txt", tmp_path, first_finishes)
+    held.add(0, 1000, tone(1, LOUD))
+    held.add(16000 * 100, 1100, tone(1, LOUD))
+    request(tmp_path).touch()
+    for _ in range(3):
+        held.poll(sink)
+    assert len(replays) == 2 and held.job
+    held.close(sink)
+    rows = [json.loads(line) for line in (tmp_path / "s.jsonl").read_text().splitlines()]
+    assert [r["recovery"] for r in rows if "recovery" in r] == [
+        {"utterances": 1, "seconds": 1.0, "from": rows[0]["wall"][:19] + rows[0]["wall"][26:],
+         "to": rows[-1]["recovery"]["to"], "left": 1.0}]
+
+
+def test_a_request_during_a_recovery_that_fails_is_dropped(tmp_path):
+    sink = Sink(tmp_path / "s.txt", "test")
+    calls = []
+
+    def failing(manifest, out):
+        calls.append(1)
+        process = Replay()(manifest, out)
+        process.poll = lambda: 1
+        return process
+
+    held = HeldSpeech(tmp_path / "s.txt", tmp_path, failing)
+    held.add(0, 50, tone(1, LOUD))
+    request(tmp_path).touch()
+    held.poll(sink)
+    request(tmp_path).touch()  # lands before the batch is seen to fail
+    held.poll(sink)
+    held.poll(sink)
+    assert len(calls) == 1 and held.run is None and not request(tmp_path).exists()
+
+
+def test_the_eviction_line_names_the_speech_dropped(tmp_path, monkeypatch):
+    monkeypatch.setattr(held_module, "SEGMENT_SEC", 1)
+    monkeypatch.setattr(held_module, "CAP_SEC", 2.5)
+    sink = Sink(tmp_path / "s.txt", "test")
+    held = HeldSpeech(tmp_path / "s.txt", tmp_path, Pending())
+    held.add(0, 1000, tone(2, LOUD))
+    request(tmp_path).touch()
+    held.poll(sink)  # replaying 1000–1002
+    held.add(32000, 1002, tone(3, LOUD))
+    held.poll(sink)
+    dropped = [line for line in (tmp_path / "s.txt").read_text().splitlines() if "dropped" in line]
+    at = lambda t: datetime.fromtimestamp(t).strftime("%H:%M:%S")
+    assert dropped and all(at(1000) not in line for line in dropped)
+    assert f"said {at(1002)}" in dropped[0]

@@ -5,13 +5,14 @@ samples it zeroes, with their index on the track's timeline and the wall time of
 Only audio around speech is kept, through the idle gate `VoiceTrack` uses (-50 dBFS RMS over
 100 ms frames): 300 ms before a loud frame and one second after the last. A span is a run
 of kept samples contiguous on the track's timeline; its wall-clock start is taken once,
-when it opens, and a route switch (`cut`) ends it at the switch's sample. Spans are
+when it opens, and a route switch (`cut`) ends it: the next span starts at the first
+sample at or after the switch. Spans are
 appended, as s16le 16 kHz mono, to ten-minute segment files in `<stem>.held/` beside the
 transcript, indexed by `<stem>.held/index.jsonl`: one `{"t", "segment", "at"}` row per span,
 `t` its wall-clock start (Unix seconds) and `at` its first sample in that segment.
 
 The hold keeps the newest `CAP_SEC` of held speech: past it, the oldest segment not being
-replayed is dropped, and the transcript says from when. That is the one way held speech
+replayed is dropped, and the transcript says what span of time went. That is the one way held speech
 goes before the recording process stops.
 
 Each session registers in `~/.hark/held/<pid>.json`: `{"pid", "started", "launch",
@@ -26,17 +27,21 @@ silence, or by `GAP_SEC` when they were said that far apart or across a route sw
 remarks said apart never join. Each batch's words go into the transcript as recovered
 (`Sink.recovered`) at their original wall-clock times and its spans are dropped; once
 every batch is done, or one fails or writes nothing for `STALL_SEC`, a single `recovery`
-row closes the recovery. A failed batch keeps its speech, and so does everything after it.
+row closes the recovery, as does stopping the session in the middle of one. A failed
+batch keeps its speech, and so does everything after it; an aborted batch's process is
+reaped and its files removed, so a retry starts clean.
 Speech held during a recovery waits for the next. A replay process exits when the session
 that started it does.
 
-The hold is a by-product, like a saved WAV: an I/O error stops new holding, logged once,
-and never capture; what is already held stays recoverable. The hold ends with the recording
+The hold is a by-product, like a saved WAV: a failure to write held audio stops new
+holding, logged once, and never capture; what is already held stays recoverable, and an
+I/O error in a recovery step ends only that recovery. The hold ends with the recording
 process: stopping deletes it, and a session that died without stopping is deleted by the
 next live session, which tells a reused pid from the original by the process's start time.
 """
 
 import json
+import math
 import os
 import shutil
 import subprocess
@@ -223,20 +228,21 @@ class HeldSpeech:
                 while sum(q[2].size for q in self.quiet) - self.quiet[0][2].size >= PREROLL:
                     self.quiet.pop(0)
 
-    def _write(self, index, t, samples):
+    def _write(self, index, t, samples, cut=False):
+        """Hold `samples`; a route switch among them ends the span at the first sample at or after it."""
         last = self.spans[-1] if self.spans else None
         follows = last is not None and index == last[4] + last[3]
         if follows:
             t = last[0] + last[3] / SAMPLE_RATE  # one span, one clock
-        split = next((round((cut - t) * SAMPLE_RATE) for cut in self.cuts
-                      if 0 < round((cut - t) * SAMPLE_RATE) < samples.size), None)
-        if split is not None:
-            self._write(index, t, samples[:split])
-            self._write(index + split, t + split / SAMPLE_RATE, samples[split:])
-            return
-        cut = bool(self.cuts) and self.cuts[0] <= t
         while self.cuts and self.cuts[0] <= t:
             self.cuts.pop(0)
+            cut = True
+        if self.cuts:
+            split = math.ceil((self.cuts[0] - t) * SAMPLE_RATE)
+            if split < samples.size:
+                self._write(index, t, samples[:split], cut)
+                self.cuts.pop(0)
+                return self._write(index + split, t + split / SAMPLE_RATE, samples[split:], True)
         at = self.file.tell() // 2
         self.file.write(to_pcm16(samples).tobytes())
         self.file.flush()
@@ -274,10 +280,9 @@ class HeldSpeech:
         try:
             self._poll(sink)
         except OSError as error:
-            self._stop(error)
-            if self.job:
-                self.job["process"].kill()
-                self.job = None
+            # Holding goes on: only a failure to write held audio stops it.
+            _say(f"held: a recovery step failed ({error})")
+            self._abort()
             if self.run:
                 self.run["failed"] = True
                 try:
@@ -285,20 +290,40 @@ class HeldSpeech:
                 except OSError:
                     self.run = None
 
+    def _abort(self):
+        """Stop the batch being replayed, reap its process and clear its files, so a retry starts clean."""
+        if self.job:
+            self.job["process"].kill()
+            self.job["process"].wait()
+            self.job = None
+        for path in self.dir.glob("replay.*"):
+            path.unlink(missing_ok=True)
+
+    def _wrote(self):
+        """When the replay last wrote; a file it renames away mid-look counts for nothing."""
+        latest = 0.0
+        for path in self.dir.glob("replay.*"):
+            try:
+                latest = max(latest, path.stat().st_mtime)
+            except FileNotFoundError:
+                pass
+        return latest
+
     def _poll(self, sink):
+        if self.run:
+            self.request.unlink(missing_ok=True)  # one recovery at a time, however it ends
         if self.job:
             code = self.job["process"].poll()
             if code is None and time.monotonic() - self.job["checked"] >= 1:
                 self.job["checked"] = time.monotonic()
-                wrote = max((p.stat().st_mtime for p in self.dir.glob("replay.*")), default=0)
-                if time.time() - max(wrote, self.job["since"]) > STALL_SEC:
-                    self.job["process"].kill()
-                    self.job["process"].wait()
-                    code = f"no output for {STALL_SEC} s"
-            if code is not None:
+                if time.time() - max(self._wrote(), self.job["since"]) > STALL_SEC:
+                    self._abort()
+                    _say(f"held: a replay wrote nothing for {STALL_SEC} s; its muted speech stays held")
+                    self.run["failed"] = True
+                    self._end(sink)
+            elif code is not None:
                 self._finish(sink, code)
         if self.run:
-            self.request.unlink(missing_ok=True)  # one recovery at a time
             if not self.job:
                 self._next(sink)
         elif self.request.exists():
@@ -319,8 +344,9 @@ class HeldSpeech:
                 return
             dropped = [span for span in self.spans if span[1] == closed[0]]
             self._forget({span[6] for span in dropped})
-            since = datetime.fromtimestamp(self.spans[0][0]) if self.spans else datetime.now()
-            sink.comment(f"muted speech said before {since:%H:%M:%S} dropped: over the "
+            first = datetime.fromtimestamp(dropped[0][0])
+            last = datetime.fromtimestamp(dropped[-1][0] + dropped[-1][3] / SAMPLE_RATE)
+            sink.comment(f"muted speech said {first:%H:%M:%S}–{last:%H:%M:%S} dropped: over the "
                          f"{CAP_SEC / 3600:g} h of muted speech a session holds")
 
     def _next(self, sink):
@@ -348,6 +374,8 @@ class HeldSpeech:
         manifest = self.dir / "replay.json"
         seconds = sum(span[3] for span in spans) / SAMPLE_RATE
         try:
+            for path in self.dir.glob("replay.*"):
+                path.unlink(missing_ok=True)
             manifest.write_text(json.dumps({"pieces": pieces}))
             process = self.transcribe(manifest, self.dir / "replay.txt")
         except OSError as error:
@@ -416,15 +444,20 @@ class HeldSpeech:
         os.replace(temporary, self.status)
         self.published, self.publish_at = state, time.monotonic()
 
-    def close(self):
-        """End the hold: stop any recovery and delete the held audio, its status and any request."""
-        if self.job:
+    def close(self, sink=None):
+        """End the hold: stop any recovery, closing it in `sink` with what it already recovered,
+        and delete the held audio, its status and any request."""
+        try:
+            self._abort()
+        except OSError:
+            self.job = None
+        if self.run and sink:
+            self.run["failed"] = True
             try:
-                self.job["process"].kill()
-                self.job["process"].wait()
+                self._end(sink)
             except OSError:
                 pass
-            self.job = None
+        self.run = None
         if self.file:
             try:
                 self.file.close()

@@ -51,7 +51,7 @@ Every other line starts with `# `:
 | `# paused` | Manual microphone pause; the user stepped away |
 | `# recovered from mute at 20:01:12: 4m10s held, said 19:41:12–19:58:03` | `hark recover` transcribed speech said during manual pauses; its utterance lines follow, at the times they were said, labelled by their track (or an enrolled name) with `[muted]` before their words: `19:41:12-19:41:16 mic  [muted] Remind me to email the team tomorrow.` |
 | `# recovery from mute stopped; 250 s of muted speech still held` | A batch of the recovery failed or its replay wrote nothing for two minutes; the speech still held waits for the next `hark recover` |
-| `# muted speech said before 13:02:11 dropped: over the 6 h of muted speech a session holds` | The session held more than six hours of muted speech; the oldest is gone |
+| `# muted speech said 13:02:11–13:12:11 dropped: over the 6 h of muted speech a session holds` | The session held more than six hours of muted speech; the oldest is gone |
 | `# resumed at 16:39:58 after 2m03s` | Manual microphone pause ended |
 | `# system audio paused` / `# system audio resumed at … after …` | Manual system-audio pause and resume |
 | `# gradium lost at 16:37:55` | Cloud recognition is degraded; source capture and WAV recording continue |
@@ -132,7 +132,7 @@ Manual pauses also write the `# paused` and `# resumed at … after …` comment
 A `recovered` row's `wall` is when the words were said, with microseconds and a UTC offset, and its utterance sits under `recovered` rather than at the top level, so a reader of live utterances never takes recovered words for ones said unmuted.
 `speaker` is the track the words were muted on (`mic` or `phone`), never a live slot, since the session's slots may belong to other speakers; `name` appears when the replay matched an enrolled voice.
 `seconds` is the utterance's length.
-The `recovery` row's `wall` is when the recovery ended; it gives the number of utterances, the seconds of held audio transcribed, the span the words were said over (`from` and `to`, absent when no words were found), and, when a batch failed and stopped the recovery, `left`, the seconds of its speech still held.
+The `recovery` row's `wall` is when the recovery ended; it gives the number of utterances, the seconds of held audio transcribed, the span the words were said over (`from` and `to`, absent when no words were found), and, when a batch failed or the session stopped before the recovery finished, `left`, the seconds of its speech still held.
 
 ## Reading it from an agent
 

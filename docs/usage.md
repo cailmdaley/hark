@@ -258,14 +258,14 @@ Mic and phone pauses don't pause system transcription.
 A 300 ms lookback mutes speech that began before the watcher noticed, and a 300 ms tail keeps out the last words after a dictation app stops.
 The ASR and saved WAV receive the same samples, with zeros for every pause.
 
-Speech said while the mic or phone is paused by hand is not lost until the recording process stops, with one exception: a session holds at most the newest six hours of it, and past that the oldest goes first, with a `# muted speech said before … dropped` line in the transcript.
+Speech said while the mic or phone is paused by hand is not lost until the recording process stops, with one exception: a session holds at most the newest six hours of it, and past that the oldest goes first, with a `# muted speech said … dropped` line in the transcript.
 The samples the pause zeroes are held on disk beside the transcript, in `<stem>.held/`, keeping only audio around speech: 300 ms before it and one second after, through the same -50 dBFS gate voice capture uses to skip an idle mic.
 `~/.hark/held/<pid>.json` reports, per live session, how many seconds it holds and since when.
 `hark recover` asks the current session (`--session PATH` names another by its transcript) to transcribe everything it holds at that moment: separate processes replay it in batches of at most twenty minutes, one after another, with the session's ear, so live capture continues meanwhile, and the words join the transcript at the times they were said, marked as recovered ([format](format.md)).
-Remarks said apart in time, or on either side of a voice route switch, are replayed apart and never join one utterance.
+Remarks said apart in time, or on either side of a voice route switch, are replayed apart and never join one utterance; held speech splits at the first sample at or after a switch.
 Each batch's audio is dropped once its words are written; speech said during a recovery waits for the next one, and a second request while one runs does nothing.
 A batch that fails, or whose replay writes nothing for two minutes, stops the recovery and keeps its speech and everything after it.
-Stopping the recording process deletes whatever is still held; a session that died without stopping has its leftovers deleted when the next live session starts.
+Stopping the recording process closes a recovery in progress with the words it has already written, then deletes whatever is still held; a session that died without stopping has its leftovers deleted when the next live session starts.
 Holding is a by-product, like saved audio: a disk error stops new holding, logged once, and never the capture, and what was already held can still be recovered.
 Pauses from a dictation app are not held.
 

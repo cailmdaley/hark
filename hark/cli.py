@@ -699,7 +699,7 @@ def main(argv=None):
                     pause_monitor.stop()
                     _pause_events(pause_monitor, sink)
                 if held:
-                    held.close()
+                    held.close(sink)
                 finish_error = None
                 try:
                     feed_sources(final=True)
