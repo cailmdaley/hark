@@ -793,7 +793,7 @@ def _manual_pause(argv):
 
 
 def _recover(argv):
-    from .held import registry
+    from .held import live, registry
 
     ap = argparse.ArgumentParser(prog="hark recover", description=(
         "Transcribe the speech a live session holds from while its mic was paused by hand. "
@@ -807,7 +807,7 @@ def _recover(argv):
             held = json.loads(status.read_text())
         except (OSError, ValueError):
             continue
-        if Path(held.get("transcript", "")).resolve() == transcript:
+        if Path(held.get("transcript", "")).resolve() == transcript and live(held):
             break
     else:
         print(f"no live session holds muted speech for {transcript}")

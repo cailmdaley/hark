@@ -322,7 +322,7 @@ class Sink:
         The text file gets a `# recovered from mute …` line, then each utterance at its
         original time with `[muted]` before its words. JSONL rows carry the utterance under
         `recovered` rather than as a top-level `text`, so a reader of live utterances
-        never takes one up, and a closing `recovery` row summarizes the batch."""
+        never takes one up. A recovery can write several of these; `recovery` closes it."""
         now = datetime.now().astimezone()
         ends = [u.wall_end.astimezone() for u in utterances]
         said = f"said {utterances[0].wall:%H:%M:%S}–{max(ends):%H:%M:%S}" if utterances else "no words"
@@ -336,11 +336,18 @@ class Sink:
                 record["name"] = u.name
             self.jsonl.write(json.dumps({"wall": u.wall.isoformat(timespec="microseconds"),
                                          "recovered": record}, ensure_ascii=False) + "\n")
+
+    def recovery(self, utterances, seconds, left=None):
+        """The `recovery` row closing one recovery: its utterances, the seconds of held speech it
+        transcribed and the span they were said over, and, when it stopped early, the seconds
+        it left held."""
         summary = {"utterances": len(utterances), "seconds": round(seconds, 1)}
         if utterances:
-            summary["from"] = utterances[0].wall.isoformat(timespec="seconds")
-            summary["to"] = max(ends).isoformat(timespec="seconds")
-        self.jsonl.write(json.dumps({"wall": now.isoformat(timespec="seconds"),
+            summary["from"] = min(u.wall for u in utterances).isoformat(timespec="seconds")
+            summary["to"] = max(u.wall_end.astimezone() for u in utterances).isoformat(timespec="seconds")
+        if left is not None:
+            summary["left"] = round(left, 1)
+        self.jsonl.write(json.dumps({"wall": datetime.now().astimezone().isoformat(timespec="seconds"),
                                      "recovery": summary}) + "\n")
 
     def comment(self, text):

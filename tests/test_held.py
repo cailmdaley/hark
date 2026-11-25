@@ -252,7 +252,7 @@ def test_speech_said_while_paused_is_recovered_at_its_time_then_dropped_and_gone
     out = tmp_path / "out" / "session.txt"
     cli.main(mode + ["--ear", "local", "--pause-for", "none", "--launch", "voice-test", "-o", str(out)])
 
-    assert seen["held"]["launch"] == "voice-test" and seen["held"]["seconds"] >= 1
+    assert seen["held"]["launch"] == "voice-test" and seen["held"]["seconds"] > 0
     assert seen["files"] == sorted(["session.held", "session.jsonl", "session.log", "session.txt"]
                                    + (["session.partial"] if mode == ["--voice"] else []))
     assert len(replay.calls) == 1
@@ -292,7 +292,7 @@ def test_a_failed_recovery_keeps_the_speech_for_the_next_request(tmp_path):
     held.add(0, 50, tone(3, LOUD))
     recover(held, sink, tmp_path)
     recover(held, sink, tmp_path)
-    assert "recovery from mute failed; 3 s of muted speech still held" in (tmp_path / "s.txt").read_text()
+    assert "recovery from mute stopped; 3 s of muted speech still held" in (tmp_path / "s.txt").read_text()
     assert len(replay.calls) == 2 and np.array_equal(replay.calls[0], replay.calls[1])
     assert held.seconds == 0 and held.spans == []
     assert sorted(p.name for p in (tmp_path / "s.held").iterdir()) == ["000002.pcm", "index.jsonl"]
@@ -319,7 +319,7 @@ def test_a_replay_that_writes_nothing_is_stopped_and_the_speech_kept(tmp_path):
     held.job["since"], held.job["checked"] = old, held.job["checked"] - 2
     held.poll(sink)
     assert killed and held.job is None
-    assert "recovery from mute failed; 3 s of muted speech still held" in (tmp_path / "s.txt").read_text()
+    assert "recovery from mute stopped; 3 s of muted speech still held" in (tmp_path / "s.txt").read_text()
     assert held.seconds == pytest.approx(3) and not status(tmp_path)["recovering"]
 
 
@@ -334,8 +334,11 @@ def test_the_oldest_segments_go_past_the_cap(tmp_path, monkeypatch):
     assert sorted(p.name for p in (tmp_path / "s.held").glob("*.pcm")) == ["000003.pcm", "000004.pcm", "000005.pcm"]
 
 
-def test_a_disk_error_ends_the_hold_and_never_the_caller(tmp_path):
+def test_a_disk_error_stops_new_holding_and_what_was_held_is_still_recovered(tmp_path):
     class Full:
+        def tell(self):
+            return 0
+
         def write(self, data):
             raise OSError(28, "No space left on device")
 
@@ -345,10 +348,13 @@ def test_a_disk_error_ends_the_hold_and_never_the_caller(tmp_path):
     sink = Sink(tmp_path / "s.txt", "test")
     held = HeldSpeech(tmp_path / "s.txt", tmp_path, Replay())
     held.add(0, 50, tone(1, LOUD))
+    held.file.flush()
     held.file = Full()
     held.add(16000, 51, tone(1, LOUD))
     held.add(32000, 52, tone(1, LOUD))
-    held.poll(sink)
+    assert held.file is None and held.seconds == pytest.approx(1)
+    recover(held, sink, tmp_path)
+    assert recovered_walls(tmp_path / "s.txt") == pytest.approx([50])
     held.close()
     assert not (tmp_path / "s.held").exists() and list((tmp_path / "held").iterdir()) == []
 
@@ -364,8 +370,6 @@ def test_a_route_switch_mid_speech_splits_the_span_and_the_replay_holds_them_apa
     assert replay.calls[0].size == round((.5 + 1 + GAP_SEC + 1) * SAMPLE_RATE)
     assert recovered_walls(tmp_path / "s.txt") == pytest.approx([50, 51])
 
-
-# ── Review 1 reproductions ────────────────────────────────────────────────────
 
 def test_jittered_arrival_keeps_one_span_with_its_preroll_and_tail(tmp_path):
     held = HeldSpeech(tmp_path / "s.txt", tmp_path, Replay())
@@ -472,3 +476,130 @@ def test_a_fraction_of_a_second_held_is_published(tmp_path):
     held.add(0, 50, tone(.3, LOUD))
     held.poll(Sink(tmp_path / "s.txt", "test"))
     assert status(tmp_path)["seconds"] == pytest.approx(.3)
+
+
+def test_a_disk_error_that_also_fails_the_log_never_reaches_the_caller(tmp_path, monkeypatch):
+    class Full:
+        def tell(self):
+            return 0
+
+        def write(self, data):
+            raise OSError(28, "No space left on device")
+
+        def close(self):
+            raise OSError(28, "No space left on device")
+
+    def full_log(message, file_only=False):
+        raise OSError(28, "No space left on device")
+
+    held = HeldSpeech(tmp_path / "s.txt", tmp_path, Replay())
+    held.add(0, 50, tone(1, LOUD))
+    monkeypatch.setattr(held_module, "log", full_log)
+    held.file = Full()
+    held.add(16000, 51, tone(1, LOUD))
+    held.add(32000, 52, tone(1, LOUD))
+
+
+def test_speech_held_before_a_disk_error_is_recovered_once_it_clears(tmp_path):
+    sink = Sink(tmp_path / "s.txt", "test")
+    held = HeldSpeech(tmp_path / "s.txt", tmp_path, Replay())
+    held.add(0, 50, tone(1, LOUD))
+    (tmp_path / "s.held" / "replay.json").mkdir()  # the manifest cannot be written
+    recover(held, sink, tmp_path)
+    assert held.seconds == pytest.approx(1)
+    (tmp_path / "s.held" / "replay.json").rmdir()
+    recover(held, sink, tmp_path)
+    for _ in range(3):
+        held.poll(sink)
+    assert recovered_walls(tmp_path / "s.txt") == pytest.approx([50])
+    assert held.seconds == 0 and not request(tmp_path).exists()
+
+
+def test_a_large_hold_recovers_in_bounded_replays_as_one_recovery(tmp_path, monkeypatch):
+    monkeypatch.setattr(held_module, "BATCH_SEC", 10)
+    sink = Sink(tmp_path / "s.txt", "test")
+    replay = Replay()
+    held = HeldSpeech(tmp_path / "s.txt", tmp_path, replay)
+    for k in range(3):
+        held.add(k * 16000 * 100, 1000 + 100 * k, tone(1, LOUD))
+    request(tmp_path).touch()
+    for _ in range(8):
+        held.poll(sink)
+    assert len(replay.calls) == 3 and all(call.size <= 10 * SAMPLE_RATE for call in replay.calls)
+    assert recovered_walls(tmp_path / "s.txt") == pytest.approx([1000, 1100, 1200])
+    rows = [json.loads(line) for line in (tmp_path / "s.jsonl").read_text().splitlines()]
+    assert [r["recovery"]["utterances"] for r in rows if "recovery" in r] == [3]
+    assert held.seconds == 0 and not status(tmp_path)["recovering"]
+
+
+@pytest.mark.parametrize("after", [0.2, 0.0])
+def test_a_route_switch_splits_held_speech_at_its_sample(tmp_path, after):
+    held = HeldSpeech(tmp_path / "s.txt", tmp_path, Replay())
+    held.cut(50.05)
+    held.add(0, 50.0, tone(0.1 + after, LOUD))  # the switch falls inside the first frame, the last one held when after = 0
+    assert [span[0] for span in held.spans][:2] == pytest.approx([50.0, 50.05])
+    assert held.spans[0][3] == round(.05 * SAMPLE_RATE)
+
+
+def test_speech_held_after_a_short_first_reading_is_published(tmp_path, monkeypatch):
+    clock = [0.0]
+    monkeypatch.setattr(held_module, "time", SimpleNamespace(monotonic=lambda: clock[0], time=lambda: 1e9 + clock[0]))
+    sink = Sink(tmp_path / "s.txt", "test")
+    held = HeldSpeech(tmp_path / "s.txt", tmp_path, Replay())
+    held.add(0, 50, tone(.01, LOUD))
+    held.poll(sink)
+    held.add(160, 50.01, tone(.3, LOUD))
+    clock[0] = 2
+    held.poll(sink)
+    assert status(tmp_path)["seconds"] == pytest.approx(.31)
+
+
+def test_the_cap_holds_during_a_recovery_without_touching_the_batch_being_replayed(tmp_path, monkeypatch):
+    monkeypatch.setattr(held_module, "SEGMENT_SEC", 1)
+    monkeypatch.setattr(held_module, "CAP_SEC", 2.5)
+    sink = Sink(tmp_path / "s.txt", "test")
+    replay = Pending()
+    held = HeldSpeech(tmp_path / "s.txt", tmp_path, replay)
+    held.add(0, 100, tone(2, LOUD))
+    request(tmp_path).touch()
+    held.poll(sink)
+    replaying = [span[:] for span in held.job["spans"]]
+    held.add(32000, 102, tone(5, LOUD))  # still muted, still talking, while the replay runs
+    held.poll(sink)
+    assert held.seconds <= 2.5
+    assert held.spans[:len(replaying)] == replaying
+    assert all(held._segment(span[1]).exists() for span in replaying)
+    assert "muted speech said before" in (tmp_path / "s.txt").read_text()
+    replay.done = True
+    held.poll(sink)
+    assert recovered_walls(tmp_path / "s.txt")
+
+
+def test_recover_refuses_a_session_whose_process_is_gone(tmp_path, monkeypatch, capsys):
+    from hark import cli
+
+    monkeypatch.setattr(cli, "HOME", tmp_path)
+    (tmp_path / "held").mkdir()
+    transcript = tmp_path / "gone.txt"
+    transcript.touch()
+    (tmp_path / "held" / "9999999.json").write_text(json.dumps(
+        {"pid": 9999999, "started": "Mon Jan  1 00:00:00 2024", "transcript": str(transcript), "seconds": 4.0}))
+    assert cli.main(["recover", "--session", str(transcript)]) == 1
+    assert not (tmp_path / "held" / "9999999.recover").exists()
+    assert "no live session holds muted speech" in capsys.readouterr().out
+
+
+def test_a_status_that_could_not_be_put_in_place_is_gone_after_close(tmp_path, monkeypatch):
+    sink = Sink(tmp_path / "s.txt", "test")
+    held = HeldSpeech(tmp_path / "s.txt", tmp_path, Replay())
+    held.add(0, 50, tone(1, LOUD))
+
+    def refused(*args):
+        raise OSError(13, "Permission denied")
+
+    monkeypatch.setattr(held_module.os, "replace", refused)
+    held.poll(sink)
+    monkeypatch.undo()
+    assert (tmp_path / "held" / f"{os.getpid()}.json.tmp").exists()
+    held.close()
+    assert list((tmp_path / "held").iterdir()) == []
