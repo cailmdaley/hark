@@ -226,6 +226,8 @@ hark resume                                # resume mic intake
 hark pause --status                        # show manual pause state
 hark pause --system                        # mute system audio in the running session
 hark resume --system                       # restore system audio
+hark recover                               # transcribe what was said while the mic was paused
+hark recover --status                      # show how much muted speech the session holds
 hark processes                             # list CoreAudio process objects and input flags
 ```
 
@@ -255,6 +257,14 @@ Manual mic pause also applies to the phone track; automatic app detection applie
 Mic and phone pauses don't pause system transcription.
 A 300 ms lookback mutes speech that began before the watcher noticed, and a 300 ms tail keeps out the last words after a dictation app stops.
 The ASR and saved WAV receive the same samples, with zeros for every pause.
+
+Speech said while the mic or phone is paused by hand is not lost until the session stops.
+The samples the pause zeroes are held on disk beside the transcript (`<stem>.held.pcm`, indexed by `<stem>.held.jsonl`), keeping only audio around speech: 300 ms before it and one second after, through the same -50 dBFS gate voice capture uses to skip an idle mic.
+`~/.hark/held.json` reports how many seconds are held and since when.
+`hark recover` asks the running session to transcribe all of it: a separate `hark --file` process replays the held speech with the session's ear, so live capture continues meanwhile, and the words join the transcript at the times they were said, marked as recovered ([format](format.md)).
+Recovered audio is dropped; speech held during a recovery waits for the next one, and a failed recovery keeps everything.
+Stopping the session deletes whatever is still held, and a session that died without stopping has its leftovers deleted when the next live session starts.
+Pauses from a dictation app are not held.
 
 ## Saved audio
 

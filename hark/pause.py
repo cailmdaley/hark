@@ -4,7 +4,8 @@ A watcher thread polls the manual pause flag and app activity, and turns each pa
 into a wall-clock mute interval. Meetings use CoreAudio's per-process input flag;
 continuous voice uses accepted dictation lifecycle events for Aqua Voice. The mic is held back by
 MIC_LOOKBACK_SEC, so an interval opened at detection still reaches the audio captured
-just before it. Muted samples become zeros, so the track and its WAV keep their timeline.
+just before it. Muted samples become zeros, so the track and its WAV keep their timeline;
+the real samples a manual pause zeroes go to the gate's `hold` (see `hark.held`).
 """
 
 import ctypes as C
@@ -182,6 +183,7 @@ class PauseEvent:
 class MuteInterval:
     start: float
     end: float | None = None
+    manual: bool = False
 
 
 class PauseState:
@@ -197,7 +199,7 @@ class PauseState:
                                          ("automatic", bool(automatic), tuple(automatic))):
             previous = self.active.get(reason)
             if enabled and previous is None:
-                interval = MuteInterval(now - MIC_LOOKBACK_SEC)
+                interval = MuteInterval(now - MIC_LOOKBACK_SEC, manual=reason == "manual")
                 self.intervals.append(interval)
                 self.active[reason] = now, interval, bundles
                 events.append(PauseEvent(reason, True, now, now, bundles))
@@ -210,15 +212,24 @@ class PauseState:
                 self.active[reason] = since, interval, bundles
         return events
 
-    def gate(self, samples, start):
-        """Preserve the PCM grid and timeline, replacing samples in mute intervals with zeros."""
+    def gate(self, samples, start, hold=None):
+        """Preserve the PCM grid and timeline, replacing samples in mute intervals with zeros.
+
+        `hold(wall_start, samples)` receives each run of original samples a manual pause zeroed.
+        """
         out = samples.copy()
+        manual = np.zeros(out.size, bool)
         for interval in self.intervals:
             first = max(0, math.ceil((interval.start - start) * SAMPLE_RATE - 1e-6))
             last = (out.size if interval.end is None else
                     min(out.size, math.ceil((interval.end - start) * SAMPLE_RATE - 1e-6)))
             if first < last:
                 out[first:last] = 0
+                manual[first:last] |= interval.manual
+        if hold and manual.any():
+            edges = np.flatnonzero(np.diff(np.concatenate(([0], manual.view(np.int8), [0]))))
+            for first, last in zip(edges[::2], edges[1::2]):
+                hold(start + first / SAMPLE_RATE, samples[first:last])
         end = start + samples.size / SAMPLE_RATE
         self.intervals = [i for i in self.intervals if i.end is None or i.end > end]
         return out
@@ -226,15 +237,17 @@ class PauseState:
 
 class MicGate:
     """Hold the mic's newest 300 ms, timed by when the device delivered it, then emit every
-    sample once (on the final flush too), zeroed inside mute intervals.
+    sample once (on the final flush too), zeroed inside mute intervals; `hold` receives
+    what a manual pause zeroed.
 
     A sample's wall time comes from `source.heard`, not from its index since `anchor`:
     the device runs up to `LATE_OK` behind the padded timeline (0.1 s from the start,
     0.5-1 s after any padding), which would otherwise shift every mute interval later.
     """
 
-    def __init__(self, source):
+    def __init__(self, source, hold=None):
         self.source = source
+        self.hold = hold
         self.emitted = 0
         self.pending = np.zeros(0, np.float32)
 
@@ -244,7 +257,7 @@ class MicGate:
         start = arrived - (index - self.emitted) / SAMPLE_RATE  # wall time of pending[0]
         ready = math.floor((now - MIC_LOOKBACK_SEC - start) * SAMPLE_RATE + 1e-6)
         count = self.pending.size if final else min(self.pending.size, max(0, ready))
-        out = state.gate(self.pending[:count], start)
+        out = state.gate(self.pending[:count], start, self.hold)
         self.pending = self.pending[count:]
         self.emitted += count
         return out

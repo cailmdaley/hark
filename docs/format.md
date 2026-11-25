@@ -49,6 +49,8 @@ Every other line starts with `# `:
 | `# phone lost at 10:02:13 — no signal from the device; nothing from the phone is being transcribed` | The phone disconnected (screen locked, tab closed, network gone) |
 | `# system audio back at 16:52:10 after 14m15s lost` | The source recovered |
 | `# paused` | Manual microphone pause; the user stepped away |
+| `# recovered from mute at 20:01:12: 4m10s held, said 19:41:12–19:58:03` | `hark recover` transcribed speech said during manual pauses; its utterance lines follow, at the times they were said, with `[muted]` before their words: `19:41:12-19:41:16 S1   [muted] Remind me to email the team tomorrow.` |
+| `# recovery from mute failed; 250 s of muted speech still held` | The recovery's replay failed; the held speech waits for the next `hark recover` |
 | `# resumed at 16:39:58 after 2m03s` | Manual microphone pause ended |
 | `# system audio paused` / `# system audio resumed at … after …` | Manual system-audio pause and resume |
 | `# gradium lost at 16:37:55` | Cloud recognition is degraded; source capture and WAV recording continue |
@@ -62,7 +64,7 @@ Every other line starts with `# `:
 One JSON object per line. Every record has `wall`, an ISO-8601 local timestamp.
 For utterances from a voice run, under `--voice` or `--external-ear`, it includes microseconds and a UTC offset and denotes the spoken start, not the time the line was appended.
 Other records and local meeting captures use timestamps to the second without an offset, so one file can hold both forms.
-There are four kinds.
+There are five kinds.
 
 **Utterance**
 
@@ -117,6 +119,18 @@ The muted audio extends 300 ms before `since` and, for automatic pauses, 300 ms 
 `bundles` lists the matching bundle IDs for automatic pauses and is empty for a manual pause.
 Automatic pauses have no `.txt` line; the JSONL event and session log record them.
 Manual pauses also write the `# paused` and `# resumed at … after …` comments shown above.
+
+**Recovered from mute**
+
+```json
+{"wall": "2026-09-24T19:41:12.402113+02:00", "recovered": {"track": "mic", "speaker": "S1", "seconds": 4.2, "text": "Remind me to email the team tomorrow."}}
+{"wall": "2026-09-24T19:58:40+02:00", "recovery": {"utterances": 1, "seconds": 9.5, "from": "2026-09-24T19:41:12+02:00", "to": "2026-09-24T19:41:16+02:00"}}
+```
+
+`hark recover` transcribes speech said during a manual pause and appends it as `recovered` rows, one per utterance, then one `recovery` row for the batch.
+A `recovered` row's `wall` is when the words were said, with microseconds and a UTC offset, and its utterance sits under `recovered` rather than at the top level, so a reader of live utterances never takes recovered words for ones said unmuted.
+`seconds` is the utterance's length; `name` appears when the slot is named.
+The `recovery` row's `wall` is when the batch was written; it gives the number of utterances, the seconds of held audio transcribed, and the span the words were said over (`from` and `to`, absent when no words were found).
 
 ## Reading it from an agent
 

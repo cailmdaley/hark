@@ -313,6 +313,35 @@ class Sink:
         self.jsonl.write(json.dumps({"wall": at.isoformat(timespec="seconds"),
                                      "pause": record}, ensure_ascii=False) + "\n")
 
+    def recovered(self, utterances, seconds):
+        """Words recovered from `seconds` of speech said during a manual pause.
+
+        The text file gets a `# recovered from mute …` line, then each utterance at its
+        original time with `[muted]` before its words. JSONL rows carry the utterance under
+        `recovered` rather than as a top-level `text`, so a reader of live utterances
+        never takes one up, and a closing `recovery` row summarizes the batch."""
+        now = datetime.now().astimezone()
+        ends = [u.wall_end.astimezone() for u in utterances]
+        said = f"said {utterances[0].wall:%H:%M:%S}–{max(ends):%H:%M:%S}" if utterances else "no words"
+        self.comment(f"recovered from mute at {now:%H:%M:%S}: {_duration(seconds)} held, {said}")
+        self.poll_names()
+        for u in utterances:
+            u.name = u.name or self.names.get(u.speaker)
+            label = u.name or f"{u.speaker:<4}"
+            self.txt.write(f"{u.wall:%H:%M:%S}-{u.wall_end:%H:%M:%S} {label} [muted] {u.text}\n")
+            record = {"track": u.track, "speaker": u.speaker, "seconds": round(u.end - u.start, 2),
+                      "text": u.text}
+            if u.name:
+                record["name"] = u.name
+            self.jsonl.write(json.dumps({"wall": u.wall.isoformat(timespec="microseconds"),
+                                         "recovered": record}, ensure_ascii=False) + "\n")
+        summary = {"utterances": len(utterances), "seconds": round(seconds, 1)}
+        if utterances:
+            summary["from"] = utterances[0].wall.isoformat(timespec="seconds")
+            summary["to"] = max(ends).isoformat(timespec="seconds")
+        self.jsonl.write(json.dumps({"wall": now.isoformat(timespec="seconds"),
+                                     "recovery": summary}) + "\n")
+
     def comment(self, text):
         self.txt.seek(0, 2)
         self.txt.write(f"# {text}\n")

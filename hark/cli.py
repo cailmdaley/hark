@@ -10,6 +10,7 @@
     hark mirror --resume [--follow] LOCAL HOST:PATH
                                             finish (or keep following) a mirror that didn't complete
     hark pause [--status] | hark resume     mute the live session's mic, and unmute it
+    hark recover [--status]                 transcribe the speech said while the mic was paused
     hark processes                          list CoreAudio processes and their input flags
 
 Live capture keeps no audio by default; --keep-audio saves each track beside the
@@ -24,6 +25,8 @@ hark's own log, timestamped, with a heartbeat per live source each minute.
 A live source missing samples for 90 s gets a `# … lost at …` line.
 Digital silence is valid device audio and doesn't mark a source lost.
 The mic is muted while a dictation app records (--pause-for, default aquavoice,aqua-voice).
+Speech said while the mic is paused by hand is held on disk (<stem>.held.pcm) until
+`hark recover` transcribes it into the transcript or the session stops.
 """
 
 import argparse
@@ -41,6 +44,7 @@ from pathlib import Path
 from .capture import (AUDIOTEE, SAMPLE_RATE, FileSource, LevelMeter, MicSource, PhoneSource, SystemSource, WavRecorder,
                       load_audio, log, log_to)
 from .health import QuietWatch
+from .held import HeldSpeech, transcribe_file
 from .masking import MaskPolicy
 from .mirror import TranscriptMirror
 from .pause import (DEFAULT_PAUSE_FOR, CoreAudioProcesses, ManualPause, MicGate, PauseMonitor,
@@ -230,6 +234,8 @@ def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv and argv[0] in {"pause", "resume"}:
         return _manual_pause(argv)
+    if argv and argv[0] == "recover":
+        return _recover(argv)
     if argv and argv[0] == "processes":
         ap = argparse.ArgumentParser(prog="hark processes", description="List CoreAudio process objects")
         ap.parse_args(argv[1:])
@@ -390,6 +396,7 @@ def main(argv=None):
 
         deduper = EchoDeduper(report=log)
     pause_monitor = None
+    held = None
     partial = None
     mirror_complete = True
     tracks_by_name = {}
@@ -595,6 +602,8 @@ def main(argv=None):
                                              voice=args.voice)
                 pause_monitor.start()
                 _pause_events(pause_monitor, sink)
+                held = HeldSpeech(out, HOME, transcribe_file(args.ear, refiner is not None, args.lang),
+                                  launch=args.launch, track="phone" if args.phone else "mic")
             capture_started = time.monotonic()
             for src, track in tracks:
                 if stop.is_set():
@@ -606,7 +615,7 @@ def main(argv=None):
                     level = LevelMeter(src, HOME / "level.json").start()
                 started_tracks.append((src, track))
                 if pause_monitor and src.name in {"mic", "phone"}:
-                    mic_gates[src] = MicGate(src)
+                    mic_gates[src] = MicGate(src, hold=held.add)
                 elif pause_monitor and src.name == "system":
                     system_gates[src] = MicGate(src)
                 track.t0 = (datetime.combine(now.date(), datetime.min.time()) if args.file
@@ -642,6 +651,8 @@ def main(argv=None):
                         ear_beat = time.monotonic() + 1
                 if pause_monitor:
                     _pause_events(pause_monitor, sink)
+                if held:
+                    held.poll(sink)
                 if run_quiet:
                     gap = run_quiet.read()
                     for track in all_tracks:
@@ -684,6 +695,8 @@ def main(argv=None):
                 if pause_monitor:
                     pause_monitor.stop()
                     _pause_events(pause_monitor, sink)
+                if held:
+                    held.close()
                 finish_error = None
                 try:
                     feed_sources(final=True)
@@ -752,6 +765,8 @@ def main(argv=None):
     finally:
         if partial:
             partial.write("")
+        if held:
+            held.close()
         if pause_monitor:
             pause_monitor.stop()
         if watcher:
@@ -771,6 +786,27 @@ def _manual_pause(argv):
         state.set(command == "pause")
     track = "system audio" if args.system else "mic"
     print(f"{track} manual pause: " + ("paused" if state.read() else "resumed"))
+    return 0
+
+
+def _recover(argv):
+    ap = argparse.ArgumentParser(prog="hark recover", description=(
+        "Transcribe the speech the live session holds from while its mic was paused by hand. "
+        "The words join the transcript as recovered, at the times they were said."))
+    ap.add_argument("--status", action="store_true", help="only show what the live session holds")
+    args = ap.parse_args(argv[1:])
+    try:
+        held = json.loads((HOME / "held.json").read_text())
+    except (OSError, ValueError):
+        held = None
+    if held is None:
+        print("no live session is holding muted speech")
+        return 0 if args.status else 1
+    if not args.status:
+        (HOME / "recover").touch()
+    state = ("recovering" if held.get("recovering") else
+             "recovery requested" if (HOME / "recover").exists() else "held")
+    print(f"{held.get('seconds', 0):.0f} s of muted speech: {state}")
     return 0
 
 
